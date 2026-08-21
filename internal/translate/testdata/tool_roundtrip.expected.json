@@ -1,0 +1,23 @@
+{
+  "model": "claude-real",
+  "max_tokens": 1024,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "weather in Paris and Tokyo?"}]},
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "Checking both cities."},
+        {"type": "tool_use", "id": "call_1", "name": "get_weather", "input": {"city": "Paris"}},
+        {"type": "tool_use", "id": "call_2", "name": "get_weather", "input": {"city": "Tokyo"}}
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {"type": "tool_result", "tool_use_id": "call_1", "content": "18C sunny"},
+        {"type": "tool_result", "tool_use_id": "call_2", "content": "24C rain"}
+      ]
+    },
+    {"role": "user", "content": [{"type": "text", "text": "thanks, summarize"}]}
+  ]
+}

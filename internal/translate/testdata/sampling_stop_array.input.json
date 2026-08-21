@@ -1,0 +1,6 @@
+{
+  "model": "gpt-proxy",
+  "messages": [{"role": "user", "content": "hi"}],
+  "temperature": 0,
+  "stop": ["END", "STOP"]
+}

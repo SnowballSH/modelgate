@@ -1,0 +1,10 @@
+{
+  "model": "gpt-proxy",
+  "messages": [
+    {"role": "system", "content": "You are helpful."},
+    {"role": "system", "content": [{"type": "text", "text": "Be brief."}]},
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hi! How can I help?"},
+    {"role": "user", "content": [{"type": "text", "text": "Tell me"}, {"type": "text", "text": " a joke"}]}
+  ]
+}

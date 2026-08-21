@@ -1,0 +1,19 @@
+{
+  "model": "claude-real",
+  "max_tokens": 1024,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "weather?"}]}
+  ],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the weather",
+      "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}
+    },
+    {
+      "name": "no_schema",
+      "input_schema": {"type": "object"}
+    }
+  ],
+  "tool_choice": {"type": "auto"}
+}

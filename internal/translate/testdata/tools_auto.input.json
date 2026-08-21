@@ -1,0 +1,19 @@
+{
+  "model": "gpt-proxy",
+  "messages": [{"role": "user", "content": "weather?"}],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get the weather",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+      }
+    },
+    {
+      "type": "function",
+      "function": {"name": "no_schema"}
+    }
+  ],
+  "tool_choice": "auto"
+}

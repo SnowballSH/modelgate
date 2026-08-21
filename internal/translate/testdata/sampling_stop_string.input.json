@@ -1,0 +1,9 @@
+{
+  "model": "gpt-proxy",
+  "messages": [{"role": "user", "content": "hi"}],
+  "max_tokens": 256,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "stop": "END",
+  "stream": true
+}

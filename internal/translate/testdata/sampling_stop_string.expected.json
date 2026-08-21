@@ -1,0 +1,11 @@
+{
+  "model": "claude-real",
+  "max_tokens": 256,
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "stop_sequences": ["END"],
+  "stream": true,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+  ]
+}
