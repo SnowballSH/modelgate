@@ -89,6 +89,11 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.Method == http.MethodPost && crossSite(r) {
+		writeErrorStatus(w, http.StatusForbidden, "invalid_request_error", "cross_site_request", "cross-site requests are rejected")
+		return
+	}
+
 	path := r.URL.Path
 	switch {
 	case r.Method == http.MethodGet && path == "/api/keys":
@@ -127,6 +132,21 @@ type createKeyRequest struct {
 	Models    []string `json:"models"`
 	QuotaUSD  *float64 `json:"quota_usd"`
 	ExpiresAt *string  `json:"expires_at"`
+}
+
+// crossSite rejects browser-initiated cross-origin mutations: the trusted
+// proxy in front of this listener typically authenticates with a session
+// cookie, which a hostile page could otherwise ride.
+func crossSite(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+	default:
+		return true
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "application/json") {
+		return true
+	}
+	return false
 }
 
 func (h *AdminHandler) createKey(w http.ResponseWriter, r *http.Request, identity string) {

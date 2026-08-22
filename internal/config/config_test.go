@@ -26,7 +26,6 @@ func TestLoadMissingRequired(t *testing.T) {
 		"PUBLIC_ADDR",
 		"ADMIN_ADDR",
 		"DATA_DIR",
-		"ANTHROPIC_API_KEY_FILE",
 		"MODELS_CONFIG_FILE",
 		"BUDGET_MONTHLY_USD",
 	}

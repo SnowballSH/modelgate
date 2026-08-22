@@ -593,3 +593,33 @@ func TestProviderBreakersAreIndependent(t *testing.T) {
 		t.Fatalf("anthropic request blocked by the openai breaker: status %d, body %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestOpenAIStreamAbortBooksEstimatedUsage(t *testing.T) {
+	truncated := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5-2026-01-01\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"twelve chars\"},\"finish_reason\":null}]}\n\n")
+	}
+	env := newDualEnv(t, truncated, fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	doDual(env, auth, `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 3 * 10.0 / 1e6
+	if math.Abs(spend-want) > 1e-12 {
+		t.Fatalf("aborted openai stream spend = %v, want estimate %v (12 chars -> 3 tokens)", spend, want)
+	}
+}
+
+func TestOpenAIDefaultCompletionCapApplied(t *testing.T) {
+	env := newDualEnv(t, openaiChatResponse(), fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+	doDual(env, auth, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
+	seen := *env.openaiSeen
+	if len(seen) != 1 || seen[0].MaxCompletionTokens == nil || *seen[0].MaxCompletionTokens != 4096 {
+		t.Fatalf("upstream request = %+v; want max_completion_tokens defaulted to 4096", seen)
+	}
+}

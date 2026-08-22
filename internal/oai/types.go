@@ -5,17 +5,27 @@ package oai
 import "encoding/json"
 
 type ChatRequest struct {
-	Model         string          `json:"model"`
-	Messages      []Message       `json:"messages"`
-	MaxTokens     *int            `json:"max_tokens,omitempty"`
-	Temperature   *float64        `json:"temperature,omitempty"`
-	TopP          *float64        `json:"top_p,omitempty"`
-	Stop          json.RawMessage `json:"stop,omitempty"`
-	Stream        bool            `json:"stream,omitempty"`
-	StreamOptions *StreamOptions  `json:"stream_options,omitempty"`
-	Tools         []Tool          `json:"tools,omitempty"`
-	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
-	User          string          `json:"user,omitempty"`
+	Model               string          `json:"model"`
+	Messages            []Message       `json:"messages"`
+	MaxTokens           *int            `json:"max_tokens,omitempty"`
+	MaxCompletionTokens *int            `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	FrequencyPenalty    *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64        `json:"presence_penalty,omitempty"`
+	Seed                *int64          `json:"seed,omitempty"`
+	N                   *int            `json:"n,omitempty"`
+	Logprobs            *bool           `json:"logprobs,omitempty"`
+	TopLogprobs         *int            `json:"top_logprobs,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
+	Stop                json.RawMessage `json:"stop,omitempty"`
+	Stream              bool            `json:"stream,omitempty"`
+	StreamOptions       *StreamOptions  `json:"stream_options,omitempty"`
+	Tools               []Tool          `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	User                string          `json:"user,omitempty"`
 }
 
 // Message is a request message. Content is either a JSON string or an
@@ -60,12 +70,13 @@ type FunctionCall struct {
 }
 
 type ChatResponse struct {
-	ID      string   `json:"id"`
-	Object  string   `json:"object"`
-	Created int64    `json:"created"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+	ID                string   `json:"id"`
+	Object            string   `json:"object"`
+	Created           int64    `json:"created"`
+	Model             string   `json:"model"`
+	SystemFingerprint string   `json:"system_fingerprint,omitempty"`
+	Choices           []Choice `json:"choices"`
+	Usage             Usage    `json:"usage"`
 }
 
 type Choice struct {

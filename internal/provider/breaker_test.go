@@ -22,9 +22,19 @@ func TestBreakerOpensAtThreshold(t *testing.T) {
 	if !b.Allow() {
 		t.Fatal("breaker opened before threshold")
 	}
-	b.Record(ErrTimeout)
+	b.Record(ErrUnavailable)
 	if b.Allow() {
 		t.Fatal("breaker did not open at threshold")
+	}
+}
+
+func TestBreakerIgnoresTimeoutsAndClientAborts(t *testing.T) {
+	b, _ := newTestBreaker(1, time.Minute)
+	b.Record(ErrTimeout)
+	b.Record(ErrClientAborted)
+	b.Record(ErrInvalidRequest)
+	if !b.Allow() {
+		t.Fatal("non-circuit errors opened the breaker")
 	}
 }
 

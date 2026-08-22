@@ -50,9 +50,12 @@ func (b *Breaker) Record(err error) {
 	}
 }
 
+// isProviderFailure decides what may open the circuit. Timeouts are
+// excluded: they are usually the gateway's own request deadline expiring
+// under a legitimately long stream, and a genuinely hung provider also
+// produces transport errors that do count.
 func isProviderFailure(err error) bool {
 	return errors.Is(err, ErrAuth) ||
 		errors.Is(err, ErrRateLimited) ||
-		errors.Is(err, ErrUnavailable) ||
-		errors.Is(err, ErrTimeout)
+		errors.Is(err, ErrUnavailable)
 }

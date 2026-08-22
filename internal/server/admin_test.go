@@ -255,3 +255,35 @@ func TestAdminPublicFullFlow(t *testing.T) {
 		t.Errorf("chat after revoke: status %d code %s", rec.Code, decodeErrorCode(t, rec))
 	}
 }
+
+func TestAdminRejectsCrossSiteMutations(t *testing.T) {
+	env := newAdminEnv(t)
+	cases := []struct{ name, contentType, secFetchSite string }{
+		{"cross-site fetch", "application/json", "cross-site"},
+		{"same-site subdomain", "application/json", "same-site"},
+		{"form post", "text/plain", ""},
+	}
+	for _, tc := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/api/keys/abc/revoke", nil)
+		req.Header.Set("Remote-User", "admin")
+		req.Header.Set("Content-Type", tc.contentType)
+		if tc.secFetchSite != "" {
+			req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
+		}
+		rec := httptest.NewRecorder()
+		env.handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s: status = %d, want 403", tc.name, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{"label":"ok"}`))
+	req.Header.Set("Remote-User", "admin")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("same-origin JSON create blocked: %d %s", rec.Code, rec.Body.String())
+	}
+}

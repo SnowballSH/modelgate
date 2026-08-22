@@ -21,10 +21,23 @@ import (
 )
 
 const (
-	breakerThreshold = 5
-	breakerCooldown  = 30 * time.Second
-	drainTimeout     = 30 * time.Second
+	breakerThreshold  = 5
+	breakerCooldown   = 30 * time.Second
+	drainTimeout      = 30 * time.Second
+	readHeaderTimeout = 10 * time.Second
+	idleTimeout       = 2 * time.Minute
 )
+
+// httpServer applies the listener hardening every surface needs. Write
+// timeouts stay unset: the public listener streams SSE for up to the
+// request deadline.
+func httpServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+	}
+}
 
 type Server struct {
 	store    *store.Store
@@ -108,12 +121,12 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	guards := NewGuards(st, acct, table, cfg.RateLimitPerKeyRPM, cfg.MaxConcurrentRequests, cfg.MaxBodyBytes, time.Now)
 
 	s := &Server{store: st, sentinel: metrics}
-	s.public = &http.Server{Handler: NewPublicHandler(
+	s.public = httpServer(NewPublicHandler(
 		guards, table, acct, st, up, metrics,
-		cfg.DefaultMaxTokens, cfg.MaxBodyBytes, cfg.RequestDeadline, time.Now)}
-	s.admin = &http.Server{Handler: NewAdminHandler(
+		cfg.DefaultMaxTokens, cfg.MaxBodyBytes, cfg.RequestDeadline, time.Now))
+	s.admin = httpServer(NewAdminHandler(
 		st, acct, table, metrics, cfg.AdminIdentityHeader,
-		cfg.BudgetMonthlyUSD, time.Now, rand.Reader, static)}
+		cfg.BudgetMonthlyUSD, time.Now, rand.Reader, static))
 
 	if s.pubLn, err = net.Listen("tcp", cfg.PublicAddr); err != nil {
 		s.closeAll()
@@ -130,7 +143,7 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
 		mux.Handle("/ready", NewReadyHandler(st, keyFiles...))
-		s.metrics = &http.Server{Handler: mux}
+		s.metrics = httpServer(mux)
 		if s.metLn, err = net.Listen("tcp", cfg.MetricsAddr); err != nil {
 			s.closeAll()
 			return nil, fmt.Errorf("startup: METRICS_ADDR: %w", err)

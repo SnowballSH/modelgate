@@ -49,7 +49,6 @@ func Load(getenv func(string) string) (Config, error) {
 		{"PUBLIC_ADDR", cfg.PublicAddr},
 		{"ADMIN_ADDR", cfg.AdminAddr},
 		{"DATA_DIR", cfg.DataDir},
-		{"ANTHROPIC_API_KEY_FILE", cfg.AnthropicAPIKeyFile},
 		{"MODELS_CONFIG_FILE", cfg.ModelsConfigFile},
 		{"BUDGET_MONTHLY_USD", getenv("BUDGET_MONTHLY_USD")},
 	}

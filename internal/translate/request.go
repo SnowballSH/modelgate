@@ -16,6 +16,23 @@ import (
 var defaultInputSchema = json.RawMessage(`{"type":"object"}`)
 
 func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (anthro.MessagesRequest, error) {
+	if req.ResponseFormat != nil {
+		return anthro.MessagesRequest{}, errors.New("response_format is not supported for anthropic models")
+	}
+	if req.N != nil && *req.N != 1 {
+		return anthro.MessagesRequest{}, errors.New("n other than 1 is not supported for anthropic models")
+	}
+	for name, set := range map[string]bool{
+		"frequency_penalty": req.FrequencyPenalty != nil,
+		"presence_penalty":  req.PresencePenalty != nil,
+		"seed":              req.Seed != nil,
+		"logprobs":          req.Logprobs != nil && *req.Logprobs,
+		"reasoning_effort":  req.ReasoningEffort != "",
+	} {
+		if set {
+			return anthro.MessagesRequest{}, fmt.Errorf("%s is not supported for anthropic models", name)
+		}
+	}
 	out := anthro.MessagesRequest{
 		Model:       providerModel,
 		MaxTokens:   defaultMaxTokens,

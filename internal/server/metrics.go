@@ -19,7 +19,7 @@ type Metrics struct {
 	monthSpend      prometheus.Gauge
 	budget          prometheus.Gauge
 	providerErrors  *prometheus.CounterVec
-	breakerOpen     prometheus.Gauge
+	breakerOpen     *prometheus.GaugeVec
 	inFlight        prometheus.Gauge
 	keyCount        prometheus.Gauge
 }
@@ -52,10 +52,10 @@ func NewMetrics(budgetUSD float64) *Metrics {
 			Name: "modelgate_provider_errors_total",
 			Help: "Upstream provider errors by kind.",
 		}, []string{"kind"}),
-		breakerOpen: prometheus.NewGauge(prometheus.GaugeOpts{
+		breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "modelgate_breaker_open",
 			Help: "Whether the provider circuit breaker is open.",
-		}),
+		}, []string{"provider"}),
 		inFlight: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "modelgate_in_flight",
 			Help: "Provider calls currently in flight.",
@@ -97,12 +97,12 @@ func (m *Metrics) ProviderError(kind string) {
 	m.providerErrors.WithLabelValues(kind).Inc()
 }
 
-func (m *Metrics) SetBreakerOpen(open bool) {
+func (m *Metrics) SetBreakerOpen(providerName string, open bool) {
+	v := 0.0
 	if open {
-		m.breakerOpen.Set(1)
-	} else {
-		m.breakerOpen.Set(0)
+		v = 1
 	}
+	m.breakerOpen.WithLabelValues(providerName).Set(v)
 }
 
 func (m *Metrics) IncInFlight() { m.inFlight.Inc() }

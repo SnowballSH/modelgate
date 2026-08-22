@@ -165,11 +165,11 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	breaker := h.up.breakerFor(adm.Model.Provider)
 	if !breaker.Allow() {
-		h.metrics.SetBreakerOpen(true)
+		h.metrics.SetBreakerOpen(adm.Model.Provider, true)
 		fail(CodeProviderUnavailable, "provider circuit open")
 		return
 	}
-	h.metrics.SetBreakerOpen(false)
+	h.metrics.SetBreakerOpen(adm.Model.Provider, false)
 
 	ctx, cancel := context.WithTimeout(r.Context(), h.requestDeadline)
 	defer cancel()
@@ -217,6 +217,10 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 func (h *PublicHandler) chatOpenAI(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string), fail func(code, message string)) {
 	up := req
 	up.Model = adm.Model.ProviderModel
+	if up.MaxTokens == nil && up.MaxCompletionTokens == nil {
+		cap := h.defaultMaxTokens
+		up.MaxCompletionTokens = &cap
+	}
 
 	if req.Stream {
 		h.streamOpenAI(ctx, w, r, req, up, adm, breaker, observe)
@@ -251,6 +255,7 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter,
 	clientWantsUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 
 	var usage oai.Usage
+	var contentChars int
 	h.metrics.IncInFlight()
 	err := h.up.OpenAI.ChatStream(ctx, up, func(chunk oai.ChatChunk) error {
 		if chunk.Usage != nil {
@@ -259,14 +264,30 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter,
 				return nil
 			}
 		}
+		for _, c := range chunk.Choices {
+			contentChars += len(c.Delta.Content)
+		}
 		chunk.Model = req.Model
-		return sw.chunk(chunk)
+		if err := sw.chunk(chunk); err != nil {
+			return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
+		}
+		return nil
 	})
 	h.metrics.DecInFlight()
 	breaker.Record(err)
 
+	// OpenAI reports usage only in the stream's final chunk, so an aborted
+	// stream would otherwise bill nothing while the provider bills
+	// everything generated. Booking a character-count estimate keeps the
+	// quota and budget honest; the log marks it as an estimate.
 	defer func() {
-		if u := storeUsageFromOAI(usage); u.InputTokens+u.OutputTokens+u.CacheReadTokens > 0 {
+		u := storeUsageFromOAI(usage)
+		if u.InputTokens+u.OutputTokens+u.CacheReadTokens == 0 && contentChars > 0 {
+			u = store.Usage{OutputTokens: int64((contentChars + 3) / 4)}
+			slog.Warn("stream ended before usage arrived; booking estimated output tokens",
+				"key_id", adm.Key.ID, "model", req.Model, "estimated_output_tokens", u.OutputTokens)
+		}
+		if u.InputTokens+u.OutputTokens+u.CacheReadTokens > 0 {
 			h.recordUsage(r.Context(), adm, req.Model, u)
 		}
 	}()
@@ -285,10 +306,13 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter,
 	observe("success")
 }
 
+// storeUsageFromOAI clamps the cached count into [0, PromptTokens]: a
+// nonconforming upstream must never produce negative input tokens, which
+// would corrupt spend accounting and panic the token counters.
 func storeUsageFromOAI(u oai.Usage) store.Usage {
 	var cached int64
 	if u.PromptTokensDetails != nil {
-		cached = u.PromptTokensDetails.CachedTokens
+		cached = min(max(u.PromptTokensDetails.CachedTokens, 0), u.PromptTokens)
 	}
 	return store.Usage{
 		InputTokens:     u.PromptTokens - cached,
@@ -310,7 +334,7 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 		}
 		for _, chunk := range chunks {
 			if err := sw.chunk(chunk); err != nil {
-				return err
+				return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
 			}
 		}
 		return nil
