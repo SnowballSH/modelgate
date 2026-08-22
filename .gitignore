@@ -1,6 +1,5 @@
 /modelgate
 /webui/node_modules/
-/webui/dist/
 *.db
 *.db-wal
 *.db-shm
