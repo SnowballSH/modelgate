@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -95,7 +96,7 @@ func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes i
 	client := provider.NewClient(upstream.URL, "test-upstream-key", upstream.Client())
 	breaker := provider.NewBreaker(100, time.Minute, nowFn)
 	m := NewMetrics(100)
-	handler := NewPublicHandler(guards, table, acct, s, client, breaker, m, 4096, maxBodyBytes, 5*time.Second, nowFn)
+	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, 4096, maxBodyBytes, 5*time.Second, nowFn)
 	return &publicEnv{handler: handler, store: s, acct: acct, metrics: m, now: now}
 }
 
@@ -411,5 +412,184 @@ func TestUpstreamRejectionIsInvalidRequestAndSparesBreaker(t *testing.T) {
 		if code := decodeErrorCode(t, rec); code != CodeInvalidRequest {
 			t.Fatalf("request %d: code = %s, want invalid_request_error", i, code)
 		}
+	}
+}
+
+const dualModelJSON = `{"models":{
+	"claude-sonnet-5":{"provider_model":"claude-sonnet-5-20260115","input_usd_per_mtok":3,"output_usd_per_mtok":15,"cache_read_usd_per_mtok":0.30,"cache_write_usd_per_mtok":3.75},
+	"gpt-5":{"provider":"openai","provider_model":"gpt-5-2026-01-01","input_usd_per_mtok":1.25,"output_usd_per_mtok":10,"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`
+
+type dualEnv struct {
+	handler       http.Handler
+	store         *store.Store
+	now           time.Time
+	openaiSeen    *[]oai.ChatRequest
+	anthropicHits *int
+}
+
+func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, breakerThreshold int) *dualEnv {
+	t.Helper()
+	var openaiSeen []oai.ChatRequest
+	var anthropicHits int
+
+	openaiUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer oai-upstream-key" {
+			t.Errorf("openai upstream Authorization = %q", got)
+		}
+		var req oai.ChatRequest
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &req); err == nil {
+			openaiSeen = append(openaiSeen, req)
+		}
+		openaiHandler(w, r)
+	}))
+	t.Cleanup(openaiUpstream.Close)
+	anthropicUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		anthropicHits++
+		anthropicHandler(w, r)
+	}))
+	t.Cleanup(anthropicUpstream.Close)
+
+	s := testStore(t)
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(path, []byte(dualModelJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	table, err := models.LoadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	acct := accounting.New(s, 100)
+	guards := NewGuards(s, acct, table, 1000, 8, 1<<20, nowFn)
+	up := Upstreams{
+		Anthropic:        provider.NewClient(anthropicUpstream.URL, "ant-upstream-key", anthropicUpstream.Client()),
+		AnthropicBreaker: provider.NewBreaker(breakerThreshold, time.Minute, nowFn),
+		OpenAI:           provider.NewOpenAIClient(openaiUpstream.URL, "oai-upstream-key", openaiUpstream.Client()),
+		OpenAIBreaker:    provider.NewBreaker(breakerThreshold, time.Minute, nowFn),
+	}
+	m := NewMetrics(100)
+	handler := NewPublicHandler(guards, table, acct, s, up, m, 4096, 1<<20, 5*time.Second, nowFn)
+	return &dualEnv{handler: handler, store: s, now: now, openaiSeen: &openaiSeen, anthropicHits: &anthropicHits}
+}
+
+func openaiChatResponse() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		content := "hi from openai"
+		json.NewEncoder(w).Encode(oai.ChatResponse{
+			ID: "chatcmpl-upstream", Object: "chat.completion", Model: "gpt-5-2026-01-01",
+			Choices: []oai.Choice{{Message: oai.ResponseMessage{Role: "assistant", Content: &content}, FinishReason: "stop"}},
+			Usage: oai.Usage{PromptTokens: 200, CompletionTokens: 40, TotalTokens: 240,
+				PromptTokensDetails: &oai.PromptTokensDetails{CachedTokens: 80}},
+		})
+	}
+}
+
+func doDual(env *dualEnv, auth, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", auth)
+	rec := httptest.NewRecorder()
+	env.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestOpenAIRoutingAndUsage(t *testing.T) {
+	env := newDualEnv(t, openaiChatResponse(), fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	rec := doDual(env, auth, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var resp oai.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Model != "gpt-5" {
+		t.Errorf("response model = %q, want the public id gpt-5", resp.Model)
+	}
+	seen := *env.openaiSeen
+	if len(seen) != 1 || seen[0].Model != "gpt-5-2026-01-01" {
+		t.Fatalf("upstream saw %+v, want one request with the provider model", seen)
+	}
+	if *env.anthropicHits != 0 {
+		t.Errorf("anthropic upstream hit %d times for an openai model", *env.anthropicHits)
+	}
+
+	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 120*1.25/1e6 + 40*10.0/1e6 + 80*0.125/1e6
+	if math.Abs(spend-want) > 1e-9 {
+		t.Fatalf("spend = %v, want %v (cached tokens priced at the cache-read rate)", spend, want)
+	}
+}
+
+func openaiStreamHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		chunks := []string{
+			`{"id":"c1","object":"chat.completion.chunk","model":"gpt-5-2026-01-01","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+			`{"id":"c1","object":"chat.completion.chunk","model":"gpt-5-2026-01-01","choices":[{"index":0,"delta":{"content":"hey"},"finish_reason":null}]}`,
+			`{"id":"c1","object":"chat.completion.chunk","model":"gpt-5-2026-01-01","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			`{"id":"c1","object":"chat.completion.chunk","model":"gpt-5-2026-01-01","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}`,
+		}
+		for _, c := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+}
+
+func TestOpenAIStreamUsageChunkSuppressedUnlessRequested(t *testing.T) {
+	for _, wantUsage := range []bool{false, true} {
+		env := newDualEnv(t, openaiStreamHandler(), fullResponseHandler(), 100)
+		auth, _ := insertTestKey(t, env.store, nil)
+		body := `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+		if wantUsage {
+			body = `{"model":"gpt-5","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`
+		}
+		rec := doDual(env, auth, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		got := rec.Body.String()
+		if strings.Contains(got, `"prompt_tokens":100`) != wantUsage {
+			t.Errorf("include_usage=%v: usage chunk presence = %v; body:\n%s", wantUsage, !wantUsage, got)
+		}
+		if !strings.Contains(got, "data: [DONE]") {
+			t.Errorf("missing [DONE]")
+		}
+		if strings.Contains(got, "gpt-5-2026-01-01") {
+			t.Errorf("provider model name leaked into the stream")
+		}
+		spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if spend <= 0 {
+			t.Errorf("include_usage=%v: streamed spend not recorded", wantUsage)
+		}
+	}
+}
+
+func TestProviderBreakersAreIndependent(t *testing.T) {
+	failing := func(w http.ResponseWriter, r *http.Request) { http.Error(w, "boom", http.StatusInternalServerError) }
+	env := newDualEnv(t, failing, fullResponseHandler(), 1)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	rec := doDual(env, auth, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
+	if code := decodeErrorCode(t, rec); code != CodeProviderUnavailable {
+		t.Fatalf("first openai failure code = %s", code)
+	}
+	rec = doDual(env, auth, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("openai breaker did not open: status %d", rec.Code)
+	}
+	rec = doDual(env, auth, chatBody(false))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anthropic request blocked by the openai breaker: status %d, body %s", rec.Code, rec.Body.String())
 	}
 }

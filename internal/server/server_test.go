@@ -136,3 +136,37 @@ func waitFor200(t *testing.T, url string) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestNewRefusesOpenAIModelWithoutKey(t *testing.T) {
+	cfg := assemblyConfig(t)
+	table := `{"models":{"gpt-5":{"provider":"openai","provider_model":"gpt-5",
+		"input_usd_per_mtok":1.25,"output_usd_per_mtok":10,
+		"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`
+	if err := os.WriteFile(cfg.ModelsConfigFile, []byte(table), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(cfg, nil); err == nil || !contains(err.Error(), "OPENAI_API_KEY_FILE") {
+		t.Fatalf("expected OPENAI_API_KEY_FILE refusal, got %v", err)
+	}
+}
+
+func TestNewAnthropicKeyNotRequiredForOpenAIOnlyTable(t *testing.T) {
+	cfg := assemblyConfig(t)
+	table := `{"models":{"gpt-5":{"provider":"openai","provider_model":"gpt-5",
+		"input_usd_per_mtok":1.25,"output_usd_per_mtok":10,
+		"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`
+	if err := os.WriteFile(cfg.ModelsConfigFile, []byte(table), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	openaiKey := filepath.Join(t.TempDir(), "openai-key")
+	if err := os.WriteFile(openaiKey, []byte("sk-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.OpenAIAPIKeyFile = openaiKey
+	cfg.AnthropicAPIKeyFile = filepath.Join(t.TempDir(), "absent")
+	s, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("openai-only table should not need the anthropic key: %v", err)
+	}
+	s.closeAll()
+}

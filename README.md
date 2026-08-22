@@ -1,10 +1,12 @@
 # modelgate
 
-A single-binary, OpenAI-compatible LLM gateway in front of the Anthropic
-Messages API. modelgate issues its own revocable client keys, meters spend
-per key and globally against hard monthly ceilings, and ships an embedded
-key-management page — so one provider credential can serve many clients
-without ever being handed to them.
+A single-binary, OpenAI-compatible LLM gateway in front of Anthropic and
+OpenAI. modelgate issues its own revocable client keys, meters spend per
+key and globally against hard monthly ceilings, and ships an embedded
+key-management page — so provider credentials can serve many clients
+without ever being handed to them. Anthropic models are translated at the
+wire level; OpenAI models pass through with the model name, spend
+accounting, and error surface under modelgate's control.
 
 ## Listeners
 
@@ -29,8 +31,10 @@ startup.
 | `PUBLIC_ADDR`, `ADMIN_ADDR` | Listener addresses | refuse to start |
 | `METRICS_ADDR` | Metrics/readiness address | metrics disabled |
 | `DATA_DIR` | SQLite location | refuse to start |
-| `ANTHROPIC_API_KEY_FILE` | Provider credential file | refuse to start |
-| `ANTHROPIC_BASE_URL` | Provider origin | Anthropic production |
+| `ANTHROPIC_API_KEY_FILE` | Anthropic credential file | refuse to start if the table uses Anthropic |
+| `ANTHROPIC_BASE_URL` | Anthropic origin | Anthropic production |
+| `OPENAI_API_KEY_FILE` | OpenAI credential file | refuse to start if the table uses OpenAI |
+| `OPENAI_BASE_URL` | OpenAI origin | OpenAI production |
 | `MODELS_CONFIG_FILE` | Model table (below) | refuse to start |
 | `BUDGET_MONTHLY_USD` | Global hard ceiling | refuse to start |
 | `ADMIN_IDENTITY_HEADER` | Trusted identity header name | default `Remote-User` |
@@ -42,10 +46,13 @@ startup.
 
 ## Model table
 
-`MODELS_CONFIG_FILE` maps public model IDs to the provider model and USD
-per-MTok prices. A request naming a model absent from the table — or
-present without complete pricing — is refused. Cost accounting fails
-closed by construction: nothing unpriced can run.
+`MODELS_CONFIG_FILE` maps public model IDs to a provider (`anthropic`,
+the default, or `openai`), the provider's model name, and USD per-MTok
+prices. A request naming a model absent from the table — or present
+without complete pricing — is refused. Cost accounting fails closed by
+construction: nothing unpriced can run. Each provider referenced by the
+table must have its credential file configured, and each gets its own
+circuit breaker.
 
 ```json
 {
@@ -56,6 +63,14 @@ closed by construction: nothing unpriced can run.
       "output_usd_per_mtok": 15.0,
       "cache_read_usd_per_mtok": 0.30,
       "cache_write_usd_per_mtok": 3.75
+    },
+    "gpt-5": {
+      "provider": "openai",
+      "provider_model": "gpt-5",
+      "input_usd_per_mtok": 1.25,
+      "output_usd_per_mtok": 10.0,
+      "cache_read_usd_per_mtok": 0.125,
+      "cache_write_usd_per_mtok": 1.25
     }
   }
 }

@@ -112,27 +112,29 @@ func (m *Metrics) SetKeyCount(n float64) {
 	m.keyCount.Set(n)
 }
 
-func NewReadyHandler(s *store.Store, keyFile string) http.Handler {
+func NewReadyHandler(s *store.Store, keyFiles ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := s.Ping(r.Context()); err != nil {
 			http.Error(w, "store unreachable", http.StatusServiceUnavailable)
 			return
 		}
-		info, err := os.Stat(keyFile)
-		if err != nil {
-			http.Error(w, "provider key file unreadable", http.StatusServiceUnavailable)
-			return
+		for _, keyFile := range keyFiles {
+			info, err := os.Stat(keyFile)
+			if err != nil {
+				http.Error(w, "provider key file unreadable", http.StatusServiceUnavailable)
+				return
+			}
+			if info.Size() == 0 {
+				http.Error(w, "provider key file empty", http.StatusServiceUnavailable)
+				return
+			}
+			f, err := os.Open(keyFile)
+			if err != nil {
+				http.Error(w, "provider key file unreadable", http.StatusServiceUnavailable)
+				return
+			}
+			f.Close()
 		}
-		if info.Size() == 0 {
-			http.Error(w, "provider key file empty", http.StatusServiceUnavailable)
-			return
-		}
-		f, err := os.Open(keyFile)
-		if err != nil {
-			http.Error(w, "provider key file unreadable", http.StatusServiceUnavailable)
-			return
-		}
-		f.Close()
 		fmt.Fprintln(w, "ready")
 	})
 }

@@ -233,7 +233,7 @@ func TestAdminPublicFullFlow(t *testing.T) {
 	guards := NewGuards(s, acct, table, 1000, 8, 1<<20, nowFn)
 	client := provider.NewClient(upstream.URL, "k", upstream.Client())
 	breaker := provider.NewBreaker(100, time.Minute, nowFn)
-	public := NewPublicHandler(guards, table, acct, s, client, breaker, m, 4096, 1<<20, 5*time.Second, nowFn)
+	public := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, 4096, 1<<20, 5*time.Second, nowFn)
 	adminE := &adminEnv{handler: admin, store: s, acct: acct, now: now}
 	publicE := &publicEnv{handler: public, store: s, acct: acct, now: now}
 

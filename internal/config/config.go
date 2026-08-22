@@ -11,6 +11,8 @@ type Config struct {
 	DataDir                            string
 	AnthropicAPIKeyFile                string
 	AnthropicBaseURL                   string
+	OpenAIAPIKeyFile                   string
+	OpenAIBaseURL                      string
 	ModelsConfigFile                   string
 	BudgetMonthlyUSD                   float64
 	AdminIdentityHeader                string
@@ -29,6 +31,8 @@ func Load(getenv func(string) string) (Config, error) {
 		DataDir:               getenv("DATA_DIR"),
 		AnthropicAPIKeyFile:   getenv("ANTHROPIC_API_KEY_FILE"),
 		AnthropicBaseURL:      withDefault(getenv("ANTHROPIC_BASE_URL"), "https://api.anthropic.com"),
+		OpenAIAPIKeyFile:      getenv("OPENAI_API_KEY_FILE"),
+		OpenAIBaseURL:         withDefault(getenv("OPENAI_BASE_URL"), "https://api.openai.com"),
 		ModelsConfigFile:      getenv("MODELS_CONFIG_FILE"),
 		AdminIdentityHeader:   withDefault(getenv("ADMIN_IDENTITY_HEADER"), "Remote-User"),
 		DefaultMaxTokens:      4096,

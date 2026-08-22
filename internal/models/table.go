@@ -14,7 +14,13 @@ type Pricing struct {
 	CacheWriteUSDPerMTok float64
 }
 
+const (
+	ProviderAnthropic = "anthropic"
+	ProviderOpenAI    = "openai"
+)
+
 type Model struct {
+	Provider      string
 	ProviderModel string
 	Pricing       Pricing
 }
@@ -28,6 +34,7 @@ type modelFile struct {
 }
 
 type modelEntry struct {
+	Provider             string   `json:"provider"`
 	ProviderModel        string   `json:"provider_model"`
 	InputUSDPerMTok      *float64 `json:"input_usd_per_mtok"`
 	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok"`
@@ -37,8 +44,9 @@ type modelEntry struct {
 
 // LoadTable reads the model pricing table at path. Cost accounting fails
 // closed by construction — nothing unpriced can run — so any unreadable
-// file, invalid JSON, empty table, empty provider_model, or absent, zero,
-// or negative price field yields an error and no table.
+// file, invalid JSON, empty table, empty provider_model, unknown provider,
+// or absent, zero, or negative price field yields an error and no table.
+// An omitted provider means anthropic.
 func LoadTable(path string) (*Table, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -66,6 +74,13 @@ func (e modelEntry) validate() (Model, error) {
 	if e.ProviderModel == "" {
 		return Model{}, fmt.Errorf("empty provider_model")
 	}
+	provider := e.Provider
+	if provider == "" {
+		provider = ProviderAnthropic
+	}
+	if provider != ProviderAnthropic && provider != ProviderOpenAI {
+		return Model{}, fmt.Errorf("unknown provider %q", provider)
+	}
 	prices := []struct {
 		field string
 		value *float64
@@ -84,6 +99,7 @@ func (e modelEntry) validate() (Model, error) {
 		}
 	}
 	return Model{
+		Provider:      provider,
 		ProviderModel: e.ProviderModel,
 		Pricing: Pricing{
 			InputUSDPerMTok:      *e.InputUSDPerMTok,
@@ -97,6 +113,21 @@ func (e modelEntry) validate() (Model, error) {
 func (t *Table) Resolve(publicID string) (Model, bool) {
 	model, ok := t.models[publicID]
 	return model, ok
+}
+
+// Providers reports which providers the table references, so startup can
+// require exactly the credentials the configuration will use.
+func (t *Table) Providers() []string {
+	seen := map[string]bool{}
+	for _, m := range t.models {
+		seen[m.Provider] = true
+	}
+	providers := make([]string, 0, len(seen))
+	for p := range seen {
+		providers = append(providers, p)
+	}
+	slices.Sort(providers)
+	return providers
 }
 
 func (t *Table) IDs() []string {

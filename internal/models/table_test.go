@@ -26,6 +26,7 @@ func TestLoadTableValid(t *testing.T) {
 		want     Model
 	}{
 		{"claude-opus-5", Model{
+			Provider:      ProviderAnthropic,
 			ProviderModel: "claude-opus-5",
 			Pricing: Pricing{
 				InputUSDPerMTok:      5.0,
@@ -35,6 +36,7 @@ func TestLoadTableValid(t *testing.T) {
 			},
 		}},
 		{"claude-sonnet-5", Model{
+			Provider:      ProviderAnthropic,
 			ProviderModel: "claude-sonnet-5",
 			Pricing: Pricing{
 				InputUSDPerMTok:      3.0,
@@ -116,5 +118,31 @@ func TestLoadTableNonexistentPath(t *testing.T) {
 	}
 	if table != nil {
 		t.Fatal("LoadTable returned table with error")
+	}
+}
+
+func TestLoadTableProviders(t *testing.T) {
+	path := writeTable(t, `{"models":{
+		"claude-sonnet-5":{"provider_model":"claude-sonnet-5","input_usd_per_mtok":3,"output_usd_per_mtok":15,"cache_read_usd_per_mtok":0.3,"cache_write_usd_per_mtok":3.75},
+		"gpt-5":{"provider":"openai","provider_model":"gpt-5","input_usd_per_mtok":1.25,"output_usd_per_mtok":10,"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`)
+	table, err := LoadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := table.Resolve("gpt-5")
+	if !ok || m.Provider != ProviderOpenAI {
+		t.Fatalf("gpt-5 = %+v, ok=%v; want openai provider", m, ok)
+	}
+	got := table.Providers()
+	want := []string{ProviderAnthropic, ProviderOpenAI}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Providers() = %v, want %v", got, want)
+	}
+}
+
+func TestLoadTableRejectsUnknownProvider(t *testing.T) {
+	path := writeTable(t, `{"models":{"m":{"provider":"azure","provider_model":"m","input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1}}}`)
+	if _, err := LoadTable(path); err == nil {
+		t.Fatal("unknown provider accepted")
 	}
 }

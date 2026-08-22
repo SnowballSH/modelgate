@@ -24,13 +24,28 @@ import (
 	"github.com/SnowballSH/modelgate/internal/translate"
 )
 
+// Upstreams holds one client and one circuit breaker per configured
+// provider; a provider absent from the model table stays nil.
+type Upstreams struct {
+	Anthropic        *provider.Client
+	AnthropicBreaker *provider.Breaker
+	OpenAI           *provider.OpenAIClient
+	OpenAIBreaker    *provider.Breaker
+}
+
+func (u Upstreams) breakerFor(providerName string) *provider.Breaker {
+	if providerName == models.ProviderOpenAI {
+		return u.OpenAIBreaker
+	}
+	return u.AnthropicBreaker
+}
+
 type PublicHandler struct {
 	guards           *Guards
 	table            *models.Table
 	acct             *accounting.Accountant
 	store            *store.Store
-	client           *provider.Client
-	breaker          *provider.Breaker
+	up               Upstreams
 	metrics          *Metrics
 	defaultMaxTokens int
 	maxBodyBytes     int64
@@ -38,14 +53,13 @@ type PublicHandler struct {
 	now              func() time.Time
 }
 
-func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountant, s *store.Store, client *provider.Client, breaker *provider.Breaker, m *Metrics, defaultMaxTokens int, maxBodyBytes int64, requestDeadline time.Duration, now func() time.Time) http.Handler {
+func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountant, s *store.Store, up Upstreams, m *Metrics, defaultMaxTokens int, maxBodyBytes int64, requestDeadline time.Duration, now func() time.Time) http.Handler {
 	return &PublicHandler{
 		guards:           g,
 		table:            table,
 		acct:             acct,
 		store:            s,
-		client:           client,
-		breaker:          breaker,
+		up:               up,
 		metrics:          m,
 		defaultMaxTokens: defaultMaxTokens,
 		maxBodyBytes:     maxBodyBytes,
@@ -149,12 +163,21 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer adm.Release()
 	model = req.Model
 
-	if !h.breaker.Allow() {
+	breaker := h.up.breakerFor(adm.Model.Provider)
+	if !breaker.Allow() {
 		h.metrics.SetBreakerOpen(true)
 		fail(CodeProviderUnavailable, "provider circuit open")
 		return
 	}
 	h.metrics.SetBreakerOpen(false)
+
+	ctx, cancel := context.WithTimeout(r.Context(), h.requestDeadline)
+	defer cancel()
+
+	if adm.Model.Provider == models.ProviderOpenAI {
+		h.chatOpenAI(ctx, w, r, req, adm, breaker, observe, fail)
+		return
+	}
 
 	areq, err := translate.ToAnthropic(req, adm.Model.ProviderModel, h.defaultMaxTokens)
 	if err != nil {
@@ -162,18 +185,15 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), h.requestDeadline)
-	defer cancel()
-
 	if req.Stream {
-		h.streamChat(ctx, w, r, req, areq, adm, observe)
+		h.streamChat(ctx, w, r, req, areq, adm, breaker, observe)
 		return
 	}
 
 	h.metrics.IncInFlight()
-	aresp, err := h.client.Messages(ctx, areq)
+	aresp, err := h.up.Anthropic.Messages(ctx, areq)
 	h.metrics.DecInFlight()
-	h.breaker.Record(err)
+	breaker.Record(err)
 	if errors.Is(err, provider.ErrClientAborted) {
 		observe("client_aborted")
 		return
@@ -186,58 +206,67 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	id := "chatcmpl-" + randomHex16()
 	resp := translate.FromAnthropic(aresp, req.Model, h.now().Unix(), id)
-	h.recordUsage(r.Context(), adm, req.Model, aresp.Usage)
+	h.recordUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(aresp.Usage))
 	observe("success")
 	writeJSONStatus(w, http.StatusOK, resp)
 }
 
-func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, areq anthro.MessagesRequest, adm Admission, observe func(string)) {
-	id := "chatcmpl-" + randomHex16()
-	st := translate.NewStreamTranslator(req.Model, h.now().Unix(), id)
-	flusher, _ := w.(http.Flusher)
-	wrote := false
+// chatOpenAI forwards the request nearly verbatim: the public wire format
+// is already OpenAI's, so only the model name, the usage capture, and the
+// error surface need modelgate's treatment.
+func (h *PublicHandler) chatOpenAI(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string), fail func(code, message string)) {
+	up := req
+	up.Model = adm.Model.ProviderModel
 
-	writeChunk := func(chunk oai.ChatChunk) error {
-		if !wrote {
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.WriteHeader(http.StatusOK)
-			wrote = true
-		}
-		data, err := json.Marshal(chunk)
-		if err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
-			return err
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
+	if req.Stream {
+		h.streamOpenAI(ctx, w, r, req, up, adm, breaker, observe)
+		return
 	}
 
 	h.metrics.IncInFlight()
-	err := h.client.MessagesStream(ctx, areq, func(ev anthro.StreamEvent) error {
-		chunks, err := st.Next(ev)
-		if err != nil {
-			return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
-		}
-		for _, chunk := range chunks {
-			if err := writeChunk(chunk); err != nil {
-				return err
+	resp, err := h.up.OpenAI.Chat(ctx, up)
+	h.metrics.DecInFlight()
+	breaker.Record(err)
+	if errors.Is(err, provider.ErrClientAborted) {
+		observe("client_aborted")
+		return
+	}
+	if err != nil {
+		code := h.recordProviderError(err)
+		fail(code, messageForProviderCode(code))
+		return
+	}
+
+	resp.Model = req.Model
+	h.recordUsage(r.Context(), adm, req.Model, storeUsageFromOAI(resp.Usage))
+	observe("success")
+	writeJSONStatus(w, http.StatusOK, resp)
+}
+
+func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter, r *http.Request, req, up oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string)) {
+	sw := newSSEWriter(w)
+	// Usage is always requested upstream so aborted streams can be billed;
+	// the usage-only chunk reaches the client only when it asked for it.
+	up.StreamOptions = &oai.StreamOptions{IncludeUsage: true}
+	clientWantsUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+
+	var usage oai.Usage
+	h.metrics.IncInFlight()
+	err := h.up.OpenAI.ChatStream(ctx, up, func(chunk oai.ChatChunk) error {
+		if chunk.Usage != nil {
+			usage = *chunk.Usage
+			if len(chunk.Choices) == 0 && !clientWantsUsage {
+				return nil
 			}
 		}
-		return nil
+		chunk.Model = req.Model
+		return sw.chunk(chunk)
 	})
 	h.metrics.DecInFlight()
-	h.breaker.Record(err)
+	breaker.Record(err)
 
-	// The provider bills every token the translator saw, aborted stream or
-	// not, so spend is booked on every exit path.
 	defer func() {
-		u := st.Usage()
-		if u.InputTokens+u.OutputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > 0 {
+		if u := storeUsageFromOAI(usage); u.InputTokens+u.OutputTokens+u.CacheReadTokens > 0 {
 			h.recordUsage(r.Context(), adm, req.Model, u)
 		}
 	}()
@@ -249,24 +278,68 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 	if err != nil {
 		code := h.recordProviderError(err)
 		observe(code)
-		if !wrote {
-			WriteError(w, code, messageForProviderCode(code))
-			return
+		sw.fail(w, code)
+		return
+	}
+	sw.done()
+	observe("success")
+}
+
+func storeUsageFromOAI(u oai.Usage) store.Usage {
+	var cached int64
+	if u.PromptTokensDetails != nil {
+		cached = u.PromptTokensDetails.CachedTokens
+	}
+	return store.Usage{
+		InputTokens:     u.PromptTokens - cached,
+		OutputTokens:    u.CompletionTokens,
+		CacheReadTokens: cached,
+	}
+}
+
+func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, areq anthro.MessagesRequest, adm Admission, breaker *provider.Breaker, observe func(string)) {
+	id := "chatcmpl-" + randomHex16()
+	st := translate.NewStreamTranslator(req.Model, h.now().Unix(), id)
+	sw := newSSEWriter(w)
+
+	h.metrics.IncInFlight()
+	err := h.up.Anthropic.MessagesStream(ctx, areq, func(ev anthro.StreamEvent) error {
+		chunks, err := st.Next(ev)
+		if err != nil {
+			return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 		}
-		payload, _ := json.Marshal(oai.ErrorBody{Error: oai.ErrorDetail{
-			Message: messageForProviderCode(code),
-			Type:    errorTypeForStatus(StatusForCode(code)),
-			Code:    code,
-		}})
-		fmt.Fprintf(w, "data: %s\n\n", payload)
-		if flusher != nil {
-			flusher.Flush()
+		for _, chunk := range chunks {
+			if err := sw.chunk(chunk); err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+	h.metrics.DecInFlight()
+	breaker.Record(err)
+
+	// The provider bills every token the translator saw, aborted stream or
+	// not, so spend is booked on every exit path.
+	defer func() {
+		u := translate.ToStoreUsage(st.Usage())
+		if u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0 {
+			h.recordUsage(r.Context(), adm, req.Model, u)
+		}
+	}()
+
+	if errors.Is(err, provider.ErrClientAborted) {
+		observe("client_aborted")
+		return
+	}
+	if err != nil {
+		code := h.recordProviderError(err)
+		observe(code)
+		sw.fail(w, code)
 		return
 	}
 
 	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
-		if err := writeChunk(oai.ChatChunk{
+		if err := sw.chunk(oai.ChatChunk{
 			ID: id, Object: "chat.completion.chunk", Created: h.now().Unix(),
 			Model: req.Model, Choices: []oai.ChunkChoice{},
 			Usage: usagePointer(st.Usage()),
@@ -275,11 +348,65 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 	}
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher.Flush()
-	}
+	sw.done()
 	observe("success")
+}
+
+// sseWriter frames chat chunks as server-sent events, deferring the
+// response headers until the first write so a pre-stream failure can
+// still answer with a plain JSON error.
+type sseWriter struct {
+	w       http.ResponseWriter
+	flusher http.Flusher
+	wrote   bool
+}
+
+func newSSEWriter(w http.ResponseWriter) *sseWriter {
+	flusher, _ := w.(http.Flusher)
+	return &sseWriter{w: w, flusher: flusher}
+}
+
+func (sw *sseWriter) raw(payload []byte) error {
+	if !sw.wrote {
+		sw.w.Header().Set("Content-Type", "text/event-stream")
+		sw.w.Header().Set("Cache-Control", "no-cache")
+		sw.w.WriteHeader(http.StatusOK)
+		sw.wrote = true
+	}
+	if _, err := fmt.Fprintf(sw.w, "data: %s\n\n", payload); err != nil {
+		return err
+	}
+	if sw.flusher != nil {
+		sw.flusher.Flush()
+	}
+	return nil
+}
+
+func (sw *sseWriter) chunk(chunk oai.ChatChunk) error {
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		return err
+	}
+	return sw.raw(data)
+}
+
+// fail answers a mid-stream error inside the SSE body, or as a plain JSON
+// error when nothing has streamed yet.
+func (sw *sseWriter) fail(w http.ResponseWriter, code string) {
+	if !sw.wrote {
+		WriteError(w, code, messageForProviderCode(code))
+		return
+	}
+	payload, _ := json.Marshal(oai.ErrorBody{Error: oai.ErrorDetail{
+		Message: messageForProviderCode(code),
+		Type:    errorTypeForStatus(StatusForCode(code)),
+		Code:    code,
+	}})
+	_ = sw.raw(payload)
+}
+
+func (sw *sseWriter) done() {
+	_ = sw.raw([]byte("[DONE]"))
 }
 
 func usagePointer(u anthro.Usage) *oai.Usage {
@@ -324,10 +451,9 @@ func (h *PublicHandler) recordProviderError(err error) string {
 
 // recordUsage runs on a context detached from the request: spend the
 // provider billed must be booked even when the caller is already gone.
-func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, aUsage anthro.Usage) {
+func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	usage := translate.ToStoreUsage(aUsage)
 	now := h.now()
 	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.Pricing); err != nil {
 		slog.Error("usage record failed", "key_id", adm.Key.ID, "model", publicModel, "err", err)

@@ -38,17 +38,9 @@ type Server struct {
 }
 
 // New performs every fail-closed startup check, opens the store, and binds
-// all listeners. Any missing precondition is an error before a port opens.
+// all listeners. Any missing precondition is an error before a port opens;
+// each provider the model table references must have its credential file.
 func New(cfg config.Config, static http.Handler) (*Server, error) {
-	keyBytes, err := os.ReadFile(cfg.AnthropicAPIKeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("startup: ANTHROPIC_API_KEY_FILE: %w", err)
-	}
-	apiKey := strings.TrimSpace(string(keyBytes))
-	if apiKey == "" {
-		return nil, fmt.Errorf("startup: ANTHROPIC_API_KEY_FILE %s is empty", cfg.AnthropicAPIKeyFile)
-	}
-
 	if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("startup: DATA_DIR: %w", err)
 	}
@@ -61,6 +53,34 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	table, err := models.LoadTable(cfg.ModelsConfigFile)
 	if err != nil {
 		return nil, fmt.Errorf("startup: MODELS_CONFIG_FILE: %w", err)
+	}
+
+	providerKeyFiles := map[string]string{
+		models.ProviderAnthropic: cfg.AnthropicAPIKeyFile,
+		models.ProviderOpenAI:    cfg.OpenAIAPIKeyFile,
+	}
+	providerEnvNames := map[string]string{
+		models.ProviderAnthropic: "ANTHROPIC_API_KEY_FILE",
+		models.ProviderOpenAI:    "OPENAI_API_KEY_FILE",
+	}
+	apiKeys := map[string]string{}
+	var keyFiles []string
+	for _, p := range table.Providers() {
+		envName := providerEnvNames[p]
+		path := providerKeyFiles[p]
+		if path == "" {
+			return nil, fmt.Errorf("startup: the model table uses provider %s but %s is not set", p, envName)
+		}
+		keyBytes, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("startup: %s: %w", envName, err)
+		}
+		apiKey := strings.TrimSpace(string(keyBytes))
+		if apiKey == "" {
+			return nil, fmt.Errorf("startup: %s %s is empty", envName, path)
+		}
+		apiKeys[p] = apiKey
+		keyFiles = append(keyFiles, path)
 	}
 
 	st, err := store.Open(cfg.DataDir)
@@ -76,13 +96,20 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	if spend, err := st.MonthSpend(context.Background(), accounting.Month(time.Now())); err == nil {
 		metrics.SetMonthSpend(spend)
 	}
-	breaker := provider.NewBreaker(breakerThreshold, breakerCooldown, time.Now)
-	client := provider.NewClient(cfg.AnthropicBaseURL, apiKey, &http.Client{})
+	var up Upstreams
+	if key, ok := apiKeys[models.ProviderAnthropic]; ok {
+		up.Anthropic = provider.NewClient(cfg.AnthropicBaseURL, key, &http.Client{})
+		up.AnthropicBreaker = provider.NewBreaker(breakerThreshold, breakerCooldown, time.Now)
+	}
+	if key, ok := apiKeys[models.ProviderOpenAI]; ok {
+		up.OpenAI = provider.NewOpenAIClient(cfg.OpenAIBaseURL, key, &http.Client{})
+		up.OpenAIBreaker = provider.NewBreaker(breakerThreshold, breakerCooldown, time.Now)
+	}
 	guards := NewGuards(st, acct, table, cfg.RateLimitPerKeyRPM, cfg.MaxConcurrentRequests, cfg.MaxBodyBytes, time.Now)
 
 	s := &Server{store: st, sentinel: metrics}
 	s.public = &http.Server{Handler: NewPublicHandler(
-		guards, table, acct, st, client, breaker, metrics,
+		guards, table, acct, st, up, metrics,
 		cfg.DefaultMaxTokens, cfg.MaxBodyBytes, cfg.RequestDeadline, time.Now)}
 	s.admin = &http.Server{Handler: NewAdminHandler(
 		st, acct, table, metrics, cfg.AdminIdentityHeader,
@@ -102,7 +129,7 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	if cfg.MetricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
-		mux.Handle("/ready", NewReadyHandler(st, cfg.AnthropicAPIKeyFile))
+		mux.Handle("/ready", NewReadyHandler(st, keyFiles...))
 		s.metrics = &http.Server{Handler: mux}
 		if s.metLn, err = net.Listen("tcp", cfg.MetricsAddr); err != nil {
 			s.closeAll()
