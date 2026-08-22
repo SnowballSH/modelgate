@@ -160,10 +160,10 @@ func TestRevokeKeyKeepsFirstTimestamp(t *testing.T) {
 		t.Fatalf("InsertKey: %v", err)
 	}
 	first := time.Now().UTC().Truncate(time.Microsecond)
-	if err := s.RevokeKey(ctx, "rk", first); err != nil {
+	if err := s.RevokeKey(ctx, "rk", first, "alice"); err != nil {
 		t.Fatalf("RevokeKey: %v", err)
 	}
-	if err := s.RevokeKey(ctx, "rk", first.Add(time.Hour)); err != nil {
+	if err := s.RevokeKey(ctx, "rk", first.Add(time.Hour), "bob"); err != nil {
 		t.Fatalf("second RevokeKey: %v", err)
 	}
 	got, _, err := s.KeyByID(ctx, "rk")
@@ -173,11 +173,14 @@ func TestRevokeKeyKeepsFirstTimestamp(t *testing.T) {
 	if got.RevokedAt == nil || !got.RevokedAt.Equal(first) {
 		t.Errorf("RevokedAt = %v, want %v", got.RevokedAt, first)
 	}
+	if got.RevokedBy == nil || *got.RevokedBy != "alice" {
+		t.Errorf("RevokedBy = %v, want alice (first revoker wins)", got.RevokedBy)
+	}
 }
 
 func TestRevokeKeyUnknownIDErrors(t *testing.T) {
 	s, _ := openTestStore(t)
-	if err := s.RevokeKey(context.Background(), "nope", time.Now().UTC()); err == nil {
+	if err := s.RevokeKey(context.Background(), "nope", time.Now().UTC(), "alice"); err == nil {
 		t.Fatal("RevokeKey on unknown id: want error, got nil")
 	}
 }

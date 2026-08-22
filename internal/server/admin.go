@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -48,6 +49,7 @@ type adminKeyJSON struct {
 	QuotaUSD      *float64 `json:"quota_usd"`
 	ExpiresAt     *string  `json:"expires_at"`
 	RevokedAt     *string  `json:"revoked_at"`
+	RevokedBy     *string  `json:"revoked_by"`
 	LastUsedAt    *string  `json:"last_used_at"`
 	CreatedAt     string   `json:"created_at"`
 	CreatedBy     string   `json:"created_by"`
@@ -72,6 +74,7 @@ func (h *AdminHandler) keyJSON(ctx context.Context, k store.KeyRecord) adminKeyJ
 		QuotaUSD:      k.QuotaUSD,
 		ExpiresAt:     rfc3339Ptr(k.ExpiresAt),
 		RevokedAt:     rfc3339Ptr(k.RevokedAt),
+		RevokedBy:     k.RevokedBy,
 		LastUsedAt:    rfc3339Ptr(k.LastUsedAt),
 		CreatedAt:     k.CreatedAt.UTC().Format(time.RFC3339),
 		CreatedBy:     k.CreatedBy,
@@ -94,7 +97,7 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.createKey(w, r, identity)
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/keys/") && strings.HasSuffix(path, "/revoke"):
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/keys/"), "/revoke")
-		h.revokeKey(w, r, id)
+		h.revokeKey(w, r, id, identity)
 	case r.Method == http.MethodGet && path == "/api/usage":
 		h.usage(w, r)
 	case strings.HasPrefix(path, "/api/"):
@@ -182,13 +185,14 @@ func (h *AdminHandler) createKey(w http.ResponseWriter, r *http.Request, identit
 		return
 	}
 	h.refreshKeyCount(r.Context())
+	slog.Info("key created", "key_id", gen.ID, "label", req.Label, "identity", identity)
 	writeJSONStatus(w, http.StatusCreated, map[string]any{
 		"key":      h.keyJSON(r.Context(), record),
 		"full_key": gen.Full,
 	})
 }
 
-func (h *AdminHandler) revokeKey(w http.ResponseWriter, r *http.Request, id string) {
+func (h *AdminHandler) revokeKey(w http.ResponseWriter, r *http.Request, id, identity string) {
 	_, found, err := h.store.KeyByID(r.Context(), id)
 	if err != nil {
 		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to look up key")
@@ -198,10 +202,11 @@ func (h *AdminHandler) revokeKey(w http.ResponseWriter, r *http.Request, id stri
 		writeNotFound(w, "unknown key")
 		return
 	}
-	if err := h.store.RevokeKey(r.Context(), id, h.now()); err != nil {
+	if err := h.store.RevokeKey(r.Context(), id, h.now(), identity); err != nil {
 		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to revoke key")
 		return
 	}
+	slog.Info("key revoked", "key_id", id, "identity", identity)
 	key, _, err := h.store.KeyByID(r.Context(), id)
 	if err != nil {
 		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to look up key")

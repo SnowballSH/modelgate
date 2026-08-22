@@ -5,16 +5,17 @@ package oai
 import "encoding/json"
 
 type ChatRequest struct {
-	Model       string          `json:"model"`
-	Messages    []Message       `json:"messages"`
-	MaxTokens   *int            `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Stop        json.RawMessage `json:"stop,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Tools       []Tool          `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
-	User        string          `json:"user,omitempty"`
+	Model         string          `json:"model"`
+	Messages      []Message       `json:"messages"`
+	MaxTokens     *int            `json:"max_tokens,omitempty"`
+	Temperature   *float64        `json:"temperature,omitempty"`
+	TopP          *float64        `json:"top_p,omitempty"`
+	Stop          json.RawMessage `json:"stop,omitempty"`
+	Stream        bool            `json:"stream,omitempty"`
+	StreamOptions *StreamOptions  `json:"stream_options,omitempty"`
+	Tools         []Tool          `json:"tools,omitempty"`
+	ToolChoice    json.RawMessage `json:"tool_choice,omitempty"`
+	User          string          `json:"user,omitempty"`
 }
 
 // Message is a request message. Content is either a JSON string or an
@@ -25,6 +26,10 @@ type Message struct {
 	Name       string          `json:"name,omitempty"`
 	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
+}
+
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type ContentPart struct {

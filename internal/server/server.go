@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -69,6 +70,12 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 
 	acct := accounting.New(st, cfg.BudgetMonthlyUSD)
 	metrics := NewMetrics(cfg.BudgetMonthlyUSD)
+	if ks, err := st.ListKeys(context.Background()); err == nil {
+		metrics.SetKeyCount(float64(len(ks)))
+	}
+	if spend, err := st.MonthSpend(context.Background(), accounting.Month(time.Now())); err == nil {
+		metrics.SetMonthSpend(spend)
+	}
 	breaker := provider.NewBreaker(breakerThreshold, breakerCooldown, time.Now)
 	client := provider.NewClient(cfg.AnthropicBaseURL, apiKey, &http.Client{})
 	guards := NewGuards(st, acct, table, cfg.RateLimitPerKeyRPM, cfg.MaxConcurrentRequests, cfg.MaxBodyBytes, time.Now)
@@ -89,6 +96,9 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		s.closeAll()
 		return nil, fmt.Errorf("startup: ADMIN_ADDR: %w", err)
 	}
+	slog.Info("modelgate starting",
+		"models", len(table.IDs()), "budget_usd", cfg.BudgetMonthlyUSD,
+		"public_addr", cfg.PublicAddr, "admin_addr", cfg.AdminAddr, "metrics_addr", cfg.MetricsAddr)
 	if cfg.MetricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())

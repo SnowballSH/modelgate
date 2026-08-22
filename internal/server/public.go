@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"slices"
 	"time"
@@ -119,7 +120,7 @@ func (h *PublicHandler) authenticate(r *http.Request) (store.KeyRecord, bool) {
 
 func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	model := ""
+	model := "unknown"
 	observe := func(outcome string) {
 		h.metrics.ObserveRequest(outcome, model, time.Since(start).Seconds())
 	}
@@ -140,14 +141,13 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	model = req.Model
-
 	adm, code, ok := h.guards.Admit(r.Context(), r.Header.Get("Authorization"), int64(len(body)), req.Model)
 	if !ok {
 		fail(code, messageForCode(code))
 		return
 	}
 	defer adm.Release()
+	model = req.Model
 
 	if !h.breaker.Allow() {
 		h.metrics.SetBreakerOpen(true)
@@ -174,9 +174,13 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	aresp, err := h.client.Messages(ctx, areq)
 	h.metrics.DecInFlight()
 	h.breaker.Record(err)
+	if errors.Is(err, provider.ErrClientAborted) {
+		observe("client_aborted")
+		return
+	}
 	if err != nil {
 		code := h.recordProviderError(err)
-		fail(code, "upstream provider error")
+		fail(code, messageForProviderCode(code))
 		return
 	}
 
@@ -217,7 +221,7 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 	err := h.client.MessagesStream(ctx, areq, func(ev anthro.StreamEvent) error {
 		chunks, err := st.Next(ev)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 		}
 		for _, chunk := range chunks {
 			if err := writeChunk(chunk); err != nil {
@@ -229,15 +233,28 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 	h.metrics.DecInFlight()
 	h.breaker.Record(err)
 
+	// The provider bills every token the translator saw, aborted stream or
+	// not, so spend is booked on every exit path.
+	defer func() {
+		u := st.Usage()
+		if u.InputTokens+u.OutputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens > 0 {
+			h.recordUsage(r.Context(), adm, req.Model, u)
+		}
+	}()
+
+	if errors.Is(err, provider.ErrClientAborted) {
+		observe("client_aborted")
+		return
+	}
 	if err != nil {
 		code := h.recordProviderError(err)
 		observe(code)
 		if !wrote {
-			WriteError(w, code, "upstream provider error")
+			WriteError(w, code, messageForProviderCode(code))
 			return
 		}
 		payload, _ := json.Marshal(oai.ErrorBody{Error: oai.ErrorDetail{
-			Message: "upstream provider error",
+			Message: messageForProviderCode(code),
 			Type:    errorTypeForStatus(StatusForCode(code)),
 			Code:    code,
 		}})
@@ -248,12 +265,41 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 		return
 	}
 
+	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+		if err := writeChunk(oai.ChatChunk{
+			ID: id, Object: "chat.completion.chunk", Created: h.now().Unix(),
+			Model: req.Model, Choices: []oai.ChunkChoice{},
+			Usage: usagePointer(st.Usage()),
+		}); err != nil {
+			observe("client_aborted")
+			return
+		}
+	}
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if flusher != nil {
 		flusher.Flush()
 	}
-	h.recordUsage(r.Context(), adm, req.Model, st.Usage())
 	observe("success")
+}
+
+func usagePointer(u anthro.Usage) *oai.Usage {
+	prompt := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	out := oai.Usage{
+		PromptTokens:     prompt,
+		CompletionTokens: u.OutputTokens,
+		TotalTokens:      prompt + u.OutputTokens,
+	}
+	if u.CacheReadInputTokens > 0 {
+		out.PromptTokensDetails = &oai.PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}
+	}
+	return &out
+}
+
+func messageForProviderCode(code string) string {
+	if code == CodeInvalidRequest {
+		return "the provider rejected the translated request"
+	}
+	return "upstream provider error"
 }
 
 func (h *PublicHandler) recordProviderError(err error) string {
@@ -267,19 +313,26 @@ func (h *PublicHandler) recordProviderError(err error) string {
 	case errors.Is(err, provider.ErrTimeout):
 		h.metrics.ProviderError("timeout")
 		return CodeTimeout
+	case errors.Is(err, provider.ErrInvalidRequest):
+		h.metrics.ProviderError("rejected")
+		return CodeInvalidRequest
 	default:
 		h.metrics.ProviderError("unavailable")
 		return CodeProviderUnavailable
 	}
 }
 
+// recordUsage runs on a context detached from the request: spend the
+// provider billed must be booked even when the caller is already gone.
 func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, aUsage anthro.Usage) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	usage := translate.ToStoreUsage(aUsage)
 	now := h.now()
-	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.Pricing); err == nil {
-		if spend, err := h.store.MonthSpend(ctx, accounting.Month(now)); err == nil {
-			h.metrics.SetMonthSpend(spend)
-		}
+	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.Pricing); err != nil {
+		slog.Error("usage record failed", "key_id", adm.Key.ID, "model", publicModel, "err", err)
+	} else if spend, err := h.store.MonthSpend(ctx, accounting.Month(now)); err == nil {
+		h.metrics.SetMonthSpend(spend)
 	}
 	_ = h.store.TouchLastUsed(ctx, adm.Key.ID, now)
 	h.metrics.AddTokens(publicModel, usage)

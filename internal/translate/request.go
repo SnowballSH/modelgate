@@ -5,6 +5,7 @@ package translate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -124,21 +125,33 @@ func assistantMessage(msg oai.Message) (anthro.Message, error) {
 			Input: json.RawMessage(call.Function.Arguments),
 		})
 	}
+	if len(blocks) == 0 {
+		return anthro.Message{}, errors.New("assistant message has neither content nor tool calls")
+	}
 	return anthro.Message{Role: "assistant", Content: blocks}, nil
 }
 
 func contentBlocks(content json.RawMessage) ([]anthro.ContentBlock, error) {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
+		if s == "" {
+			return nil, errors.New("message content is empty")
+		}
 		return []anthro.ContentBlock{{Type: "text", Text: s}}, nil
 	}
 	parts, err := textParts(content)
 	if err != nil {
 		return nil, err
 	}
-	blocks := make([]anthro.ContentBlock, len(parts))
-	for i, p := range parts {
-		blocks[i] = anthro.ContentBlock{Type: "text", Text: p}
+	var blocks []anthro.ContentBlock
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		blocks = append(blocks, anthro.ContentBlock{Type: "text", Text: p})
+	}
+	if len(blocks) == 0 {
+		return nil, errors.New("message content is empty")
 	}
 	return blocks, nil
 }

@@ -81,7 +81,8 @@ func TestMessagesStatusMapping(t *testing.T) {
 		{status: 429, want: ErrRateLimited, wantRequests: 3},
 		{status: 500, want: ErrUnavailable, wantRequests: 3},
 		{status: 529, want: ErrUnavailable, wantRequests: 3},
-		{status: 400, want: ErrUnavailable, wantRequests: 1},
+		{status: 400, want: ErrInvalidRequest, wantRequests: 1},
+		{status: 422, want: ErrInvalidRequest, wantRequests: 1},
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("status_%d", tc.status), func(t *testing.T) {

@@ -77,6 +77,7 @@ type publicEnv struct {
 	handler http.Handler
 	store   *store.Store
 	acct    *accounting.Accountant
+	metrics *Metrics
 	now     time.Time
 }
 
@@ -95,7 +96,7 @@ func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes i
 	breaker := provider.NewBreaker(100, time.Minute, nowFn)
 	m := NewMetrics(100)
 	handler := NewPublicHandler(guards, table, acct, s, client, breaker, m, 4096, maxBodyBytes, 5*time.Second, nowFn)
-	return &publicEnv{handler: handler, store: s, acct: acct, now: now}
+	return &publicEnv{handler: handler, store: s, acct: acct, metrics: m, now: now}
 }
 
 func chatBody(stream bool) string {
@@ -342,5 +343,73 @@ func TestUnknownRoute(t *testing.T) {
 	}
 	if body.Error.Code != "not_found" {
 		t.Errorf("unknown route code = %q", body.Error.Code)
+	}
+}
+
+func TestStreamAbortStillRecordsUsage(t *testing.T) {
+	upstream := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		events := []string{
+			`{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[],"usage":{"input_tokens":100,"output_tokens":0}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":50}}`,
+		}
+		for _, ev := range events {
+			fmt.Fprintf(w, "data: %s\n\n", ev)
+		}
+	}
+	env := newPublicEnv(t, upstream, 1<<20)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	rec := doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(true))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream status = %d (headers were sent before the upstream died)", rec.Code)
+	}
+
+	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 100*3.0/1e6 + 50*15.0/1e6
+	if math.Abs(spend-want) > 1e-9 {
+		t.Fatalf("aborted stream spend = %v, want %v — billed tokens must be booked on error paths", spend, want)
+	}
+}
+
+func TestUnresolvedModelNeverBecomesMetricLabel(t *testing.T) {
+	env := newPublicEnv(t, fullResponseHandler(), 1<<20)
+	body := `{"model":"totally-made-up-model-zzz","messages":[{"role":"user","content":"hi"}]}`
+	rec := doPublic(env, http.MethodPost, "/v1/chat/completions", "Bearer mg_aaaaaaaa_bogus", body)
+	if code := decodeErrorCode(t, rec); code != CodeInvalidAPIKey {
+		t.Fatalf("code = %s, want invalid_api_key", code)
+	}
+
+	mrec := httptest.NewRecorder()
+	env.metrics.Handler().ServeHTTP(mrec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	exposition := mrec.Body.String()
+	if strings.Contains(exposition, "totally-made-up-model-zzz") {
+		t.Fatal("client-controlled model string reached a metric label")
+	}
+	if !strings.Contains(exposition, `model="unknown"`) {
+		t.Fatal("expected the rejected request to be counted under model=\"unknown\"")
+	}
+}
+
+func TestUpstreamRejectionIsInvalidRequestAndSparesBreaker(t *testing.T) {
+	upstream := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"type":"invalid_request_error"}}`, http.StatusBadRequest)
+	}
+	env := newPublicEnv(t, upstream, 1<<20)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	for i := 0; i < 150; i++ {
+		rec := doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(false))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("request %d: status = %d, want 400 (a 503 here means upstream 4xx opened the breaker)", i, rec.Code)
+		}
+		if code := decodeErrorCode(t, rec); code != CodeInvalidRequest {
+			t.Fatalf("request %d: code = %s, want invalid_request_error", i, code)
+		}
 	}
 }

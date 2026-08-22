@@ -16,10 +16,12 @@ import (
 )
 
 var (
-	ErrAuth        = errors.New("provider authentication failed")
-	ErrRateLimited = errors.New("provider rate limited")
-	ErrUnavailable = errors.New("provider unavailable")
-	ErrTimeout     = errors.New("provider timeout")
+	ErrAuth           = errors.New("provider authentication failed")
+	ErrRateLimited    = errors.New("provider rate limited")
+	ErrUnavailable    = errors.New("provider unavailable")
+	ErrTimeout        = errors.New("provider timeout")
+	ErrInvalidRequest = errors.New("provider rejected the request")
+	ErrClientAborted  = errors.New("caller aborted the request")
 )
 
 const (
@@ -164,20 +166,25 @@ func (c *Client) do(ctx context.Context, body []byte) (*http.Response, int, erro
 }
 
 func mapStatus(status int) error {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	switch {
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return fmt.Errorf("%w: status %d", ErrAuth, status)
-	case http.StatusRequestTimeout:
+	case status == http.StatusRequestTimeout:
 		return fmt.Errorf("%w: status %d", ErrTimeout, status)
-	case http.StatusTooManyRequests:
+	case status == http.StatusTooManyRequests:
 		return fmt.Errorf("%w: status %d", ErrRateLimited, status)
+	case status >= 400 && status < 500:
+		return fmt.Errorf("%w: status %d", ErrInvalidRequest, status)
 	default:
 		return fmt.Errorf("%w: status %d", ErrUnavailable, status)
 	}
 }
 
 func mapTransportError(err error, ctx context.Context) error {
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || ctx.Err() != nil {
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return fmt.Errorf("%w: connection closed", ErrClientAborted)
+	}
+	if errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
 		return fmt.Errorf("%w: request aborted", ErrTimeout)
 	}
 	return fmt.Errorf("%w: transport failure", ErrUnavailable)

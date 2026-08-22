@@ -17,12 +17,13 @@ type KeyRecord struct {
 	QuotaUSD     *float64
 	ExpiresAt    *time.Time
 	RevokedAt    *time.Time
+	RevokedBy    *string
 	LastUsedAt   *time.Time
 	CreatedAt    time.Time
 	CreatedBy    string
 }
 
-const keyColumns = "id, prefix, secret_sha256, label, models, quota_usd, expires_at, revoked_at, last_used_at, created_at, created_by"
+const keyColumns = "id, prefix, secret_sha256, label, models, quota_usd, expires_at, revoked_at, revoked_by, last_used_at, created_at, created_by"
 
 func encodeModels(models []string) (*string, error) {
 	if models == nil {
@@ -56,10 +57,10 @@ func (s *Store) InsertKey(ctx context.Context, k KeyRecord) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		"INSERT INTO keys ("+keyColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO keys ("+keyColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		k.ID, k.Prefix, k.SecretSHA256, k.Label, models, k.QuotaUSD,
-		encodeTimePtr(k.ExpiresAt), encodeTimePtr(k.RevokedAt), encodeTimePtr(k.LastUsedAt),
-		encodeTime(k.CreatedAt), k.CreatedBy,
+		encodeTimePtr(k.ExpiresAt), encodeTimePtr(k.RevokedAt), k.RevokedBy,
+		encodeTimePtr(k.LastUsedAt), encodeTime(k.CreatedAt), k.CreatedBy,
 	)
 	if err != nil {
 		return fmt.Errorf("insert key %s: %w", k.ID, err)
@@ -79,7 +80,7 @@ func scanKey(row keyScanner) (KeyRecord, error) {
 	)
 	if err := row.Scan(
 		&k.ID, &k.Prefix, &k.SecretSHA256, &k.Label, &models, &k.QuotaUSD,
-		&expiresAt, &revokedAt, &lastUsedAt, &createdAt, &k.CreatedBy,
+		&expiresAt, &revokedAt, &k.RevokedBy, &lastUsedAt, &createdAt, &k.CreatedBy,
 	); err != nil {
 		return KeyRecord{}, err
 	}
@@ -134,10 +135,10 @@ func (s *Store) ListKeys(ctx context.Context) ([]KeyRecord, error) {
 	return keys, nil
 }
 
-func (s *Store) RevokeKey(ctx context.Context, id string, at time.Time) error {
+func (s *Store) RevokeKey(ctx context.Context, id string, at time.Time, by string) error {
 	res, err := s.db.ExecContext(ctx,
-		"UPDATE keys SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?",
-		encodeTime(at), id,
+		"UPDATE keys SET revoked_at = COALESCE(revoked_at, ?), revoked_by = COALESCE(revoked_by, ?) WHERE id = ?",
+		encodeTime(at), by, id,
 	)
 	if err != nil {
 		return fmt.Errorf("revoke key %s: %w", id, err)

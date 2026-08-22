@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS keys (
 	quota_usd REAL,
 	expires_at TEXT,
 	revoked_at TEXT,
+	revoked_by TEXT,
 	last_used_at TEXT,
 	created_at TEXT NOT NULL,
 	created_by TEXT NOT NULL
