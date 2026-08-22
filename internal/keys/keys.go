@@ -1,3 +1,5 @@
+// Package keys generates, parses, and constant-time-verifies modelgate
+// API keys.
 package keys
 
 import (
@@ -53,10 +55,8 @@ func ParseBearer(header string) (id, secret string, ok bool) {
 		return "", "", false
 	}
 	id, secret = rest[:idLen], rest[idLen+1:]
-	for _, c := range []byte(id) {
-		if !strings.ContainsRune(idAlphabet, rune(c)) {
-			return "", "", false
-		}
+	if strings.ContainsFunc(id, func(c rune) bool { return !strings.ContainsRune(idAlphabet, c) }) {
+		return "", "", false
 	}
 	return id, secret, true
 }

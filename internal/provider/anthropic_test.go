@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -184,13 +185,8 @@ func TestMessagesStreamSuccess(t *testing.T) {
 		t.Fatalf("MessagesStream: %v", err)
 	}
 	want := []string{"message_start", "content_block_delta", "message_stop"}
-	if len(types) != len(want) {
+	if !slices.Equal(types, want) {
 		t.Fatalf("event types = %v, want %v", types, want)
-	}
-	for i := range want {
-		if types[i] != want[i] {
-			t.Fatalf("event types = %v, want %v", types, want)
-		}
 	}
 }
 

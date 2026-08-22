@@ -10,6 +10,10 @@ type Usage struct {
 	CostUSD                                                                float64
 }
 
+func (u Usage) HasTokens() bool {
+	return u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0
+}
+
 func (s *Store) AddUsage(ctx context.Context, month, keyID, model string, u Usage) error {
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO usage (month, key_id, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)

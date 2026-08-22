@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -60,27 +61,27 @@ func Load(getenv func(string) string) (Config, error) {
 
 	budget, err := strconv.ParseFloat(getenv("BUDGET_MONTHLY_USD"), 64)
 	if err != nil || budget <= 0 {
-		return Config{}, fmt.Errorf("config: BUDGET_MONTHLY_USD: must be a positive number")
+		return Config{}, errors.New("config: BUDGET_MONTHLY_USD: must be a positive number")
 	}
 	cfg.BudgetMonthlyUSD = budget
 
-	if err := parsePositiveInt(getenv, "DEFAULT_MAX_TOKENS", &cfg.DefaultMaxTokens); err != nil {
+	if err := parsePositive(getenv, "DEFAULT_MAX_TOKENS", &cfg.DefaultMaxTokens); err != nil {
 		return Config{}, err
 	}
-	if err := parsePositiveInt64(getenv, "MAX_BODY_BYTES", &cfg.MaxBodyBytes); err != nil {
+	if err := parsePositive(getenv, "MAX_BODY_BYTES", &cfg.MaxBodyBytes); err != nil {
 		return Config{}, err
 	}
-	if err := parsePositiveInt(getenv, "RATE_LIMIT_PER_KEY_RPM", &cfg.RateLimitPerKeyRPM); err != nil {
+	if err := parsePositive(getenv, "RATE_LIMIT_PER_KEY_RPM", &cfg.RateLimitPerKeyRPM); err != nil {
 		return Config{}, err
 	}
-	if err := parsePositiveInt(getenv, "MAX_CONCURRENT_REQUESTS", &cfg.MaxConcurrentRequests); err != nil {
+	if err := parsePositive(getenv, "MAX_CONCURRENT_REQUESTS", &cfg.MaxConcurrentRequests); err != nil {
 		return Config{}, err
 	}
 
 	if raw := getenv("REQUEST_DEADLINE"); raw != "" {
 		deadline, err := time.ParseDuration(raw)
 		if err != nil || deadline <= 0 {
-			return Config{}, fmt.Errorf("config: REQUEST_DEADLINE: must be a positive duration")
+			return Config{}, errors.New("config: REQUEST_DEADLINE: must be a positive duration")
 		}
 		cfg.RequestDeadline = deadline
 	}
@@ -95,28 +96,15 @@ func withDefault(value, fallback string) string {
 	return value
 }
 
-func parsePositiveInt(getenv func(string) string, name string, dst *int) error {
-	raw := getenv(name)
-	if raw == "" {
-		return nil
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil || v <= 0 {
-		return fmt.Errorf("config: %s: must be a positive integer", name)
-	}
-	*dst = v
-	return nil
-}
-
-func parsePositiveInt64(getenv func(string) string, name string, dst *int64) error {
+func parsePositive[T int | int64](getenv func(string) string, name string, dst *T) error {
 	raw := getenv(name)
 	if raw == "" {
 		return nil
 	}
 	v, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || v <= 0 {
+	if err != nil || v <= 0 || int64(T(v)) != v {
 		return fmt.Errorf("config: %s: must be a positive integer", name)
 	}
-	*dst = v
+	*dst = T(v)
 	return nil
 }

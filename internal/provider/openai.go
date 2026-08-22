@@ -41,7 +41,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, req oai.ChatRequest) (oai.ChatR
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
 			c.sleep(backoff(attempt))
 		}
@@ -72,7 +72,7 @@ func (c *OpenAIClient) ChatStream(ctx context.Context, req oai.ChatRequest, each
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
 			c.sleep(backoff(attempt))
 		}
@@ -115,7 +115,7 @@ func (c *OpenAIClient) streamOnce(ctx context.Context, body []byte, each func(oa
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
-		return delivered, status, mapTransportError(scanErr, ctx)
+		return delivered, status, mapTransportError(ctx, scanErr)
 	}
 	return delivered, status, fmt.Errorf("%w: stream ended before [DONE]", ErrUnavailable)
 }
@@ -130,7 +130,7 @@ func (c *OpenAIClient) do(ctx context.Context, body []byte) (*http.Response, int
 
 	res, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, 0, mapTransportError(err, ctx)
+		return nil, 0, mapTransportError(ctx, err)
 	}
 	if res.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64*1024))

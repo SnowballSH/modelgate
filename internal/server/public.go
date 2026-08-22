@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
 	"github.com/SnowballSH/modelgate/internal/anthro"
-	"github.com/SnowballSH/modelgate/internal/keys"
 	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
 	"github.com/SnowballSH/modelgate/internal/provider"
@@ -53,7 +51,13 @@ type PublicHandler struct {
 	now              func() time.Time
 }
 
-func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountant, s *store.Store, up Upstreams, m *Metrics, defaultMaxTokens int, maxBodyBytes int64, requestDeadline time.Duration, now func() time.Time) http.Handler {
+type PublicConfig struct {
+	DefaultMaxTokens int
+	MaxBodyBytes     int64
+	RequestDeadline  time.Duration
+}
+
+func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountant, s *store.Store, up Upstreams, m *Metrics, cfg PublicConfig, now func() time.Time) http.Handler {
 	return &PublicHandler{
 		guards:           g,
 		table:            table,
@@ -61,9 +65,9 @@ func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountan
 		store:            s,
 		up:               up,
 		metrics:          m,
-		defaultMaxTokens: defaultMaxTokens,
-		maxBodyBytes:     maxBodyBytes,
-		requestDeadline:  requestDeadline,
+		defaultMaxTokens: cfg.DefaultMaxTokens,
+		maxBodyBytes:     cfg.MaxBodyBytes,
+		requestDeadline:  cfg.RequestDeadline,
 		now:              now,
 	}
 }
@@ -79,28 +83,10 @@ func (h *PublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func writeJSONStatus(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
-}
-
-func writeErrorStatus(w http.ResponseWriter, status int, errType, code, message string) {
-	writeJSONStatus(w, status, oai.ErrorBody{Error: oai.ErrorDetail{
-		Message: message,
-		Type:    errType,
-		Code:    code,
-	}})
-}
-
-func writeNotFound(w http.ResponseWriter, message string) {
-	writeErrorStatus(w, http.StatusNotFound, "invalid_request_error", "not_found", message)
-}
-
 func (h *PublicHandler) handleModels(w http.ResponseWriter, r *http.Request) {
-	key, ok := h.authenticate(r)
-	if !ok {
-		WriteError(w, CodeInvalidAPIKey, "invalid API key")
+	key, ok, err := h.guards.Authenticate(r.Context(), r.Header.Get("Authorization"))
+	if err != nil || !ok {
+		writeError(w, CodeInvalidAPIKey, "invalid API key")
 		return
 	}
 	resp := oai.ModelsResponse{Object: "list", Data: []oai.ModelInfo{}}
@@ -113,25 +99,6 @@ func (h *PublicHandler) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusOK, resp)
 }
 
-func (h *PublicHandler) authenticate(r *http.Request) (store.KeyRecord, bool) {
-	id, secret, ok := keys.ParseBearer(r.Header.Get("Authorization"))
-	if !ok {
-		return store.KeyRecord{}, false
-	}
-	key, found, err := h.store.KeyByID(r.Context(), id)
-	if err != nil || !found || len(key.SecretSHA256) != sha256.Size {
-		return store.KeyRecord{}, false
-	}
-	if !keys.Verify(secret, [sha256.Size]byte(key.SecretSHA256)) {
-		return store.KeyRecord{}, false
-	}
-	now := h.now()
-	if key.RevokedAt != nil || (key.ExpiresAt != nil && now.After(*key.ExpiresAt)) {
-		return store.KeyRecord{}, false
-	}
-	return key, true
-}
-
 func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	model := "unknown"
@@ -140,7 +107,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	fail := func(code, message string) {
 		observe(code)
-		WriteError(w, code, message)
+		writeError(w, code, message)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBodyBytes+1))
@@ -282,12 +249,12 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter,
 	// quota and budget honest; the log marks it as an estimate.
 	defer func() {
 		u := storeUsageFromOAI(usage)
-		if u.InputTokens+u.OutputTokens+u.CacheReadTokens == 0 && contentChars > 0 {
+		if !u.HasTokens() && contentChars > 0 {
 			u = store.Usage{OutputTokens: int64((contentChars + 3) / 4)}
 			slog.Warn("stream ended before usage arrived; booking estimated output tokens",
 				"key_id", adm.Key.ID, "model", req.Model, "estimated_output_tokens", u.OutputTokens)
 		}
-		if u.InputTokens+u.OutputTokens+u.CacheReadTokens > 0 {
+		if u.HasTokens() {
 			h.recordUsage(r.Context(), adm, req.Model, u)
 		}
 	}()
@@ -346,7 +313,7 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 	// not, so spend is booked on every exit path.
 	defer func() {
 		u := translate.ToStoreUsage(st.Usage())
-		if u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0 {
+		if u.HasTokens() {
 			h.recordUsage(r.Context(), adm, req.Model, u)
 		}
 	}()
@@ -363,10 +330,11 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 	}
 
 	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+		u := translate.OAIUsage(st.Usage())
 		if err := sw.chunk(oai.ChatChunk{
 			ID: id, Object: "chat.completion.chunk", Created: h.now().Unix(),
 			Model: req.Model, Choices: []oai.ChunkChoice{},
-			Usage: usagePointer(st.Usage()),
+			Usage: &u,
 		}); err != nil {
 			observe("client_aborted")
 			return
@@ -418,32 +386,15 @@ func (sw *sseWriter) chunk(chunk oai.ChatChunk) error {
 // error when nothing has streamed yet.
 func (sw *sseWriter) fail(w http.ResponseWriter, code string) {
 	if !sw.wrote {
-		WriteError(w, code, messageForProviderCode(code))
+		writeError(w, code, messageForProviderCode(code))
 		return
 	}
-	payload, _ := json.Marshal(oai.ErrorBody{Error: oai.ErrorDetail{
-		Message: messageForProviderCode(code),
-		Type:    errorTypeForStatus(StatusForCode(code)),
-		Code:    code,
-	}})
+	payload, _ := json.Marshal(errorBody(errorTypeForStatus(statusForCode(code)), code, messageForProviderCode(code)))
 	_ = sw.raw(payload)
 }
 
 func (sw *sseWriter) done() {
 	_ = sw.raw([]byte("[DONE]"))
-}
-
-func usagePointer(u anthro.Usage) *oai.Usage {
-	prompt := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-	out := oai.Usage{
-		PromptTokens:     prompt,
-		CompletionTokens: u.OutputTokens,
-		TotalTokens:      prompt + u.OutputTokens,
-	}
-	if u.CacheReadInputTokens > 0 {
-		out.PromptTokensDetails = &oai.PromptTokensDetails{CachedTokens: u.CacheReadInputTokens}
-	}
-	return &out
 }
 
 func messageForProviderCode(code string) string {

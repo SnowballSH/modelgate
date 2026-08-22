@@ -1,3 +1,5 @@
+// Package provider holds the upstream LLM API clients and their shared
+// circuit breaker.
 package provider
 
 import (
@@ -57,7 +59,7 @@ func (c *Client) Messages(ctx context.Context, req anthro.MessagesRequest) (anth
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
 			c.sleep(backoff(attempt))
 		}
@@ -88,7 +90,7 @@ func (c *Client) MessagesStream(ctx context.Context, req anthro.MessagesRequest,
 	}
 
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
 			c.sleep(backoff(attempt))
 		}
@@ -131,7 +133,7 @@ func (c *Client) streamOnce(ctx context.Context, body []byte, each func(anthro.S
 		}
 	}
 	if scanErr := scanner.Err(); scanErr != nil {
-		return delivered, status, mapTransportError(scanErr, ctx)
+		return delivered, status, mapTransportError(ctx, scanErr)
 	}
 	return delivered, status, fmt.Errorf("%w: stream ended before message_stop", ErrUnavailable)
 }
@@ -155,7 +157,7 @@ func (c *Client) do(ctx context.Context, body []byte) (*http.Response, int, erro
 
 	res, err := c.http.Do(httpReq)
 	if err != nil {
-		return nil, 0, mapTransportError(err, ctx)
+		return nil, 0, mapTransportError(ctx, err)
 	}
 	if res.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64*1024))
@@ -180,7 +182,7 @@ func mapStatus(status int) error {
 	}
 }
 
-func mapTransportError(err error, ctx context.Context) error {
+func mapTransportError(ctx context.Context, err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 		return fmt.Errorf("%w: connection closed", ErrClientAborted)
 	}

@@ -25,8 +25,8 @@ func TestStatusForCode(t *testing.T) {
 		"never_heard_of_it":     http.StatusInternalServerError,
 	}
 	for code, want := range cases {
-		if got := StatusForCode(code); got != want {
-			t.Errorf("StatusForCode(%q) = %d, want %d", code, got, want)
+		if got := statusForCode(code); got != want {
+			t.Errorf("statusForCode(%q) = %d, want %d", code, got, want)
 		}
 	}
 }
@@ -51,32 +51,32 @@ func TestWriteError(t *testing.T) {
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
-		WriteError(rec, tc.code, "the message")
+		writeError(rec, tc.code, "the message")
 		if rec.Code != tc.wantStatus {
-			t.Errorf("WriteError(%q) status = %d, want %d", tc.code, rec.Code, tc.wantStatus)
+			t.Errorf("writeError(%q) status = %d, want %d", tc.code, rec.Code, tc.wantStatus)
 		}
 		if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-			t.Errorf("WriteError(%q) Content-Type = %q, want application/json", tc.code, ct)
+			t.Errorf("writeError(%q) Content-Type = %q, want application/json", tc.code, ct)
 		}
 		var body oai.ErrorBody
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("WriteError(%q) body: %v", tc.code, err)
+			t.Fatalf("writeError(%q) body: %v", tc.code, err)
 		}
 		if body.Error.Code != tc.code {
-			t.Errorf("WriteError(%q) code = %q", tc.code, body.Error.Code)
+			t.Errorf("writeError(%q) code = %q", tc.code, body.Error.Code)
 		}
 		if body.Error.Type != tc.wantType {
-			t.Errorf("WriteError(%q) type = %q, want %q", tc.code, body.Error.Type, tc.wantType)
+			t.Errorf("writeError(%q) type = %q, want %q", tc.code, body.Error.Type, tc.wantType)
 		}
 		if body.Error.Message != "the message" {
-			t.Errorf("WriteError(%q) message = %q", tc.code, body.Error.Message)
+			t.Errorf("writeError(%q) message = %q", tc.code, body.Error.Message)
 		}
 	}
 }
 
 func TestWriteErrorUnknownCode(t *testing.T) {
 	rec := httptest.NewRecorder()
-	WriteError(rec, "mystery", "boom")
+	writeError(rec, "mystery", "boom")
 	if rec.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", rec.Code)
 	}

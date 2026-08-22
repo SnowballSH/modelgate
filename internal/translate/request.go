@@ -67,7 +67,7 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 		return anthro.MessagesRequest{}, err
 	}
 	if len(messages) == 0 {
-		return anthro.MessagesRequest{}, fmt.Errorf("no messages after system extraction")
+		return anthro.MessagesRequest{}, errors.New("no messages after system extraction")
 	}
 	out.System = system
 	out.Messages = messages
@@ -215,7 +215,7 @@ func parseStop(raw json.RawMessage) ([]string, error) {
 	if err := json.Unmarshal(raw, &many); err == nil {
 		return many, nil
 	}
-	return nil, fmt.Errorf("stop must be a string or array of strings")
+	return nil, errors.New("stop must be a string or array of strings")
 }
 
 func convertTools(tools []oai.Tool) ([]anthro.Tool, error) {

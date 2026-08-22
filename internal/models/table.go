@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 )
@@ -122,19 +123,9 @@ func (t *Table) Providers() []string {
 	for _, m := range t.models {
 		seen[m.Provider] = true
 	}
-	providers := make([]string, 0, len(seen))
-	for p := range seen {
-		providers = append(providers, p)
-	}
-	slices.Sort(providers)
-	return providers
+	return slices.Sorted(maps.Keys(seen))
 }
 
 func (t *Table) IDs() []string {
-	ids := make([]string, 0, len(t.models))
-	for id := range t.models {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	return ids
+	return slices.Sorted(maps.Keys(t.models))
 }

@@ -35,7 +35,7 @@ var statusByCode = map[string]int{
 	CodeInternal:            http.StatusInternalServerError,
 }
 
-func StatusForCode(code string) int {
+func statusForCode(code string) int {
 	if status, ok := statusByCode[code]; ok {
 		return status
 	}
@@ -55,13 +55,29 @@ func errorTypeForStatus(status int) string {
 	}
 }
 
-func WriteError(w http.ResponseWriter, code, message string) {
-	status := StatusForCode(code)
+func errorBody(errType, code, message string) oai.ErrorBody {
+	return oai.ErrorBody{Error: oai.ErrorDetail{
+		Message: message,
+		Type:    errType,
+		Code:    code,
+	}}
+}
+
+func writeError(w http.ResponseWriter, code, message string) {
+	status := statusForCode(code)
+	writeJSONStatus(w, status, errorBody(errorTypeForStatus(status), code, message))
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(oai.ErrorBody{Error: oai.ErrorDetail{
-		Message: message,
-		Type:    errorTypeForStatus(status),
-		Code:    code,
-	}})
+	json.NewEncoder(w).Encode(v)
+}
+
+func writeErrorStatus(w http.ResponseWriter, status int, errType, code, message string) {
+	writeJSONStatus(w, status, errorBody(errType, code, message))
+}
+
+func writeNotFound(w http.ResponseWriter, message string) {
+	writeErrorStatus(w, http.StatusNotFound, "invalid_request_error", "not_found", message)
 }

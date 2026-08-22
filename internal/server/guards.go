@@ -50,23 +50,34 @@ type Admission struct {
 	Release func()
 }
 
+func (g *Guards) Authenticate(ctx context.Context, authorization string) (store.KeyRecord, bool, error) {
+	id, secret, ok := keys.ParseBearer(authorization)
+	if !ok {
+		return store.KeyRecord{}, false, nil
+	}
+	key, found, err := g.store.KeyByID(ctx, id)
+	if err != nil {
+		return store.KeyRecord{}, false, err
+	}
+	if !g.keyUsable(key, found, secret, g.now()) {
+		return store.KeyRecord{}, false, nil
+	}
+	return key, true, nil
+}
+
 func (g *Guards) Admit(ctx context.Context, authorization string, bodyLen int64, requestedModel string) (Admission, string, bool) {
 	if bodyLen > g.maxBodyBytes {
 		return Admission{}, CodeRequestTooLarge, false
 	}
-	id, secret, ok := keys.ParseBearer(authorization)
-	if !ok {
-		return Admission{}, CodeInvalidAPIKey, false
-	}
-	key, found, err := g.store.KeyByID(ctx, id)
+	key, ok, err := g.Authenticate(ctx, authorization)
 	if err != nil {
 		return Admission{}, CodeInternal, false
 	}
-	now := g.now()
-	if !g.keyUsable(key, found, secret, now) {
+	if !ok {
 		return Admission{}, CodeInvalidAPIKey, false
 	}
-	if !g.takeToken(id, now) {
+	now := g.now()
+	if !g.takeToken(key.ID, now) {
 		return Admission{}, CodeRateLimited, false
 	}
 	model, resolved := g.table.Resolve(requestedModel)

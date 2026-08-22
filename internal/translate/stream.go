@@ -1,15 +1,12 @@
 package translate
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
 	"github.com/SnowballSH/modelgate/internal/oai"
 )
-
-type toolBlock struct {
-	position int
-}
 
 type StreamTranslator struct {
 	publicModel string
@@ -17,7 +14,7 @@ type StreamTranslator struct {
 	id          string
 	usage       anthro.Usage
 	stopReason  string
-	toolBlocks  map[int]toolBlock
+	toolBlocks  map[int]int
 	toolCount   int
 }
 
@@ -26,7 +23,7 @@ func NewStreamTranslator(publicModel string, created int64, id string) *StreamTr
 		publicModel: publicModel,
 		created:     created,
 		id:          id,
-		toolBlocks:  map[int]toolBlock{},
+		toolBlocks:  map[int]int{},
 	}
 }
 
@@ -43,7 +40,7 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		}
 		pos := st.toolCount
 		st.toolCount++
-		st.toolBlocks[ev.Index] = toolBlock{position: pos}
+		st.toolBlocks[ev.Index] = pos
 		delta := oai.Delta{ToolCalls: []oai.ChunkToolCall{{
 			Index:    pos,
 			ID:       ev.ContentBlock.ID,
@@ -59,12 +56,12 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		case "text_delta":
 			return []oai.ChatChunk{st.chunk(oai.Delta{Content: ev.Delta.Text}, nil)}, nil
 		case "input_json_delta":
-			tb, ok := st.toolBlocks[ev.Index]
+			pos, ok := st.toolBlocks[ev.Index]
 			if !ok {
 				return nil, fmt.Errorf("input_json_delta for unknown block index %d", ev.Index)
 			}
 			delta := oai.Delta{ToolCalls: []oai.ChunkToolCall{{
-				Index:    tb.position,
+				Index:    pos,
 				Function: &oai.ChunkFunctionCall{Arguments: ev.Delta.PartialJSON},
 			}}}
 			return []oai.ChatChunk{st.chunk(delta, nil)}, nil
@@ -94,7 +91,7 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		if ev.Error != nil {
 			return nil, fmt.Errorf("upstream stream error (%s): %s", ev.Error.Type, ev.Error.Message)
 		}
-		return nil, fmt.Errorf("upstream stream error")
+		return nil, errors.New("upstream stream error")
 	default:
 		return nil, nil
 	}

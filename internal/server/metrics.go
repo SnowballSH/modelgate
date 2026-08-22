@@ -119,7 +119,13 @@ func NewReadyHandler(s *store.Store, keyFiles ...string) http.Handler {
 			return
 		}
 		for _, keyFile := range keyFiles {
-			info, err := os.Stat(keyFile)
+			f, err := os.Open(keyFile)
+			if err != nil {
+				http.Error(w, "provider key file unreadable", http.StatusServiceUnavailable)
+				return
+			}
+			info, err := f.Stat()
+			f.Close()
 			if err != nil {
 				http.Error(w, "provider key file unreadable", http.StatusServiceUnavailable)
 				return
@@ -128,12 +134,6 @@ func NewReadyHandler(s *store.Store, keyFiles ...string) http.Handler {
 				http.Error(w, "provider key file empty", http.StatusServiceUnavailable)
 				return
 			}
-			f, err := os.Open(keyFile)
-			if err != nil {
-				http.Error(w, "provider key file unreadable", http.StatusServiceUnavailable)
-				return
-			}
-			f.Close()
 		}
 		fmt.Fprintln(w, "ready")
 	})

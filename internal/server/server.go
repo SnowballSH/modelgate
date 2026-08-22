@@ -68,32 +68,27 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		return nil, fmt.Errorf("startup: MODELS_CONFIG_FILE: %w", err)
 	}
 
-	providerKeyFiles := map[string]string{
-		models.ProviderAnthropic: cfg.AnthropicAPIKeyFile,
-		models.ProviderOpenAI:    cfg.OpenAIAPIKeyFile,
-	}
-	providerEnvNames := map[string]string{
-		models.ProviderAnthropic: "ANTHROPIC_API_KEY_FILE",
-		models.ProviderOpenAI:    "OPENAI_API_KEY_FILE",
+	providerCredentials := map[string]struct{ envName, path string }{
+		models.ProviderAnthropic: {"ANTHROPIC_API_KEY_FILE", cfg.AnthropicAPIKeyFile},
+		models.ProviderOpenAI:    {"OPENAI_API_KEY_FILE", cfg.OpenAIAPIKeyFile},
 	}
 	apiKeys := map[string]string{}
 	var keyFiles []string
 	for _, p := range table.Providers() {
-		envName := providerEnvNames[p]
-		path := providerKeyFiles[p]
-		if path == "" {
-			return nil, fmt.Errorf("startup: the model table uses provider %s but %s is not set", p, envName)
+		cred := providerCredentials[p]
+		if cred.path == "" {
+			return nil, fmt.Errorf("startup: the model table uses provider %s but %s is not set", p, cred.envName)
 		}
-		keyBytes, err := os.ReadFile(path)
+		keyBytes, err := os.ReadFile(cred.path)
 		if err != nil {
-			return nil, fmt.Errorf("startup: %s: %w", envName, err)
+			return nil, fmt.Errorf("startup: %s: %w", cred.envName, err)
 		}
 		apiKey := strings.TrimSpace(string(keyBytes))
 		if apiKey == "" {
-			return nil, fmt.Errorf("startup: %s %s is empty", envName, path)
+			return nil, fmt.Errorf("startup: %s %s is empty", cred.envName, cred.path)
 		}
 		apiKeys[p] = apiKey
-		keyFiles = append(keyFiles, path)
+		keyFiles = append(keyFiles, cred.path)
 	}
 
 	st, err := store.Open(cfg.DataDir)
@@ -123,7 +118,11 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	s := &Server{store: st, sentinel: metrics}
 	s.public = httpServer(NewPublicHandler(
 		guards, table, acct, st, up, metrics,
-		cfg.DefaultMaxTokens, cfg.MaxBodyBytes, cfg.RequestDeadline, time.Now))
+		PublicConfig{
+			DefaultMaxTokens: cfg.DefaultMaxTokens,
+			MaxBodyBytes:     cfg.MaxBodyBytes,
+			RequestDeadline:  cfg.RequestDeadline,
+		}, time.Now))
 	s.admin = httpServer(NewAdminHandler(
 		st, acct, table, metrics, cfg.AdminIdentityHeader,
 		cfg.BudgetMonthlyUSD, time.Now, rand.Reader, static))

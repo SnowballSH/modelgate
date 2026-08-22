@@ -49,7 +49,7 @@ func FromAnthropic(resp anthro.MessagesResponse, publicModel string, created int
 			},
 			FinishReason: FinishReason(resp.StopReason),
 		}},
-		Usage: oaiUsage(resp.Usage),
+		Usage: OAIUsage(resp.Usage),
 	}
 }
 
@@ -73,7 +73,7 @@ func ToStoreUsage(u anthro.Usage) store.Usage {
 	}
 }
 
-func oaiUsage(u anthro.Usage) oai.Usage {
+func OAIUsage(u anthro.Usage) oai.Usage {
 	prompt := u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
 	usage := oai.Usage{
 		PromptTokens:     prompt,

@@ -96,7 +96,7 @@ func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes i
 	client := provider.NewClient(upstream.URL, "test-upstream-key", upstream.Client())
 	breaker := provider.NewBreaker(100, time.Minute, nowFn)
 	m := NewMetrics(100)
-	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, 4096, maxBodyBytes, 5*time.Second, nowFn)
+	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxBodyBytes: maxBodyBytes, RequestDeadline: 5 * time.Second}, nowFn)
 	return &publicEnv{handler: handler, store: s, acct: acct, metrics: m, now: now}
 }
 
@@ -404,7 +404,7 @@ func TestUpstreamRejectionIsInvalidRequestAndSparesBreaker(t *testing.T) {
 	env := newPublicEnv(t, upstream, 1<<20)
 	auth, _ := insertTestKey(t, env.store, nil)
 
-	for i := 0; i < 150; i++ {
+	for i := range 150 {
 		rec := doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(false))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("request %d: status = %d, want 400 (a 503 here means upstream 4xx opened the breaker)", i, rec.Code)
@@ -470,7 +470,7 @@ func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, 
 		OpenAIBreaker:    provider.NewBreaker(breakerThreshold, time.Minute, nowFn),
 	}
 	m := NewMetrics(100)
-	handler := NewPublicHandler(guards, table, acct, s, up, m, 4096, 1<<20, 5*time.Second, nowFn)
+	handler := NewPublicHandler(guards, table, acct, s, up, m, PublicConfig{DefaultMaxTokens: 4096, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second}, nowFn)
 	return &dualEnv{handler: handler, store: s, now: now, openaiSeen: &openaiSeen, anthropicHits: &anthropicHits}
 }
 
