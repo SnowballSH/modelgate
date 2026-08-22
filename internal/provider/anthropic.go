@@ -156,7 +156,7 @@ func (c *Client) do(ctx context.Context, body []byte) (*http.Response, int, erro
 		return nil, 0, mapTransportError(err, ctx)
 	}
 	if res.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(res.Body, 64*1024))
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64*1024))
 		res.Body.Close()
 		return nil, res.StatusCode, mapStatus(res.StatusCode)
 	}
@@ -164,12 +164,12 @@ func (c *Client) do(ctx context.Context, body []byte) (*http.Response, int, erro
 }
 
 func mapStatus(status int) error {
-	switch {
-	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
 		return fmt.Errorf("%w: status %d", ErrAuth, status)
-	case status == http.StatusRequestTimeout:
+	case http.StatusRequestTimeout:
 		return fmt.Errorf("%w: status %d", ErrTimeout, status)
-	case status == http.StatusTooManyRequests:
+	case http.StatusTooManyRequests:
 		return fmt.Errorf("%w: status %d", ErrRateLimited, status)
 	default:
 		return fmt.Errorf("%w: status %d", ErrUnavailable, status)

@@ -5,3 +5,21 @@ linters:
     - misspell
     - unconvert
     - unparam
+  settings:
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (*database/sql.Rows).Close
+        - (*database/sql.DB).Close
+        - (*os.File).Close
+        - (net/http.ResponseWriter).Write
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (*encoding/json.Encoder).Encode
+        - (*github.com/SnowballSH/modelgate/internal/store.Store).Close
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - unparam

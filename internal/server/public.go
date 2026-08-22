@@ -281,7 +281,7 @@ func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicMo
 			h.metrics.SetMonthSpend(spend)
 		}
 	}
-	h.store.TouchLastUsed(ctx, adm.Key.ID, now)
+	_ = h.store.TouchLastUsed(ctx, adm.Key.ID, now)
 	h.metrics.AddTokens(publicModel, usage)
 }
 
