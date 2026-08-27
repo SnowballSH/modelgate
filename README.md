@@ -92,6 +92,9 @@ startup.
 the default, or `openai`), the provider's model name, and USD per-MTok
 prices. A request naming a model absent from the table, or listed
 without all four prices, is refused — an unpriced request can never run.
+OpenAI bills no separate cache write, so for OpenAI models set
+`cache_write_usd_per_mtok` to the input price; the gateway never
+multiplies it by a nonzero count.
 Each provider referenced by the table must have its credential file
 configured, and each gets its own circuit breaker.
 
@@ -105,13 +108,13 @@ configured, and each gets its own circuit breaker.
       "cache_read_usd_per_mtok": 0.30,
       "cache_write_usd_per_mtok": 3.75
     },
-    "gpt-5": {
+    "gpt-5.6-terra": {
       "provider": "openai",
-      "provider_model": "gpt-5",
-      "input_usd_per_mtok": 1.25,
-      "output_usd_per_mtok": 10.0,
-      "cache_read_usd_per_mtok": 0.125,
-      "cache_write_usd_per_mtok": 1.25
+      "provider_model": "gpt-5.6-terra",
+      "input_usd_per_mtok": 2.0,
+      "output_usd_per_mtok": 12.0,
+      "cache_read_usd_per_mtok": 0.20,
+      "cache_write_usd_per_mtok": 2.0
     }
   }
 }
