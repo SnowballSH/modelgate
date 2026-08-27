@@ -52,5 +52,7 @@ jobs:
           context: .
           file: Containerfile
           push: true
-          tags: ghcr.io/snowballsh/modelgate:${{ github.ref_name }}
+          tags: |
+            ghcr.io/snowballsh/modelgate:${{ github.ref_name }}
+            ghcr.io/snowballsh/modelgate:latest
           provenance: false
