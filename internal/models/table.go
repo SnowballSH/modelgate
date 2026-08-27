@@ -129,3 +129,16 @@ func (t *Table) Providers() []string {
 func (t *Table) IDs() []string {
 	return slices.Sorted(maps.Keys(t.models))
 }
+
+type Entry struct {
+	ID       string
+	Provider string
+}
+
+func (t *Table) Entries() []Entry {
+	entries := make([]Entry, 0, len(t.models))
+	for _, id := range t.IDs() {
+		entries = append(entries, Entry{ID: id, Provider: t.models[id].Provider})
+	}
+	return entries
+}

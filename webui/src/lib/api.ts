@@ -3,6 +3,7 @@ import type {
   CreateKeyRequest,
   CreateKeyResponse,
   KeysResponse,
+  ModelsResponse,
   RevokeKeyResponse,
   UsageResponse,
 } from "./types";
@@ -64,6 +65,10 @@ export function revokeKey(id: string): Promise<RevokeKeyResponse> {
   return request<RevokeKeyResponse>(`api/keys/${encodeURIComponent(id)}/revoke`, {
     method: "POST",
   });
+}
+
+export function listModels(): Promise<ModelsResponse> {
+  return request<ModelsResponse>("api/models");
 }
 
 export function getUsage(): Promise<UsageResponse> {

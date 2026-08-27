@@ -7,12 +7,15 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
 	"github.com/SnowballSH/modelgate/internal/keys"
+	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/provider"
 	"github.com/SnowballSH/modelgate/internal/store"
 )
@@ -84,6 +87,7 @@ func TestAdminMissingIdentity(t *testing.T) {
 		{http.MethodPost, "/api/keys"},
 		{http.MethodPost, "/api/keys/abc/revoke"},
 		{http.MethodGet, "/api/usage"},
+		{http.MethodGet, "/api/models"},
 		{http.MethodGet, "/"},
 	} {
 		rec := doAdmin(env, route.method, route.path, "", "{}")
@@ -285,5 +289,43 @@ func TestAdminRejectsCrossSiteMutations(t *testing.T) {
 	env.handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Errorf("same-origin JSON create blocked: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminListModels(t *testing.T) {
+	s := testStore(t)
+	path := filepath.Join(t.TempDir(), "models.json")
+	if err := os.WriteFile(path, []byte(dualModelJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	table, err := models.LoadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	acct := accounting.New(s, 100)
+	handler := NewAdminHandler(s, acct, table, NewMetrics(100), identityHeader, 100, func() time.Time { return now }, rand.Reader, nil)
+	env := &adminEnv{handler: handler, store: s, acct: acct, now: now}
+
+	rec := doAdmin(env, http.MethodGet, "/api/models", "alice", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list models: status %d body %s", rec.Code, rec.Body.String())
+	}
+	want := `{"models":[{"id":"claude-sonnet-5","provider":"anthropic"},{"id":"gpt-5","provider":"openai"}]}`
+	if got := strings.TrimSpace(rec.Body.String()); got != want {
+		t.Errorf("body = %s, want %s", got, want)
+	}
+}
+
+func TestAdminUnknownAPIRoute(t *testing.T) {
+	env := newAdminEnv(t)
+	for _, route := range []struct{ method, path string }{
+		{http.MethodGet, "/api/nope"},
+		{http.MethodPost, "/api/models"},
+	} {
+		rec := doAdmin(env, route.method, route.path, "alice", "")
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s: status %d, want 404", route.method, route.path, rec.Code)
+		}
 	}
 }

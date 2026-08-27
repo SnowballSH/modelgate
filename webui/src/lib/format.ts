@@ -5,7 +5,14 @@ const usd = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+const usdTiny = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  maximumSignificantDigits: 6,
+});
+
 export function formatUsd(amount: number): string {
+  if (amount !== 0 && Math.abs(amount) < 0.01) return usdTiny.format(amount);
   return usd.format(amount);
 }
 

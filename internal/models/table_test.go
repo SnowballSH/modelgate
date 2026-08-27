@@ -146,3 +146,26 @@ func TestLoadTableRejectsUnknownProvider(t *testing.T) {
 		t.Fatal("unknown provider accepted")
 	}
 }
+
+func TestTableEntries(t *testing.T) {
+	path := writeTable(t, `{"models":{
+		"gpt-5":{"provider":"openai","provider_model":"gpt-5","input_usd_per_mtok":1.25,"output_usd_per_mtok":10,"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25},
+		"claude-sonnet-5":{"provider_model":"claude-sonnet-5","input_usd_per_mtok":3,"output_usd_per_mtok":15,"cache_read_usd_per_mtok":0.3,"cache_write_usd_per_mtok":3.75}}}`)
+	table, err := LoadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := table.Entries()
+	want := []Entry{
+		{ID: "claude-sonnet-5", Provider: ProviderAnthropic},
+		{ID: "gpt-5", Provider: ProviderOpenAI},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Entries() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Entries()[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}

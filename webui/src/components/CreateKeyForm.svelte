@@ -1,33 +1,43 @@
 <script lang="ts">
-  import { Button, Input, Panel, Spinner } from "foundationui/svelte";
-  import type { CreateKeyRequest } from "../lib/types";
+  import { Button, Input, Panel, Spinner, Switch } from "foundationui/svelte";
+  import type { ConfiguredModel, CreateKeyRequest } from "../lib/types";
 
   let {
     submitting,
+    models,
+    modelsLoading,
     oncreate,
   }: {
     submitting: boolean;
+    models: ConfiguredModel[] | null;
+    modelsLoading: boolean;
     oncreate: (body: CreateKeyRequest) => Promise<boolean>;
   } = $props();
 
   let label = $state("");
-  let models = $state("");
+  let allModels = $state(true);
+  let selectedModels = $state<string[]>([]);
   let quota = $state("");
   let expires = $state("");
   let labelInvalid = $state(false);
+  let modelsInvalid = $state(false);
+
+  function toggleModel(id: string, selected: boolean): void {
+    modelsInvalid = false;
+    selectedModels = selected
+      ? [...selectedModels, id]
+      : selectedModels.filter((model) => model !== id);
+  }
 
   async function submit(event: SubmitEvent): Promise<void> {
     event.preventDefault();
     const trimmedLabel = label.trim();
     labelInvalid = trimmedLabel.length === 0;
-    if (labelInvalid) return;
+    modelsInvalid = !allModels && selectedModels.length === 0;
+    if (labelInvalid || modelsInvalid) return;
 
     const body: CreateKeyRequest = { label: trimmedLabel };
-    const modelList = models
-      .split(",")
-      .map((model) => model.trim())
-      .filter((model) => model.length > 0);
-    if (modelList.length > 0) body.models = modelList;
+    if (!allModels) body.models = selectedModels;
     const quotaValue = Number.parseFloat(quota);
     if (quota.trim() !== "" && Number.isFinite(quotaValue) && quotaValue > 0) {
       body.quota_usd = quotaValue;
@@ -39,7 +49,8 @@
     const created = await oncreate(body);
     if (created) {
       label = "";
-      models = "";
+      allModels = true;
+      selectedModels = [];
       quota = "";
       expires = "";
     }
@@ -71,19 +82,69 @@
         {/if}
       </div>
       <div class="flex flex-col gap-1">
-        <label for="create-models" class="text-sm font-medium text-ink">
+        <span id="create-models-label" class="text-sm font-medium text-ink">
           Allowed models
-        </label>
-        <Input
-          id="create-models"
-          name="models"
-          placeholder="gpt-5.2, claude-fable-5"
-          aria-describedby="create-models-hint"
-          bind:value={models}
-        />
+        </span>
+        <div class="flex h-9 items-center gap-2">
+          <Switch
+            id="create-all-models"
+            bind:checked={allModels}
+            onCheckedChange={() => (modelsInvalid = false)}
+            aria-describedby="create-models-hint"
+          />
+          <label for="create-all-models" class="text-sm text-ink">
+            All models
+          </label>
+        </div>
         <p id="create-models-hint" class="text-xs text-ink-secondary">
-          Comma-separated. Empty allows all models.
+          {allModels
+            ? "The key may use every configured model."
+            : "Pick the models this key may use."}
         </p>
+        {#if !allModels}
+          <fieldset
+            class="flex max-h-40 flex-col gap-1 overflow-y-auto rounded-sm border border-line bg-glass-3 p-2"
+            aria-describedby={modelsInvalid ? "create-models-error" : undefined}
+          >
+            <legend class="sr-only">Models this key may use</legend>
+            {#if modelsLoading}
+              <p class="text-xs text-ink-secondary">Loading models&hellip;</p>
+            {:else if models === null}
+              <p class="text-xs text-ink-secondary">
+                The model list could not be loaded.
+              </p>
+            {:else if models.length === 0}
+              <p class="text-xs text-ink-secondary">No models are configured.</p>
+            {:else}
+              {#each models as model (model.id)}
+                <label
+                  class="flex cursor-pointer items-center gap-2 rounded-xs px-1 py-0.5 text-sm text-ink hover:bg-glass-2"
+                >
+                  <input
+                    type="checkbox"
+                    name="models"
+                    value={model.id}
+                    checked={selectedModels.includes(model.id)}
+                    onchange={(event) =>
+                      toggleModel(model.id, event.currentTarget.checked)}
+                    class="size-4 shrink-0 accent-accent"
+                  />
+                  <span class="truncate font-mono text-xs">{model.id}</span>
+                  <span
+                    class="ml-auto shrink-0 rounded-xs border border-line bg-surface px-1.5 py-px text-[10px] tracking-wide text-ink-secondary uppercase"
+                  >
+                    {model.provider}
+                  </span>
+                </label>
+              {/each}
+            {/if}
+          </fieldset>
+        {/if}
+        {#if modelsInvalid}
+          <p id="create-models-error" class="text-xs text-red-500" role="alert">
+            Select at least one model, or allow all models.
+          </p>
+        {/if}
       </div>
       <div class="flex flex-col gap-1">
         <label for="create-quota" class="text-sm font-medium text-ink">

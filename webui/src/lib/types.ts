@@ -46,6 +46,15 @@ export interface UsageResponse {
   keys: UsageKey[];
 }
 
+export interface ConfiguredModel {
+  id: string;
+  provider: string;
+}
+
+export interface ModelsResponse {
+  models: ConfiguredModel[];
+}
+
 export interface ApiErrorBody {
   error: {
     message: string;

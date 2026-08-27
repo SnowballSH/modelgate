@@ -105,6 +105,8 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.revokeKey(w, r, id, identity)
 	case r.Method == http.MethodGet && path == "/api/usage":
 		h.usage(w, r)
+	case r.Method == http.MethodGet && path == "/api/models":
+		h.listModels(w)
 	case strings.HasPrefix(path, "/api/"):
 		writeNotFound(w, "unknown route")
 	case h.static != nil:
@@ -233,6 +235,20 @@ func (h *AdminHandler) revokeKey(w http.ResponseWriter, r *http.Request, id, ide
 		return
 	}
 	writeJSONStatus(w, http.StatusOK, map[string]any{"key": h.keyJSON(r.Context(), key)})
+}
+
+type adminModelJSON struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+}
+
+func (h *AdminHandler) listModels(w http.ResponseWriter) {
+	entries := h.table.Entries()
+	out := make([]adminModelJSON, len(entries))
+	for i, e := range entries {
+		out[i] = adminModelJSON{ID: e.ID, Provider: e.Provider}
+	}
+	writeJSONStatus(w, http.StatusOK, map[string]any{"models": out})
 }
 
 func (h *AdminHandler) usage(w http.ResponseWriter, r *http.Request) {

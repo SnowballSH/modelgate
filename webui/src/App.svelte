@@ -1,19 +1,34 @@
 <script lang="ts">
   import { ThemeToggle } from "foundationui/svelte";
-  import { ApiError, createKey, getUsage, listKeys, revokeKey } from "./lib/api";
+  import {
+    ApiError,
+    createKey,
+    getUsage,
+    listKeys,
+    listModels,
+    revokeKey,
+  } from "./lib/api";
   import { toasts } from "./lib/toasts.svelte";
-  import type { ApiKey, CreateKeyRequest, UsageResponse } from "./lib/types";
+  import type {
+    ApiKey,
+    ConfiguredModel,
+    CreateKeyRequest,
+    UsageResponse,
+  } from "./lib/types";
   import CreateKeyForm from "./components/CreateKeyForm.svelte";
   import FullKeyModal from "./components/FullKeyModal.svelte";
   import KeyTable from "./components/KeyTable.svelte";
+  import ModelList from "./components/ModelList.svelte";
   import RevokeDialog from "./components/RevokeDialog.svelte";
   import SpendMeter from "./components/SpendMeter.svelte";
   import Toasts from "./components/Toasts.svelte";
 
   let keys = $state<ApiKey[]>([]);
   let usage = $state<UsageResponse | null>(null);
+  let models = $state<ConfiguredModel[] | null>(null);
   let keysLoading = $state(true);
   let usageLoading = $state(true);
+  let modelsLoading = $state(true);
   let creating = $state(false);
   let revoking = $state(false);
 
@@ -50,9 +65,20 @@
     }
   }
 
+  async function loadModels(): Promise<void> {
+    try {
+      models = (await listModels()).models;
+    } catch (error) {
+      toasts.push(`Failed to load models: ${describe(error)}`);
+    } finally {
+      modelsLoading = false;
+    }
+  }
+
   $effect(() => {
     void refreshKeys();
     void refreshUsage();
+    void loadModels();
   });
 
   async function handleCreate(body: CreateKeyRequest): Promise<boolean> {
@@ -106,7 +132,13 @@
   </header>
   <main class="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6">
     <SpendMeter {usage} loading={usageLoading} />
-    <CreateKeyForm submitting={creating} oncreate={handleCreate} />
+    <ModelList {models} loading={modelsLoading} />
+    <CreateKeyForm
+      submitting={creating}
+      {models}
+      {modelsLoading}
+      oncreate={handleCreate}
+    />
     <section aria-label="API keys" class="flex flex-col gap-3">
       <h2 class="text-lg font-semibold">Keys</h2>
       <KeyTable {keys} loading={keysLoading} onrevoke={requestRevoke} />
