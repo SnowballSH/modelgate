@@ -79,6 +79,16 @@ constraint on `iris`. The consequence B2 implements: when
 client in fact sends is the separate question recorded in
 [`hermes-chat-completions-wire.md`](hermes-chat-completions-wire.md).
 
+## The resolution this probe confirms
+
+The brief gates B2 on this record. The controller's Stream B resolution
+supersedes that: B2's translator and its goldens are written against the
+documented contract above, and the live run is a confirmation step before
+the `v0.5.0` tag rather than a gate on the code. It becomes load-bearing
+only if it contradicts that contract — a different field name, or a level
+`claude-opus-5` refuses — in which case B2's goldens are corrected before
+the tag.
+
 ## Live run: PENDING — operator ceremony
 
 Cannot run here: no Anthropic key on this machine, and each run is a

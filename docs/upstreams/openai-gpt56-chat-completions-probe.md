@@ -41,6 +41,14 @@ using its tools.
 The tasks are built either way. The probe does not gate them; it records
 which of those three sentences the record gets to make.
 
+That is the controller's Stream B resolution, and it governs every record
+in this directory: B2 and B4–B8 are written against the documented
+contract each one states, and the live runs are a confirmation step before
+the `v0.5.0` tag rather than a gate on the code — despite the brief's own
+wording, which gates B4 on the Responses probe and B2 on the Anthropic
+one. A run that contradicts its documented contract is corrected in the
+translator before the tag.
+
 ## Live run: PENDING — operator ceremony
 
 Cannot run here: this machine holds no OpenAI key, and each run is a

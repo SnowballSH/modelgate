@@ -64,6 +64,16 @@ item `id` or `store: true`, and B5's input shape would have to change.
 That is the load-bearing unknown, and the reason this probe exists rather
 than a reading of the reference alone.
 
+## The resolution this probe confirms
+
+The brief gates B4 on this record. The controller's Stream B resolution
+supersedes that: B4–B8 are written against the documented contract above,
+and the live run is a confirmation step before the `v0.5.0` tag rather
+than a gate on the code. It becomes load-bearing only if it contradicts
+that contract — if OpenAI demands an item `id`, a `reasoning` item or
+`store: true` — in which case B5's input shape is corrected before the
+tag.
+
 ## Live run: PENDING — operator ceremony
 
 Cannot run here: no OpenAI key on this machine, and each run is a billed
@@ -72,33 +82,46 @@ call. From the Mac, with the probe key in a file (mode 0600):
 ```sh
 bash scripts/probe-gpt56-responses.sh ~/.config/openai/probe-key gpt-5.6-luna xhigh
 bash scripts/probe-gpt56-responses.sh ~/.config/openai/probe-key gpt-5.6-luna medium
+bash scripts/probe-gpt56-responses.sh ~/.config/openai/probe-key gpt-5.6-luna xhigh follow-up
 ```
 
-The script sends exactly the shape B5 builds: a user `message`, a
-`function_call` with `call_id` and no `id`, a `function_call_output` on
-the same `call_id`, a second user `message`, one flat function tool,
-`store: false`, and `reasoning.effort`. Paste both summary lines and both
-JSON objects verbatim below. The output carries no key material.
+Two shapes, because B5 builds two. Runs 1 and 2 send `tool-result`, the
+load-bearing one: `input` is a user `message`, a `function_call` with
+`call_id` and no `id`, and a `function_call_output` on the same `call_id`
+— and it *ends there*. That is the request a Chat Completions tool loop
+reconstructs to the moment a tool returns, when the history B5 receives is
+`[user, assistant(tool_calls), tool(result)]` and the last input item is
+therefore a `function_call_output`. Run 3 sends `follow-up`: the same
+input with a second user `message` appended, which is what B5 builds one
+turn later. All three carry one flat function tool, `store: false` and
+`reasoning.effort`, and none carries an item `id` or a `reasoning` item.
+Paste all three summary lines and their JSON objects verbatim below. The
+output carries no key material.
 
 ### Runs
 
-| # | Model | `reasoning.effort` | HTTP | `status` | output item types | `error.message` |
-|---|---|---|---|---|---|---|
-| 1 | `gpt-5.6-luna` | `xhigh` | PENDING | | | |
-| 2 | `gpt-5.6-luna` | `medium` | PENDING | | | |
+| # | Model | `reasoning.effort` | shape | HTTP | `status` | output item types | `error.message` |
+|---|---|---|---|---|---|---|---|
+| 1 | `gpt-5.6-luna` | `xhigh` | `tool-result` | PENDING | | | |
+| 2 | `gpt-5.6-luna` | `medium` | `tool-result` | PENDING | | | |
+| 3 | `gpt-5.6-luna` | `xhigh` | `follow-up` | PENDING | | | |
 
 ### Verbatim output
 
 ```text
-PENDING — paste both summary lines and their JSON objects here.
+PENDING — paste the three summary lines and their JSON objects here.
 ```
 
 ### Verdict
 
-PENDING. Answer both:
+PENDING. Answer all three:
 
 1. Is a `call_id`-only, reasoning-less, `store: false` reconstruction
-   accepted, and does the response carry a further `function_call` or
+   whose **last input item is a `function_call_output`** accepted (runs 1
+   and 2), and does the response carry a further `function_call` or
    `message`? If not, quote the error and say what B5 must send instead
    (an item `id`, a `reasoning` item, `store: true`).
-2. Is `xhigh` a valid `reasoning.effort` for `gpt-5.6-luna`?
+2. Is the same reconstruction accepted with a user `message` appended
+   after the tool result (run 3)? A difference between the two shapes is
+   itself the finding.
+3. Is `xhigh` a valid `reasoning.effort` for `gpt-5.6-luna`?
