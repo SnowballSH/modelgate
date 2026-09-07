@@ -120,6 +120,21 @@ configured, and each gets its own circuit breaker.
 }
 ```
 
+## Request parameters on Anthropic models
+
+| Request field | Handling |
+|---|---|
+| `reasoning_effort` | Translated to `output_config.effort`. `none` and `minimal` map to `low`; `low`, `medium`, `high`, `xhigh` and `max` pass through; anything else is a 400. |
+| `temperature`, `top_p` | Forwarded, unless `reasoning_effort` is set: models that accept effort reject a temperature other than 1.0 and a `top_p` below 0.99, so effort displaces both. |
+| `developer` messages | Folded into `system`, exactly like a `system` message. |
+| `response_format`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `n` other than 1 | Rejected with a 400. |
+
+Two consequences worth knowing. Anthropic's list of effort-supporting
+models does not name `claude-haiku-4-5`, so a `reasoning_effort` on such a
+model is refused upstream and modelgate answers with the provider's error.
+And top-level effort shapes the rendered prompt, so changing it between
+requests does not preserve Anthropic's cached prefixes from earlier turns.
+
 ## Keys
 
 Keys look like `mg_<id>_<secret>`. Only the SHA-256 of the secret is

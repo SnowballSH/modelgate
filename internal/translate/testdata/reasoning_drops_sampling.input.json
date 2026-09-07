@@ -1,0 +1,7 @@
+{
+  "model": "claude-x",
+  "reasoning_effort": "high",
+  "temperature": 0.7,
+  "top_p": 0.9,
+  "messages": [{"role": "user", "content": "hi"}]
+}

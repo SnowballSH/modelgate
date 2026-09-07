@@ -1,0 +1,5 @@
+{
+  "model": "claude-x",
+  "reasoning_effort": "xhigh",
+  "messages": [{"role": "user", "content": "hi"}]
+}

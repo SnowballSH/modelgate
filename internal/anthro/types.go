@@ -5,16 +5,21 @@ package anthro
 import "encoding/json"
 
 type MessagesRequest struct {
-	Model         string      `json:"model"`
-	MaxTokens     int         `json:"max_tokens"`
-	System        string      `json:"system,omitempty"`
-	Messages      []Message   `json:"messages"`
-	Temperature   *float64    `json:"temperature,omitempty"`
-	TopP          *float64    `json:"top_p,omitempty"`
-	StopSequences []string    `json:"stop_sequences,omitempty"`
-	Stream        bool        `json:"stream,omitempty"`
-	Tools         []Tool      `json:"tools,omitempty"`
-	ToolChoice    *ToolChoice `json:"tool_choice,omitempty"`
+	Model         string        `json:"model"`
+	MaxTokens     int           `json:"max_tokens"`
+	System        string        `json:"system,omitempty"`
+	Messages      []Message     `json:"messages"`
+	Temperature   *float64      `json:"temperature,omitempty"`
+	TopP          *float64      `json:"top_p,omitempty"`
+	StopSequences []string      `json:"stop_sequences,omitempty"`
+	Stream        bool          `json:"stream,omitempty"`
+	Tools         []Tool        `json:"tools,omitempty"`
+	ToolChoice    *ToolChoice   `json:"tool_choice,omitempty"`
+	OutputConfig  *OutputConfig `json:"output_config,omitempty"`
+}
+
+type OutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type Message struct {

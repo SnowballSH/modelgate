@@ -1,0 +1,7 @@
+{
+  "model": "claude-x",
+  "messages": [
+    {"role": "developer", "content": "You are terse."},
+    {"role": "user", "content": "hi"}
+  ]
+}

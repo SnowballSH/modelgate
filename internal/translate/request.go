@@ -15,6 +15,25 @@ import (
 
 var defaultInputSchema = json.RawMessage(`{"type":"object"}`)
 
+var anthropicEfforts = map[string]string{
+	"":        "",
+	"none":    "low",
+	"minimal": "low",
+	"low":     "low",
+	"medium":  "medium",
+	"high":    "high",
+	"xhigh":   "xhigh",
+	"max":     "max",
+}
+
+func EffortForAnthropic(level string) (string, error) {
+	mapped, ok := anthropicEfforts[strings.ToLower(level)]
+	if !ok {
+		return "", fmt.Errorf("reasoning_effort %q is not one of none, minimal, low, medium, high, xhigh, max", level)
+	}
+	return mapped, nil
+}
+
 func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (anthro.MessagesRequest, error) {
 	if req.ResponseFormat != nil {
 		return anthro.MessagesRequest{}, errors.New("response_format is not supported for anthropic models")
@@ -27,18 +46,27 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 		"presence_penalty":  req.PresencePenalty != nil,
 		"seed":              req.Seed != nil,
 		"logprobs":          req.Logprobs != nil && *req.Logprobs,
-		"reasoning_effort":  req.ReasoningEffort != "",
 	} {
 		if set {
 			return anthro.MessagesRequest{}, fmt.Errorf("%s is not supported for anthropic models", name)
 		}
 	}
+	effort, err := EffortForAnthropic(req.ReasoningEffort)
+	if err != nil {
+		return anthro.MessagesRequest{}, err
+	}
 	out := anthro.MessagesRequest{
-		Model:       providerModel,
-		MaxTokens:   defaultMaxTokens,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		Stream:      req.Stream,
+		Model:     providerModel,
+		MaxTokens: defaultMaxTokens,
+		Stream:    req.Stream,
+	}
+	// Models that accept output_config.effort reject any temperature other
+	// than 1.0 and any top_p below 0.99, so effort displaces both.
+	if effort != "" {
+		out.OutputConfig = &anthro.OutputConfig{Effort: effort}
+	} else {
+		out.Temperature = req.Temperature
+		out.TopP = req.TopP
 	}
 	if req.MaxTokens != nil {
 		out.MaxTokens = *req.MaxTokens
@@ -80,7 +108,7 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 	for i := 0; i < len(messages); i++ {
 		msg := messages[i]
 		switch msg.Role {
-		case "system":
+		case "system", "developer":
 			text, err := contentText(msg.Content)
 			if err != nil {
 				return "", nil, err

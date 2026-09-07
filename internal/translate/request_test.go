@@ -45,6 +45,12 @@ func TestToAnthropicGolden(t *testing.T) {
 		"tools_auto",
 		"tools_forced",
 		"tool_roundtrip",
+		"reasoning_low",
+		"reasoning_minimal",
+		"reasoning_none",
+		"reasoning_xhigh",
+		"reasoning_drops_sampling",
+		"developer_role",
 	}
 	for _, name := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -68,6 +74,60 @@ func TestToAnthropicGolden(t *testing.T) {
 				t.Errorf("mismatch\ngot:\n%s\nwant:\n%s", gotJSON, wantJSON)
 			}
 		})
+	}
+}
+
+func TestEffortForAnthropic(t *testing.T) {
+	cases := []struct {
+		name  string
+		level string
+		want  string
+	}{
+		{name: "unset", level: "", want: ""},
+		{name: "none", level: "none", want: "low"},
+		{name: "minimal", level: "minimal", want: "low"},
+		{name: "low", level: "low", want: "low"},
+		{name: "medium", level: "medium", want: "medium"},
+		{name: "high", level: "high", want: "high"},
+		{name: "xhigh", level: "xhigh", want: "xhigh"},
+		{name: "max", level: "max", want: "max"},
+		{name: "mixed case", level: "XHigh", want: "xhigh"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := EffortForAnthropic(tc.level)
+			if err != nil {
+				t.Fatalf("EffortForAnthropic(%q): %v", tc.level, err)
+			}
+			if got != tc.want {
+				t.Errorf("EffortForAnthropic(%q) = %q, want %q", tc.level, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestToAnthropicRejectsUnknownEffort(t *testing.T) {
+	req := loadChatRequest(t, filepath.Join("testdata", "reasoning_low.input.json"))
+	req.ReasoningEffort = "adaptive"
+	_, err := ToAnthropic(req, "claude-real", 1024)
+	if err == nil {
+		t.Fatal("expected a reasoning_effort error, got nil")
+	}
+	for _, want := range []string{"reasoning_effort", "adaptive", "is not one of"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestToAnthropicOmitsEffortWhenUnset(t *testing.T) {
+	req := loadChatRequest(t, filepath.Join("testdata", "plain_chat.input.json"))
+	got, err := ToAnthropic(req, "claude-real", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, present := asMap(t, got)["output_config"]; present {
+		t.Fatal("output_config must be omitted when reasoning_effort is unset")
 	}
 }
 
