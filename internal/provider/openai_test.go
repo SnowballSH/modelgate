@@ -1,19 +1,33 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/oairesp"
 )
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return buf
+}
 
 func newTestOpenAIClient(baseURL string) *OpenAIClient {
 	c := NewOpenAIClient(baseURL, "test-key", nil)
@@ -83,6 +97,7 @@ func TestOpenAIChatStatusMapping(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			captureLogs(t)
 			var requests atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
@@ -281,5 +296,343 @@ func TestOpenAIChatDeadlineExceeded(t *testing.T) {
 	_, err := newTestOpenAIClient(srv.URL).Chat(ctx, chatRequest())
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err = %v, want ErrTimeout", err)
+	}
+}
+
+func responsesRequest() oairesp.Request {
+	return oairesp.Request{
+		Model: "gpt-test",
+		Input: []oairesp.Item{{Type: "message", Role: "user", Text: "hi"}},
+	}
+}
+
+type responsesEnvelope struct {
+	Model  string `json:"model"`
+	Store  *bool  `json:"store"`
+	Stream bool   `json:"stream"`
+}
+
+func TestOpenAIResponsesSuccess(t *testing.T) {
+	var gotAuth, gotPath string
+	var gotBody responsesEnvelope
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(oairesp.Response{
+			ID:     "resp_1",
+			Status: "completed",
+			Model:  "gpt-test",
+			Output: []oairesp.Item{{
+				Type:    "message",
+				Role:    "assistant",
+				Content: []oairesp.ContentPart{{Type: "output_text", Text: "hello"}},
+			}},
+			Usage: &oairesp.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+		})
+	}))
+	defer srv.Close()
+
+	res, err := newTestOpenAIClient(srv.URL).Responses(context.Background(), responsesRequest())
+	if err != nil {
+		t.Fatalf("Responses: %v", err)
+	}
+	if gotPath != "/v1/responses" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Errorf("Authorization = %q", gotAuth)
+	}
+	if gotBody.Store == nil || *gotBody.Store {
+		t.Errorf("store = %v, want false", gotBody.Store)
+	}
+	if gotBody.Stream {
+		t.Error("Responses sent stream=true")
+	}
+	if res.ID != "resp_1" || res.Status != "completed" {
+		t.Fatalf("response = %+v", res)
+	}
+	if len(res.Output) != 1 || res.Output[0].Content[0].Text != "hello" {
+		t.Errorf("output = %+v", res.Output)
+	}
+	if res.Usage == nil || res.Usage.TotalTokens != 3 {
+		t.Errorf("usage = %+v", res.Usage)
+	}
+}
+
+const responsesStreamBody = "event: response.created\n" +
+	"data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"status\":\"in_progress\"}}\n" +
+	"\n" +
+	"event: response.output_text.delta\n" +
+	"data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"hi\"}\n" +
+	"\n" +
+	"event: response.completed\n" +
+	"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n" +
+	"\n"
+
+func TestOpenAIResponsesStream(t *testing.T) {
+	var gotPath string
+	var gotBody responsesEnvelope
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		writeSSE(w, []string{responsesStreamBody})
+	}))
+	defer srv.Close()
+
+	var events []oairesp.StreamEvent
+	err := newTestOpenAIClient(srv.URL).ResponsesStream(context.Background(), responsesRequest(), func(ev oairesp.StreamEvent) error {
+		events = append(events, ev)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ResponsesStream: %v", err)
+	}
+	if gotPath != "/v1/responses" {
+		t.Errorf("path = %q", gotPath)
+	}
+	if !gotBody.Stream {
+		t.Error("ResponsesStream sent stream=false")
+	}
+	types := make([]string, len(events))
+	for i, ev := range events {
+		types[i] = ev.Type
+	}
+	want := []string{"response.created", "response.output_text.delta", "response.completed"}
+	if !slices.Equal(types, want) {
+		t.Fatalf("event types = %v, want %v", types, want)
+	}
+	if events[1].Delta != "hi" {
+		t.Errorf("delta = %q", events[1].Delta)
+	}
+	if events[2].Response == nil || events[2].Response.Usage == nil || events[2].Response.Usage.TotalTokens != 2 {
+		t.Errorf("completed event = %+v", events[2])
+	}
+}
+
+func TestOpenAIResponsesStreamNamesEventFromEventLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w, []string{
+			"event: response.output_text.delta\ndata: {\"output_index\":0,\"delta\":\"hi\"}\n\n",
+			"event: response.completed\ndata: {\"response\":{\"id\":\"resp_1\"}}\n\n",
+		})
+	}))
+	defer srv.Close()
+
+	var types []string
+	err := newTestOpenAIClient(srv.URL).ResponsesStream(context.Background(), responsesRequest(), func(ev oairesp.StreamEvent) error {
+		types = append(types, ev.Type)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ResponsesStream: %v", err)
+	}
+	want := []string{"response.output_text.delta", "response.completed"}
+	if !slices.Equal(types, want) {
+		t.Fatalf("event types = %v, want %v", types, want)
+	}
+}
+
+func TestOpenAIResponsesStreamTerminalStatuses(t *testing.T) {
+	for _, terminal := range []string{"response.completed", "response.incomplete", "response.failed"} {
+		t.Run(terminal, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				writeSSE(w, []string{
+					"event: " + terminal + "\ndata: {\"type\":\"" + terminal + "\"}\n\n",
+					"event: response.created\ndata: {\"type\":\"response.created\"}\n\n",
+				})
+			}))
+			defer srv.Close()
+
+			var types []string
+			err := newTestOpenAIClient(srv.URL).ResponsesStream(context.Background(), responsesRequest(), func(ev oairesp.StreamEvent) error {
+				types = append(types, ev.Type)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("ResponsesStream: %v", err)
+			}
+			if !slices.Equal(types, []string{terminal}) {
+				t.Fatalf("event types = %v, want [%s]", types, terminal)
+			}
+		})
+	}
+}
+
+func TestOpenAIResponsesStreamEndsBeforeTerminalEvent(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		writeSSE(w, []string{"event: response.created\ndata: {\"type\":\"response.created\"}\n\n"})
+	}))
+	defer srv.Close()
+
+	var delivered int
+	err := newTestOpenAIClient(srv.URL).ResponsesStream(context.Background(), responsesRequest(), func(oairesp.StreamEvent) error {
+		delivered++
+		return nil
+	})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if delivered != 1 {
+		t.Errorf("delivered = %d, want 1", delivered)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Errorf("requests = %d, want 1", got)
+	}
+}
+
+func TestOpenAIResponsesRetriesOn529(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(529)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(oairesp.Response{ID: "resp_1", Status: "completed"})
+	}))
+	defer srv.Close()
+
+	res, err := newTestOpenAIClient(srv.URL).Responses(context.Background(), responsesRequest())
+	if err != nil {
+		t.Fatalf("Responses: %v", err)
+	}
+	if res.ID != "resp_1" {
+		t.Errorf("response = %+v", res)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("requests = %d, want 2", got)
+	}
+}
+
+func TestOpenAIResponsesStreamRetriesOn529(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(529)
+			return
+		}
+		writeSSE(w, []string{responsesStreamBody})
+	}))
+	defer srv.Close()
+
+	var delivered int
+	err := newTestOpenAIClient(srv.URL).ResponsesStream(context.Background(), responsesRequest(), func(oairesp.StreamEvent) error {
+		delivered++
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ResponsesStream: %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Errorf("requests = %d, want 2", got)
+	}
+	if delivered != 3 {
+		t.Errorf("delivered = %d, want 3", delivered)
+	}
+}
+
+func TestOpenAIResponsesMapsStatus(t *testing.T) {
+	cases := []struct {
+		status       int
+		wantErr      error
+		wantRequests int32
+	}{
+		{http.StatusUnauthorized, ErrAuth, 1},
+		{http.StatusTooManyRequests, ErrRateLimited, 3},
+		{http.StatusInternalServerError, ErrUnavailable, 3},
+		{http.StatusBadRequest, ErrInvalidRequest, 1},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			captureLogs(t)
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"error":{"message":"SECRET-OAI"}}`))
+			}))
+			defer srv.Close()
+
+			_, err := newTestOpenAIClient(srv.URL).Responses(context.Background(), responsesRequest())
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if strings.Contains(err.Error(), "SECRET-OAI") {
+				t.Errorf("error leaks upstream body: %v", err)
+			}
+			if got := requests.Load(); got != tc.wantRequests {
+				t.Errorf("requests = %d, want %d", got, tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestOpenAILogsUpstreamErrorMessage(t *testing.T) {
+	logs := captureLogs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Unknown parameter: 'input[0].id'."}}`))
+	}))
+	defer srv.Close()
+
+	_, err := newTestOpenAIClient(srv.URL).Responses(context.Background(), responsesRequest())
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	if strings.Contains(err.Error(), "Unknown parameter") {
+		t.Errorf("error leaks upstream body: %v", err)
+	}
+	record := logs.String()
+	if !strings.Contains(record, "Unknown parameter: 'input[0].id'.") {
+		t.Errorf("log does not carry the upstream message: %s", record)
+	}
+	if !strings.Contains(record, "/v1/responses") {
+		t.Errorf("log does not name the path: %s", record)
+	}
+}
+
+func TestOpenAILogsUnparsableErrorBody(t *testing.T) {
+	logs := captureLogs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("<html>gateway exploded</html>"))
+	}))
+	defer srv.Close()
+
+	_, err := newTestOpenAIClient(srv.URL).Chat(context.Background(), chatRequest())
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("err = %v, want ErrUnavailable", err)
+	}
+	if !strings.Contains(logs.String(), "gateway exploded") {
+		t.Errorf("log does not carry the raw body: %s", logs.String())
+	}
+}
+
+func TestOpenAILogsTruncatedErrorBody(t *testing.T) {
+	logs := captureLogs(t)
+	message := strings.Repeat("é", 400)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": message}})
+	}))
+	defer srv.Close()
+
+	_, err := newTestOpenAIClient(srv.URL).Responses(context.Background(), responsesRequest())
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	record := logs.String()
+	if strings.Contains(record, message) {
+		t.Error("log carries the untruncated message")
+	}
+	if !strings.Contains(record, "…") {
+		t.Errorf("log is not marked as truncated: %s", record)
+	}
+	if !utf8.ValidString(record) {
+		t.Error("truncation split a rune")
 	}
 }
