@@ -4,6 +4,8 @@ package integration
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -24,7 +26,7 @@ func openaiClient(gw gateway, apiKey string) openai.Client {
 }
 
 func TestOpenAIClientNonStreaming(t *testing.T) {
-	gw := startGateway(t, 20)
+	gw := startGateway(t, 20, defaultTable)
 	fullKey := adminCreateKey(t, gw.AdminAddr, "nonstreaming")
 	client := openaiClient(gw, fullKey)
 
@@ -51,7 +53,7 @@ func TestOpenAIClientNonStreaming(t *testing.T) {
 }
 
 func TestOpenAIClientStreaming(t *testing.T) {
-	gw := startGateway(t, 20)
+	gw := startGateway(t, 20, defaultTable)
 	fullKey := adminCreateKey(t, gw.AdminAddr, "streaming")
 	client := openaiClient(gw, fullKey)
 
@@ -83,7 +85,7 @@ func TestOpenAIClientStreaming(t *testing.T) {
 }
 
 func TestAdminLifecycle(t *testing.T) {
-	gw := startGateway(t, 20)
+	gw := startGateway(t, 20, defaultTable)
 	fullKey := adminCreateKey(t, gw.AdminAddr, "lifecycle")
 
 	var keyList struct {
@@ -169,7 +171,7 @@ func TestAdminLifecycle(t *testing.T) {
 }
 
 func TestBudgetHardStop(t *testing.T) {
-	gw := startGateway(t, 0.001)
+	gw := startGateway(t, 0.001, defaultTable)
 	fullKey := adminCreateKey(t, gw.AdminAddr, "budget")
 
 	res := chatCompletionRaw(t, gw.PublicAddr, fullKey)
@@ -191,7 +193,7 @@ func TestBudgetHardStop(t *testing.T) {
 }
 
 func TestReady(t *testing.T) {
-	gw := startGateway(t, 20)
+	gw := startGateway(t, 20, defaultTable)
 	res, err := http.Get("http://" + gw.MetricsAddr + "/ready")
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +206,7 @@ func TestReady(t *testing.T) {
 }
 
 func TestModelsEndpoint(t *testing.T) {
-	gw := startGateway(t, 20)
+	gw := startGateway(t, 20, defaultTable)
 	fullKey := adminCreateKey(t, gw.AdminAddr, "models")
 	client := openaiClient(gw, fullKey)
 
@@ -219,4 +221,228 @@ func TestModelsEndpoint(t *testing.T) {
 	if len(ids) != 1 || ids[0] != testModel {
 		t.Fatalf("models: got %v, want [%s]", ids, testModel)
 	}
+}
+
+func TestResponsesUpstreamRoundTrip(t *testing.T) {
+	g := startGateway(t, 100, farmTable)
+	key := adminCreateKey(t, g.AdminAddr, "farm/test")
+
+	res := chatCompletion(t, g.PublicAddr, key, `{"model":"gpt-flag","reasoning_effort":"xhigh","messages":[{"role":"user","content":"weather?"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status: got %d, want 200; body %s", res.StatusCode, body)
+	}
+	var chat struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&chat); err != nil {
+		t.Fatal(err)
+	}
+	if chat.Model != "gpt-flag" {
+		t.Errorf("model: got %q, want %q", chat.Model, "gpt-flag")
+	}
+	if len(chat.Choices) != 1 {
+		t.Fatalf("choices: got %d, want 1", len(chat.Choices))
+	}
+	if got := chat.Choices[0].FinishReason; got != "tool_calls" {
+		t.Errorf("finish reason: got %q, want %q", got, "tool_calls")
+	}
+	calls := chat.Choices[0].Message.ToolCalls
+	if len(calls) != 1 {
+		t.Fatalf("tool calls: got %d, want 1", len(calls))
+	}
+	if calls[0].ID != "call_1" || calls[0].Function.Name != "get_weather" {
+		t.Errorf("tool call: got id %q name %q, want call_1 and get_weather", calls[0].ID, calls[0].Function.Name)
+	}
+
+	seen := g.OpenAI.seen()
+	if len(seen) != 1 || seen[0].Path != "/v1/responses" {
+		t.Fatalf("upstream requests: got %v, want one to /v1/responses", upstreamPaths(seen))
+	}
+	var upstream struct {
+		Model     string `json:"model"`
+		Store     *bool  `json:"store"`
+		Reasoning *struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	if err := json.Unmarshal(seen[0].Body, &upstream); err != nil {
+		t.Fatal(err)
+	}
+	if upstream.Model != "gpt-5.6-luna" {
+		t.Errorf("upstream model: got %q, want %q", upstream.Model, "gpt-5.6-luna")
+	}
+	if upstream.Reasoning == nil || upstream.Reasoning.Effort != "xhigh" {
+		t.Errorf("upstream reasoning: got %+v, want effort xhigh", upstream.Reasoning)
+	}
+	if upstream.Store == nil || *upstream.Store {
+		t.Errorf("upstream store: got %v, want an explicit false", upstream.Store)
+	}
+
+	if got := metricValue(t, g.MetricsAddr, `modelgate_tokens_total{direction="output",model="gpt-flag"}`); got < 50 {
+		t.Errorf("booked output tokens: got %v, want at least 50 (reasoning included)", got)
+	}
+}
+
+func TestChatCompletionsUpstreamStillDefault(t *testing.T) {
+	g := startGateway(t, 100, farmTable)
+	key := adminCreateKey(t, g.AdminAddr, "farm/default")
+
+	res := chatCompletion(t, g.PublicAddr, key, `{"model":"gpt-plain","messages":[{"role":"user","content":"hi"}]}`)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(res.Body)
+		t.Fatalf("status: got %d, want 200; body %s", res.StatusCode, body)
+	}
+	var chat struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&chat); err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Choices) != 1 || chat.Choices[0].Message.Content != "hello from fake chat completions" {
+		t.Errorf("choices: got %+v, want the chat completions answer", chat.Choices)
+	}
+
+	paths := upstreamPaths(g.OpenAI.seen())
+	if len(paths) != 1 || paths[0] != "/v1/chat/completions" {
+		t.Fatalf("upstream paths: got %v, want only /v1/chat/completions", paths)
+	}
+}
+
+func TestResponsesUpstreamStream(t *testing.T) {
+	for _, includeUsage := range []bool{false, true} {
+		t.Run(fmt.Sprintf("include_usage=%v", includeUsage), func(t *testing.T) {
+			g := startGateway(t, 100, farmTable)
+			key := adminCreateKey(t, g.AdminAddr, "farm/stream")
+			body := `{"model":"gpt-flag","stream":true,"messages":[{"role":"user","content":"weather?"}]}`
+			if includeUsage {
+				body = `{"model":"gpt-flag","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"weather?"}]}`
+			}
+
+			res := chatCompletion(t, g.PublicAddr, key, body)
+			if res.StatusCode != http.StatusOK {
+				payload, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				t.Fatalf("status: got %d, want 200; body %s", res.StatusCode, payload)
+			}
+			payload, err := io.ReadAll(res.Body)
+			res.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var content, arguments strings.Builder
+			finishReason, toolCallID := "", ""
+			usageChunks := 0
+			sawDone := false
+			for line := range strings.Lines(string(payload)) {
+				data, ok := strings.CutPrefix(strings.TrimSpace(line), "data: ")
+				if !ok {
+					continue
+				}
+				if data == "[DONE]" {
+					sawDone = true
+					continue
+				}
+				if sawDone {
+					t.Fatalf("chunk after [DONE]: %s", data)
+				}
+				var chunk struct {
+					Object  string `json:"object"`
+					Model   string `json:"model"`
+					Choices []struct {
+						FinishReason *string `json:"finish_reason"`
+						Delta        struct {
+							Content   string `json:"content"`
+							ToolCalls []struct {
+								ID       string `json:"id"`
+								Function struct {
+									Name      string `json:"name"`
+									Arguments string `json:"arguments"`
+								} `json:"function"`
+							} `json:"tool_calls"`
+						} `json:"delta"`
+					} `json:"choices"`
+					Usage *struct {
+						CompletionTokens int64 `json:"completion_tokens"`
+					} `json:"usage"`
+				}
+				if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+					t.Fatalf("bad chunk %q: %v", data, err)
+				}
+				if chunk.Object != "chat.completion.chunk" {
+					t.Errorf("chunk object: got %q, want chat.completion.chunk", chunk.Object)
+				}
+				if chunk.Model != "gpt-flag" {
+					t.Errorf("chunk model: got %q, want gpt-flag", chunk.Model)
+				}
+				if chunk.Usage != nil {
+					usageChunks++
+					if chunk.Usage.CompletionTokens != 60 {
+						t.Errorf("usage chunk completion tokens: got %d, want 60", chunk.Usage.CompletionTokens)
+					}
+				}
+				for _, choice := range chunk.Choices {
+					content.WriteString(choice.Delta.Content)
+					for _, call := range choice.Delta.ToolCalls {
+						if call.ID != "" {
+							toolCallID = call.ID
+						}
+						arguments.WriteString(call.Function.Arguments)
+					}
+					if choice.FinishReason != nil {
+						finishReason = *choice.FinishReason
+					}
+				}
+			}
+			if !sawDone {
+				t.Error("stream did not end with [DONE]")
+			}
+			if got := content.String(); got != "Let me check." {
+				t.Errorf("streamed content: got %q, want %q", got, "Let me check.")
+			}
+			if toolCallID != "call_1" || arguments.String() != `{"city":"Paris"}` {
+				t.Errorf("streamed tool call: got id %q arguments %q", toolCallID, arguments.String())
+			}
+			if finishReason != "tool_calls" {
+				t.Errorf("finish reason: got %q, want tool_calls", finishReason)
+			}
+			if want := map[bool]int{false: 0, true: 1}[includeUsage]; usageChunks != want {
+				t.Errorf("usage chunks: got %d, want %d", usageChunks, want)
+			}
+
+			if got := metricValue(t, g.MetricsAddr, `modelgate_tokens_total{direction="output",model="gpt-flag"}`); got != 60 {
+				t.Errorf("booked output tokens: got %v, want exactly 60 (booked once)", got)
+			}
+			if got := metricValue(t, g.MetricsAddr, `modelgate_tokens_total{direction="input",model="gpt-flag"}`); got != 60 {
+				t.Errorf("booked input tokens: got %v, want exactly 60 (100 less 40 cached, booked once)", got)
+			}
+		})
+	}
+}
+
+func upstreamPaths(requests []upstreamRequest) []string {
+	paths := make([]string, len(requests))
+	for i, req := range requests {
+		paths[i] = req.Path
+	}
+	return paths
 }
