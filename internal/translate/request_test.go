@@ -42,6 +42,8 @@ func TestToAnthropicGolden(t *testing.T) {
 		"plain_chat",
 		"sampling_stop_string",
 		"sampling_stop_array",
+		"stop_null",
+		"stop_empty_string",
 		"tools_auto",
 		"tools_forced",
 		"tool_roundtrip",
@@ -74,6 +76,37 @@ func TestToAnthropicGolden(t *testing.T) {
 				t.Errorf("mismatch\ngot:\n%s\nwant:\n%s", gotJSON, wantJSON)
 			}
 		})
+	}
+}
+
+func TestParseStop(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "absent"},
+		{name: "null", raw: `null`},
+		{name: "empty string", raw: `""`},
+		{name: "empty list", raw: `[]`},
+		{name: "list of empty strings", raw: `["",""]`},
+		{name: "string", raw: `"END"`, want: []string{"END"}},
+		{name: "list", raw: `["END","STOP"]`, want: []string{"END", "STOP"}},
+		{name: "list with an empty entry", raw: `["","END"]`, want: []string{"END"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseStop(json.RawMessage(tc.raw))
+			if err != nil {
+				t.Fatalf("parseStop(%s): %v", tc.raw, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("parseStop(%s) = %#v, want %#v", tc.raw, got, tc.want)
+			}
+		})
+	}
+	if _, err := parseStop(json.RawMessage(`42`)); err == nil {
+		t.Error("parseStop(42): expected an error")
 	}
 }
 

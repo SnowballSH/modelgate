@@ -87,6 +87,8 @@ func TestToResponsesRejects(t *testing.T) {
 		"logprobs":          func(r *oai.ChatRequest) { v := true; r.Logprobs = &v },
 		"effort":            func(r *oai.ChatRequest) { r.ReasoningEffort = "ultra" },
 		"stop":              func(r *oai.ChatRequest) { r.Stop = json.RawMessage(`"END"`) },
+		"stop_list":         func(r *oai.ChatRequest) { r.Stop = json.RawMessage(`["END","STOP"]`) },
+		"stop_not_a_string": func(r *oai.ChatRequest) { r.Stop = json.RawMessage(`42`) },
 		"frequency_penalty": func(r *oai.ChatRequest) { r.FrequencyPenalty = &half },
 		"presence_penalty":  func(r *oai.ChatRequest) { r.PresencePenalty = &half },
 		"seed":              func(r *oai.ChatRequest) { r.Seed = &seed },
@@ -157,6 +159,26 @@ func TestToResponsesNormalisesNonDefaultSampling(t *testing.T) {
 		if bytes.Contains(raw, []byte(`"`+key+`"`)) {
 			t.Fatalf("%s reached the responses upstream: %s", key, raw)
 		}
+	}
+}
+
+// A stop field that names no sequence is unset, not an unsupported parameter:
+// the Anthropic path reads it the same way through the same parseStop.
+func TestToResponsesAcceptsEmptyStop(t *testing.T) {
+	base := loadChatRequest(t, filepath.Join("testdata", "responses_plain.input.json"))
+	for name, raw := range map[string]string{
+		"null":                  `null`,
+		"empty string":          `""`,
+		"empty list":            `[]`,
+		"list of empty strings": `["",""]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := base
+			req.Stop = json.RawMessage(raw)
+			if _, err := ToResponses(req, "gpt-real", 1024); err != nil {
+				t.Fatalf("stop %s must be read as unset: %v", raw, err)
+			}
+		})
 	}
 }
 

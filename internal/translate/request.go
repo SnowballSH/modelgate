@@ -171,20 +171,15 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 }
 
 func assistantMessage(msg oai.Message) (anthro.Message, error) {
-	var blocks []anthro.ContentBlock
-	if len(msg.Content) > 0 {
-		text, err := contentText(msg.Content)
-		if err != nil {
-			return anthro.Message{}, err
-		}
-		if text != "" {
-			blocks = append(blocks, anthro.ContentBlock{Type: "text", Text: text})
-		}
+	text, calls, err := assistantParts(msg)
+	if err != nil {
+		return anthro.Message{}, err
 	}
-	for _, call := range msg.ToolCalls {
-		if !json.Valid([]byte(call.Function.Arguments)) {
-			return anthro.Message{}, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
-		}
+	var blocks []anthro.ContentBlock
+	if text != "" {
+		blocks = append(blocks, anthro.ContentBlock{Type: "text", Text: text})
+	}
+	for _, call := range calls {
 		blocks = append(blocks, anthro.ContentBlock{
 			Type:  "tool_use",
 			ID:    call.ID,
@@ -192,35 +187,69 @@ func assistantMessage(msg oai.Message) (anthro.Message, error) {
 			Input: json.RawMessage(call.Function.Arguments),
 		})
 	}
-	if len(blocks) == 0 {
-		return anthro.Message{}, errors.New("assistant message has neither content nor tool calls")
-	}
 	return anthro.Message{Role: "assistant", Content: blocks}, nil
 }
 
+// assistantParts reads an assistant message as the text and the tool calls a
+// history item should carry, refusing one that would render as neither. Both
+// translators build their assistant items from it, so the rules stay one rule.
+func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
+	var text string
+	if len(msg.Content) > 0 {
+		content, err := contentText(msg.Content)
+		if err != nil {
+			return "", nil, err
+		}
+		text = content
+	}
+	for _, call := range msg.ToolCalls {
+		if !json.Valid([]byte(call.Function.Arguments)) {
+			return "", nil, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
+		}
+	}
+	if text == "" && len(msg.ToolCalls) == 0 {
+		return "", nil, errors.New("assistant message has neither content nor tool calls")
+	}
+	return text, msg.ToolCalls, nil
+}
+
 func contentBlocks(content json.RawMessage) ([]anthro.ContentBlock, error) {
+	texts, err := nonEmptyTexts(content)
+	if err != nil {
+		return nil, err
+	}
+	blocks := make([]anthro.ContentBlock, len(texts))
+	for i, text := range texts {
+		blocks[i] = anthro.ContentBlock{Type: "text", Text: text}
+	}
+	return blocks, nil
+}
+
+// nonEmptyTexts reads a message content field — a plain string or an array of
+// text parts — as the texts a content builder should render, refusing content
+// that carries no text at all. Both translators map over it.
+func nonEmptyTexts(content json.RawMessage) ([]string, error) {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
 		if s == "" {
 			return nil, errors.New("message content is empty")
 		}
-		return []anthro.ContentBlock{{Type: "text", Text: s}}, nil
+		return []string{s}, nil
 	}
 	parts, err := textParts(content)
 	if err != nil {
 		return nil, err
 	}
-	var blocks []anthro.ContentBlock
-	for _, p := range parts {
-		if p == "" {
-			continue
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			texts = append(texts, part)
 		}
-		blocks = append(blocks, anthro.ContentBlock{Type: "text", Text: p})
 	}
-	if len(blocks) == 0 {
+	if len(texts) == 0 {
 		return nil, errors.New("message content is empty")
 	}
-	return blocks, nil
+	return texts, nil
 }
 
 func contentText(content json.RawMessage) (string, error) {
@@ -253,26 +282,46 @@ func textParts(content json.RawMessage) ([]string, error) {
 	return texts, nil
 }
 
+// parseStop reads the Chat Completions stop field. A JSON null, an empty
+// string and a list that contributes no non-empty sequence all mean unset, so
+// no upstream is ever asked to stop on a sequence the client did not name.
 func parseStop(raw json.RawMessage) ([]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	var one string
 	if err := json.Unmarshal(raw, &one); err == nil {
-		return []string{one}, nil
+		return nonEmptyStops([]string{one}), nil
 	}
 	var many []string
 	if err := json.Unmarshal(raw, &many); err == nil {
-		return many, nil
+		return nonEmptyStops(many), nil
 	}
 	return nil, errors.New("stop must be a string or array of strings")
 }
 
+func nonEmptyStops(stops []string) []string {
+	kept := slices.DeleteFunc(stops, func(s string) bool { return s == "" })
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
 func convertTools(tools []oai.Tool) ([]anthro.Tool, error) {
+	return functionTools(tools, func(fn oai.ToolFunction, schema json.RawMessage) anthro.Tool {
+		return anthro.Tool{Name: fn.Name, Description: fn.Description, InputSchema: schema}
+	})
+}
+
+// functionTools refuses any tool type but function and renders the rest
+// through build, substituting the empty-object schema both upstreams require
+// for a tool that declares no parameters.
+func functionTools[T any](tools []oai.Tool, build func(fn oai.ToolFunction, schema json.RawMessage) T) ([]T, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
-	result := make([]anthro.Tool, len(tools))
+	result := make([]T, len(tools))
 	for i, t := range tools {
 		if t.Type != "function" {
 			return nil, fmt.Errorf("unsupported tool type: %q", t.Type)
@@ -281,11 +330,7 @@ func convertTools(tools []oai.Tool) ([]anthro.Tool, error) {
 		if schema == nil {
 			schema = defaultInputSchema
 		}
-		result[i] = anthro.Tool{
-			Name:        t.Function.Name,
-			Description: t.Function.Description,
-			InputSchema: schema,
-		}
+		result[i] = build(t.Function, schema)
 	}
 	return result, nil
 }

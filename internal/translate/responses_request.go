@@ -20,8 +20,12 @@ func ToResponses(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 	if req.Logprobs != nil && *req.Logprobs {
 		return oairesp.Request{}, errors.New("logprobs is not supported on the responses upstream")
 	}
+	stops, err := parseStop(req.Stop)
+	if err != nil {
+		return oairesp.Request{}, err
+	}
 	for name, set := range map[string]bool{
-		"stop":              len(req.Stop) > 0 && string(req.Stop) != "null",
+		"stop":              len(stops) > 0,
 		"frequency_penalty": req.FrequencyPenalty != nil,
 		"presence_penalty":  req.PresencePenalty != nil,
 		"seed":              req.Seed != nil,
@@ -129,20 +133,15 @@ func responsesInput(messages []oai.Message) (string, []oairesp.Item, error) {
 }
 
 func responsesAssistantItems(msg oai.Message) ([]oairesp.Item, error) {
-	var items []oairesp.Item
-	if len(msg.Content) > 0 {
-		text, err := contentText(msg.Content)
-		if err != nil {
-			return nil, err
-		}
-		if text != "" {
-			items = append(items, oairesp.Item{Role: "assistant", Text: text})
-		}
+	text, calls, err := assistantParts(msg)
+	if err != nil {
+		return nil, err
 	}
-	for _, call := range msg.ToolCalls {
-		if !json.Valid([]byte(call.Function.Arguments)) {
-			return nil, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
-		}
+	var items []oairesp.Item
+	if text != "" {
+		items = append(items, oairesp.Item{Role: "assistant", Text: text})
+	}
+	for _, call := range calls {
 		items = append(items, oairesp.Item{
 			Type:      "function_call",
 			CallID:    call.ID,
@@ -150,59 +149,31 @@ func responsesAssistantItems(msg oai.Message) ([]oairesp.Item, error) {
 			Arguments: call.Function.Arguments,
 		})
 	}
-	if len(items) == 0 {
-		return nil, errors.New("assistant message has neither content nor tool calls")
-	}
 	return items, nil
 }
 
 func responsesContentParts(content json.RawMessage) ([]oairesp.ContentPart, error) {
-	var s string
-	if err := json.Unmarshal(content, &s); err == nil {
-		if s == "" {
-			return nil, errors.New("message content is empty")
-		}
-		return []oairesp.ContentPart{{Type: "input_text", Text: s}}, nil
-	}
-	texts, err := textParts(content)
+	texts, err := nonEmptyTexts(content)
 	if err != nil {
 		return nil, err
 	}
-	var parts []oairesp.ContentPart
-	for _, text := range texts {
-		if text == "" {
-			continue
-		}
-		parts = append(parts, oairesp.ContentPart{Type: "input_text", Text: text})
-	}
-	if len(parts) == 0 {
-		return nil, errors.New("message content is empty")
+	parts := make([]oairesp.ContentPart, len(texts))
+	for i, text := range texts {
+		parts[i] = oairesp.ContentPart{Type: "input_text", Text: text}
 	}
 	return parts, nil
 }
 
 func responsesTools(tools []oai.Tool) ([]oairesp.Tool, error) {
-	if len(tools) == 0 {
-		return nil, nil
-	}
-	result := make([]oairesp.Tool, len(tools))
-	for i, t := range tools {
-		if t.Type != "function" {
-			return nil, fmt.Errorf("unsupported tool type: %q", t.Type)
-		}
-		schema := t.Function.Parameters
-		if schema == nil {
-			schema = defaultInputSchema
-		}
-		result[i] = oairesp.Tool{
+	return functionTools(tools, func(fn oai.ToolFunction, schema json.RawMessage) oairesp.Tool {
+		return oairesp.Tool{
 			Type:        "function",
-			Name:        t.Function.Name,
-			Description: t.Function.Description,
+			Name:        fn.Name,
+			Description: fn.Description,
 			Parameters:  schema,
 			Strict:      false,
 		}
-	}
-	return result, nil
+	})
 }
 
 func responsesToolChoice(raw json.RawMessage) (json.RawMessage, error) {
