@@ -1,6 +1,7 @@
 // Package translate converts between the OpenAI Chat Completions wire
-// format and the Anthropic Messages wire format, in both directions,
-// including SSE stream events.
+// format and the wire formats modelgate speaks upstream: the Anthropic
+// Messages API, in both directions and including SSE stream events, and
+// the OpenAI Responses API.
 package translate
 
 import (

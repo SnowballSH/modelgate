@@ -1,0 +1,8 @@
+{"model":"gpt-real","input":[
+ {"type":"message","role":"user","content":[{"type":"input_text","text":"weather in both?"}]},
+ {"type":"function_call","call_id":"call_a","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},
+ {"type":"function_call","call_id":"call_b","name":"get_weather","arguments":"{\"city\":\"Rome\"}"},
+ {"type":"function_call_output","call_id":"call_a","output":"18C"},
+ {"type":"function_call_output","call_id":"call_b","output":"24C"},
+ {"role":"assistant","content":"Paris 18C, Rome 24C."}],
+ "parallel_tool_calls":true,"max_output_tokens":256,"store":false}
