@@ -5,10 +5,10 @@
 - `reasoning_effort` on Anthropic models is translated to `output_config.effort`
   (`none`/`minimal` → `low`; unknown levels are a 400) instead of rejected.
 - Behaviour change on Anthropic models: `temperature` and `top_p` are dropped
-  whenever `reasoning_effort` is set. Models that accept `output_config.effort`
-  reject a temperature other than 1.0 and a `top_p` below 0.99, so a request
-  that carried both used to 400 upstream and now succeeds without its sampling
-  parameters.
+  whenever `reasoning_effort` is set. v0.4.0 rejected such a request itself, so
+  it never reached the upstream; v0.5.0 translates the effort and sends the
+  request without its sampling parameters, because models released after Claude
+  Opus 4.6 reject a temperature other than 1.0 and a `top_p` below 0.99.
 - `developer` messages fold into the Anthropic `system` prompt.
 - A `stop` of `null`, of `""`, or of a list with no non-empty entry is read as
   unset on both upstreams: Anthropic no longer receives `stop_sequences: [""]`,
