@@ -146,6 +146,7 @@ breaker.
 |---|---|
 | `reasoning_effort` | Translated to `output_config.effort`. `none` and `minimal` map to `low`; `low`, `medium`, `high`, `xhigh` and `max` pass through; anything else is a 400. |
 | `temperature`, `top_p` | Forwarded, unless `reasoning_effort` is set: models that accept effort reject a temperature other than 1.0 and a `top_p` below 0.99, so effort displaces both. |
+| `stop` | Forwarded as `stop_sequences`. A `null`, an empty string, and a list with no non-empty entry all mean unset, so no `stop_sequences` is sent. |
 | `developer` messages | Folded into `system`, exactly like a `system` message. |
 | `response_format`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `n` other than 1 | Rejected with a 400. |
 
@@ -164,7 +165,8 @@ requests does not preserve Anthropic's cached prefixes from earlier turns.
 | `max_completion_tokens`, `max_tokens` | Sent as `max_output_tokens`, which caps reasoning and visible output together. |
 | `system`, `developer` messages | Folded into `instructions`. |
 | `response_format` | Translated to `text.format`. |
-| `stop`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `n` other than 1 | Rejected with a 400. |
+| `stop` | Rejected with a 400 when it names a stop sequence. A `null`, an empty string, and a list with no non-empty entry are read as unset, exactly as on Anthropic models, and are accepted. |
+| `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `n` other than 1 | Rejected with a 400. |
 
 Requests are sent with `store: false`, so nothing is retained upstream.
 The known cost of that: a Chat Completions history carries no reasoning
@@ -191,6 +193,34 @@ month-to-date spend reaches `BUDGET_MONTHLY_USD`, new requests get
 `quota_exhausted`. In-flight streams are allowed to finish, so overshoot
 is bounded by `MAX_CONCURRENT_REQUESTS` requests of at most `max_tokens`
 each.
+
+## Logs
+
+JSON `slog` records on stderr. Two carry operational detail.
+
+Every request through the public listener logs exactly one record, at INFO,
+when its outcome is known — pre-admission rejections included:
+
+| Field | Value |
+|---|---|
+| `msg` | `request` |
+| `key_id` | the admitted key's id, empty when admission failed |
+| `model` | the resolved model id, `unknown` until admission resolves it, so every pre-admission rejection reports `unknown` |
+| `upstream` | `chat_completions` or `responses` on OpenAI models; empty on Anthropic models, which have one upstream, and empty when admission failed |
+| `reasoning_effort` | the canonical effort, empty when the request named none or named one outside the vocabulary |
+| `stream` | whether the client asked for a stream |
+| `status` | the outcome, the same label the request metric carries |
+
+No field carries a client-supplied string: `model` is compared against the
+model table and `reasoning_effort` against the accepted vocabulary before
+either is logged.
+
+When an OpenAI upstream answers 4xx or 5xx, its `error.message` is logged at
+WARN as `openai upstream rejected the request`, with `path`, `status` and
+`message`. The message is redacted of credential-shaped text and truncated,
+and it never reaches the client's error body. A 401 or 403 logs no message at
+all: OpenAI quotes part of the refused key back in those bodies, and the
+status already says what happened.
 
 ## Development
 

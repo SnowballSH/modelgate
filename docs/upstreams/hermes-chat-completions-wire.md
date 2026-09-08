@@ -74,7 +74,8 @@ that decides this:
 
 ```text
 PENDING — paste the summary line here, e.g.
-model="…" stream=… temperature=… top_p=… reasoning_effort="…" tools=N messages=N
+model="…" stream=… temperature=… top_p=… reasoning_effort="…" max_tokens=…
+max_completion_tokens=… parallel_tool_calls=… tools=N messages=N
 ```
 
 and the captured body, pretty-printed
@@ -87,12 +88,24 @@ PENDING — paste the captured request body here.
 
 ### Verdict
 
-PENDING. Answer three questions:
+PENDING. Answer four questions:
 
 1. Does `temperature` appear, and with what value?
 2. Does `top_p` appear, and with what value?
 3. Is either value configurable in the Hermes profile, or fixed by the
    transport?
+4. Does `max_tokens` (or `max_completion_tokens`) appear, and with what
+   value?
 
 If a value appears that neither translator normalises, say so here and
 open the correction against B2 and B5 before the tag.
+
+`max_tokens` is the fourth question because it is not normalised anywhere:
+`translate.ToResponses` sends it as `max_output_tokens`, which caps
+reasoning and visible output **together**. A small Hermes default — the
+kind that is generous for a Chat Completions answer — therefore spends its
+whole budget on reasoning at `xhigh` and returns `finish_reason: length`
+with empty content, having billed for every reasoning token. If the capture
+shows a small value, the fix is the Hermes profile's `max_tokens`, not the
+translator; record the number here so F2/V4 can set it before the fleet
+runs.

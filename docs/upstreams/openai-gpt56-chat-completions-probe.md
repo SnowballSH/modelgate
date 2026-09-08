@@ -86,3 +86,25 @@ PENDING — paste the four summary lines and their JSON objects here.
 
 PENDING — one of the three rows of the table above, naming the run that
 shows it.
+
+## Credential-rejection body shapes: documented, not probed — PENDING
+
+`provider.logsUpstreamMessage` suppresses the upstream `error.message` log
+for 401 and 403 because OpenAI's rejection bodies quote the key they
+refused, masked only in the middle:
+`{"error":{"message":"Incorrect API key provided: sk-…"}}`. That shape is
+what B7 read from OpenAI's error-code documentation; no live 401 or 403 was
+observed here, so the gate rests on the documentation alone.
+
+A wrong guess about the shape costs a diagnostic line, not a leak:
+`redactCredentials` runs over every message that is logged, so a
+key-shaped string in a body this record has not seen is replaced before it
+reaches the log.
+
+To close this: run any probe script above against a key file holding a
+deliberately wrong key and paste the status and body here, with the key
+material elided. The call is refused before it is billed.
+
+```text
+PENDING — paste the 401 status line and body here (key material elided).
+```
