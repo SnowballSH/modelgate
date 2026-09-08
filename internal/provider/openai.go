@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -237,12 +238,19 @@ func (c *OpenAIClient) do(ctx context.Context, path string, body []byte) (*http.
 	if res.StatusCode != http.StatusOK {
 		message := upstreamErrorMessage(res.Body)
 		res.Body.Close()
-		if message != "" {
+		if message != "" && logsUpstreamMessage(res.StatusCode) {
 			slog.Warn("openai upstream rejected the request", "path", path, "status", res.StatusCode, "message", message)
 		}
 		return nil, res.StatusCode, mapStatus(res.StatusCode)
 	}
 	return res, res.StatusCode, nil
+}
+
+// logsUpstreamMessage reports whether a status carries detail worth logging.
+// A credential rejection does not: OpenAI's 401 body quotes part of the key it
+// refused, and the status code already says everything it diagnoses.
+func logsUpstreamMessage(status int) bool {
+	return status != http.StatusUnauthorized && status != http.StatusForbidden
 }
 
 // upstreamErrorMessage returns what the upstream said went wrong, for the log
@@ -259,9 +267,15 @@ func upstreamErrorMessage(body io.Reader) string {
 		} `json:"error"`
 	}
 	if json.Unmarshal(raw, &parsed) == nil && parsed.Error.Message != "" {
-		return truncate(parsed.Error.Message)
+		return truncate(redactCredentials(parsed.Error.Message))
 	}
-	return truncate(strings.TrimSpace(string(raw)))
+	return truncate(redactCredentials(strings.TrimSpace(string(raw))))
+}
+
+var credentialShaped = regexp.MustCompile(`(?i)(?:\bbearer\s+\S+|\bsk-[A-Za-z0-9._-]+)`)
+
+func redactCredentials(s string) string {
+	return credentialShaped.ReplaceAllString(s, "[redacted]")
 }
 
 func truncate(s string) string {

@@ -636,3 +636,66 @@ func TestOpenAILogsTruncatedErrorBody(t *testing.T) {
 		t.Error("truncation split a rune")
 	}
 }
+
+func TestOpenAIDoesNotLogCredentialRejections(t *testing.T) {
+	cases := []struct {
+		status int
+		body   string
+	}{
+		{
+			http.StatusUnauthorized,
+			`{"error":{"message":"Incorrect API key provided: sk-proj-AbCd1234************WxYz. You can find your API key at https://platform.openai.com/account/api-keys."}}`,
+		},
+		{
+			http.StatusForbidden,
+			`{"error":{"message":"Your key sk-proj-AbCd1234************WxYz does not have access to this project."}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+			logs := captureLogs(t)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := newTestOpenAIClient(srv.URL).Responses(context.Background(), responsesRequest())
+			if !errors.Is(err, ErrAuth) {
+				t.Fatalf("err = %v, want ErrAuth", err)
+			}
+			record := logs.String()
+			for _, forbidden := range []string{"sk-proj", "AbCd1234", "API key"} {
+				if strings.Contains(record, forbidden) {
+					t.Errorf("log carries %q from the upstream credential rejection: %s", forbidden, record)
+				}
+			}
+			if strings.Contains(err.Error(), "sk-proj") {
+				t.Errorf("error leaks the upstream key fragment: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenAIRedactsCredentialsFromLoggedMessage(t *testing.T) {
+	logs := captureLogs(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Unknown parameter: 'input[0].id' (key sk-proj-AbCd1234WxYz, header Bearer sk-proj-AbCd1234WxYz)."}}`))
+	}))
+	defer srv.Close()
+
+	_, err := newTestOpenAIClient(srv.URL).Responses(context.Background(), responsesRequest())
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("err = %v, want ErrInvalidRequest", err)
+	}
+	record := logs.String()
+	if !strings.Contains(record, "Unknown parameter") {
+		t.Errorf("log dropped the diagnostic message: %s", record)
+	}
+	for _, forbidden := range []string{"sk-proj", "AbCd1234", "Bearer"} {
+		if strings.Contains(record, forbidden) {
+			t.Errorf("log carries %q: %s", forbidden, record)
+		}
+	}
+}
