@@ -11,8 +11,10 @@
   Opus 4.6 reject a temperature other than 1.0 and a `top_p` below 0.99.
 - `developer` messages fold into the Anthropic `system` prompt.
 - A `stop` of `null`, of `""`, or of a list with no non-empty entry is read as
-  unset on both upstreams: Anthropic no longer receives `stop_sequences: [""]`,
-  and the Responses upstream accepts such a request instead of a 400.
+  unset on the two translated paths: Anthropic no longer receives
+  `stop_sequences: [""]`, and the Responses upstream accepts such a request
+  instead of a 400. The OpenAI Chat Completions path still forwards `stop`
+  verbatim, as it does the rest of the request.
 - Model table: `upstream_api: responses` (OpenAI models only) routes a model
   through the Responses API; Chat Completions stays the default. OpenAI
   documents GPT-5.6 function tools on Chat Completions as compatible only

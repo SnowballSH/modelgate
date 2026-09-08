@@ -282,9 +282,10 @@ func textParts(content json.RawMessage) ([]string, error) {
 	return texts, nil
 }
 
-// parseStop reads the Chat Completions stop field. A JSON null, an empty
-// string and a list that contributes no non-empty sequence all mean unset, so
-// no upstream is ever asked to stop on a sequence the client did not name.
+// parseStop reads the Chat Completions stop field for the two translated
+// paths, Anthropic and Responses. A JSON null, an empty string and a list that
+// contributes no non-empty sequence all mean unset, so neither is asked to stop
+// on a sequence the client did not name.
 func parseStop(raw json.RawMessage) ([]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
