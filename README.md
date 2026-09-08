@@ -5,9 +5,10 @@ OpenAI. It issues its own revocable client keys and meters spend per key
 and globally against hard monthly ceilings, so one set of provider
 credentials can serve many clients without being handed to any of them.
 Requests for Anthropic models are translated to the Anthropic Messages
-API (streaming included); OpenAI models pass through, with modelgate
-supplying the model name, spend accounting, and error responses. A
-key-management page is embedded in the binary.
+API (streaming included); OpenAI models go to Chat Completions, or to the
+Responses API when the model table says so, with modelgate supplying the
+model name, spend accounting, and error responses. A key-management page
+is embedded in the binary.
 
 ## Quickstart
 
@@ -37,8 +38,10 @@ curl -s 127.0.0.1:8080/v1/chat/completions   -H "Authorization: Bearer mg_..."  
 ```
 
 A container image is published as `ghcr.io/snowballsh/modelgate` on each
-tag. The pre-built admin UI is checked in under `webui/dist`, so
-`go build ./cmd/modelgate` needs no Node toolchain.
+tag, built with its tag as the version `modelgate --version` prints (an
+unreleased build prints `dev`). The pre-built admin UI is checked in
+under `webui/dist`, so `go build ./cmd/modelgate` needs no Node
+toolchain.
 
 ## Listeners
 
@@ -88,15 +91,23 @@ startup.
 
 ## Model table
 
-`MODELS_CONFIG_FILE` maps public model IDs to a provider (`anthropic`,
-the default, or `openai`), the provider's model name, and USD per-MTok
-prices. A request naming a model absent from the table, or listed
-without all four prices, is refused — an unpriced request can never run.
+`MODELS_CONFIG_FILE` maps public model IDs to the provider that serves
+them, the provider's own model name, and USD per-MTok prices. A request
+naming a model absent from the table, or listed without all four prices,
+is refused — an unpriced request can never run.
+
+| Field | Meaning |
+|---|---|
+| `provider` | `anthropic` (the default) or `openai` |
+| `upstream_api` | Which OpenAI API serves the model: `chat_completions` (the default) or `responses`. Valid on `openai` models only; an unknown value, or any value on an Anthropic model, refuses the table |
+| `provider_model` | The model name sent upstream |
+| `input_usd_per_mtok`, `output_usd_per_mtok`, `cache_read_usd_per_mtok`, `cache_write_usd_per_mtok` | All four required, all positive |
+
 OpenAI bills no separate cache write, so for OpenAI models set
 `cache_write_usd_per_mtok` to the input price; the gateway never
-multiplies it by a nonzero count.
-Each provider referenced by the table must have its credential file
-configured, and each gets its own circuit breaker.
+multiplies it by a nonzero count. Each provider referenced by the table
+must have its credential file configured, and each gets its own circuit
+breaker.
 
 ```json
 {
@@ -115,6 +126,15 @@ configured, and each gets its own circuit breaker.
       "output_usd_per_mtok": 12.0,
       "cache_read_usd_per_mtok": 0.20,
       "cache_write_usd_per_mtok": 2.0
+    },
+    "gpt-5.6-luna": {
+      "provider": "openai",
+      "upstream_api": "responses",
+      "provider_model": "gpt-5.6-luna",
+      "input_usd_per_mtok": 1.25,
+      "output_usd_per_mtok": 10.0,
+      "cache_read_usd_per_mtok": 0.125,
+      "cache_write_usd_per_mtok": 1.25
     }
   }
 }
@@ -135,6 +155,23 @@ model is refused upstream and modelgate answers with the provider's error.
 And top-level effort shapes the rendered prompt, so changing it between
 requests does not preserve Anthropic's cached prefixes from earlier turns.
 
+## Request parameters on the Responses upstream
+
+| Request field | Handling |
+|---|---|
+| `reasoning_effort` | Sent as `reasoning.effort` unchanged; anything outside `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max` is a 400. Which of those a given model accepts is the model's own business, so an unsupported level is refused upstream. |
+| `temperature`, `top_p` | Dropped: this upstream serves reasoning models, which accept only the default of either. |
+| `max_completion_tokens`, `max_tokens` | Sent as `max_output_tokens`, which caps reasoning and visible output together. |
+| `system`, `developer` messages | Folded into `instructions`. |
+| `response_format` | Translated to `text.format`. |
+| `stop`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `n` other than 1 | Rejected with a 400. |
+
+Requests are sent with `store: false`, so nothing is retained upstream.
+The known cost of that: a Chat Completions history carries no reasoning
+items, so an assistant tool call goes back with its `call_id` alone and
+the model re-reasons after every tool result — reasoning it bills for and
+`max_output_tokens` caps alongside the answer.
+
 ## Keys
 
 Keys look like `mg_<id>_<secret>`. Only the SHA-256 of the secret is
@@ -145,7 +182,10 @@ monthly USD quota, and an expiry.
 ## Spend ceilings
 
 Every completed request's token usage is priced from the model table and
-accumulated per key and globally by UTC calendar month. Once
+accumulated per key and globally by UTC calendar month. Reasoning tokens
+are part of the output count and are billed as output tokens; when the
+upstream reports them separately they are passed on to the client in
+`usage.completion_tokens_details.reasoning_tokens`. Once
 month-to-date spend reaches `BUDGET_MONTHLY_USD`, new requests get
 `budget_exhausted`; a key that reaches its own quota gets
 `quota_exhausted`. In-flight streams are allowed to finish, so overshoot
