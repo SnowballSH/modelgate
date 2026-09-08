@@ -17,6 +17,7 @@ import (
 	"github.com/SnowballSH/modelgate/internal/anthro"
 	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/oairesp"
 	"github.com/SnowballSH/modelgate/internal/provider"
 	"github.com/SnowballSH/modelgate/internal/store"
 	"github.com/SnowballSH/modelgate/internal/translate"
@@ -99,11 +100,52 @@ func (h *PublicHandler) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusOK, resp)
 }
 
+// requestRecord is what the per-request log line reports: values resolved
+// against the model table and the accepted reasoning_effort vocabulary,
+// never a raw request string, the key, the prompt or any body.
+type requestRecord struct {
+	KeyID           string
+	Model           string
+	Upstream        string
+	ReasoningEffort string
+	Stream          bool
+}
+
+// callUpstream runs one provider call inside the in-flight gauge and the
+// circuit breaker, reporting every failing outcome itself. It returns false
+// when the caller must not go on to write a successful response.
+func (h *PublicHandler) callUpstream(breaker *provider.Breaker, observe func(string), writeFailure func(code string), call func() error) bool {
+	h.metrics.IncInFlight()
+	err := call()
+	h.metrics.DecInFlight()
+	breaker.Record(err)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, provider.ErrClientAborted):
+		observe("client_aborted")
+	default:
+		code := h.recordProviderError(err)
+		observe(code)
+		writeFailure(code)
+	}
+	return false
+}
+
+func writeProviderError(w http.ResponseWriter) func(code string) {
+	return func(code string) {
+		writeError(w, code, messageForProviderCode(code))
+	}
+}
+
 func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	model := "unknown"
+	record := requestRecord{Model: "unknown"}
 	observe := func(outcome string) {
-		h.metrics.ObserveRequest(outcome, model, time.Since(start).Seconds())
+		h.metrics.ObserveRequest(outcome, record.Model, time.Since(start).Seconds())
+		slog.Info("request", "key_id", record.KeyID, "model", record.Model,
+			"upstream", record.Upstream, "reasoning_effort", record.ReasoningEffort,
+			"stream", record.Stream, "status", outcome)
 	}
 	fail := func(code, message string) {
 		observe(code)
@@ -128,7 +170,14 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer adm.Release()
-	model = req.Model
+	effort, _ := translate.KnownEffort(req.ReasoningEffort)
+	record = requestRecord{
+		KeyID:           adm.Key.ID,
+		Model:           req.Model,
+		Upstream:        adm.Model.UpstreamAPI,
+		ReasoningEffort: effort,
+		Stream:          req.Stream,
+	}
 
 	breaker := h.up.breakerFor(adm.Model.Provider)
 	if !breaker.Allow() {
@@ -142,7 +191,11 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	if adm.Model.Provider == models.ProviderOpenAI {
-		h.chatOpenAI(ctx, w, r, req, adm, breaker, observe, fail)
+		if adm.Model.UpstreamAPI == models.UpstreamResponses {
+			h.chatResponses(ctx, w, r, req, adm, breaker, observe, fail)
+			return
+		}
+		h.chatOpenAI(ctx, w, r, req, adm, breaker, observe)
 		return
 	}
 
@@ -157,17 +210,11 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.metrics.IncInFlight()
-	aresp, err := h.up.Anthropic.Messages(ctx, areq)
-	h.metrics.DecInFlight()
-	breaker.Record(err)
-	if errors.Is(err, provider.ErrClientAborted) {
-		observe("client_aborted")
-		return
-	}
-	if err != nil {
-		code := h.recordProviderError(err)
-		fail(code, messageForProviderCode(code))
+	var aresp anthro.MessagesResponse
+	if !h.callUpstream(breaker, observe, writeProviderError(w), func() (err error) {
+		aresp, err = h.up.Anthropic.Messages(ctx, areq)
+		return err
+	}) {
 		return
 	}
 
@@ -181,7 +228,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 // chatOpenAI forwards the request nearly verbatim: the public wire format
 // is already OpenAI's, so only the model name, the usage capture, and the
 // error surface need modelgate's treatment.
-func (h *PublicHandler) chatOpenAI(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string), fail func(code, message string)) {
+func (h *PublicHandler) chatOpenAI(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string)) {
 	up := req
 	up.Model = adm.Model.ProviderModel
 	if up.MaxTokens == nil && up.MaxCompletionTokens == nil {
@@ -194,17 +241,11 @@ func (h *PublicHandler) chatOpenAI(ctx context.Context, w http.ResponseWriter, r
 		return
 	}
 
-	h.metrics.IncInFlight()
-	resp, err := h.up.OpenAI.Chat(ctx, up)
-	h.metrics.DecInFlight()
-	breaker.Record(err)
-	if errors.Is(err, provider.ErrClientAborted) {
-		observe("client_aborted")
-		return
-	}
-	if err != nil {
-		code := h.recordProviderError(err)
-		fail(code, messageForProviderCode(code))
+	var resp oai.ChatResponse
+	if !h.callUpstream(breaker, observe, writeProviderError(w), func() (err error) {
+		resp, err = h.up.OpenAI.Chat(ctx, up)
+		return err
+	}) {
 		return
 	}
 
@@ -223,54 +264,47 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter,
 
 	var usage oai.Usage
 	var contentChars int
-	h.metrics.IncInFlight()
-	err := h.up.OpenAI.ChatStream(ctx, up, func(chunk oai.ChatChunk) error {
-		if chunk.Usage != nil {
-			usage = *chunk.Usage
-			if len(chunk.Choices) == 0 && !clientWantsUsage {
-				return nil
+	ok := h.callUpstream(breaker, observe, sw.fail, func() error {
+		return h.up.OpenAI.ChatStream(ctx, up, func(chunk oai.ChatChunk) error {
+			if chunk.Usage != nil {
+				usage = *chunk.Usage
+				if len(chunk.Choices) == 0 && !clientWantsUsage {
+					return nil
+				}
 			}
-		}
-		for _, c := range chunk.Choices {
-			contentChars += len(c.Delta.Content)
-		}
-		chunk.Model = req.Model
-		if err := sw.chunk(chunk); err != nil {
-			return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
-		}
-		return nil
+			contentChars += chunkContentChars(chunk)
+			chunk.Model = req.Model
+			if err := sw.chunk(chunk); err != nil {
+				return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
+			}
+			return nil
+		})
 	})
-	h.metrics.DecInFlight()
-	breaker.Record(err)
-
-	// OpenAI reports usage only in the stream's final chunk, so an aborted
-	// stream would otherwise bill nothing while the provider bills
-	// everything generated. Booking a character-count estimate keeps the
-	// quota and budget honest; the log marks it as an estimate.
 	defer func() {
-		u := storeUsageFromOAI(usage)
-		if !u.HasTokens() && contentChars > 0 {
-			u = store.Usage{OutputTokens: int64((contentChars + 3) / 4)}
-			slog.Warn("stream ended before usage arrived; booking estimated output tokens",
-				"key_id", adm.Key.ID, "model", req.Model, "estimated_output_tokens", u.OutputTokens)
-		}
-		if u.HasTokens() {
-			h.recordUsage(r.Context(), adm, req.Model, u)
-		}
+		h.bookStreamUsage(r.Context(), adm, req.Model, storeUsageFromOAI(usage), contentChars)
 	}()
-
-	if errors.Is(err, provider.ErrClientAborted) {
-		observe("client_aborted")
-		return
-	}
-	if err != nil {
-		code := h.recordProviderError(err)
-		observe(code)
-		sw.fail(w, code)
+	if !ok {
 		return
 	}
 	sw.done()
 	observe("success")
+}
+
+// bookStreamUsage books what a stream billed, on every exit path. A provider
+// reports usage only in its final event, so an aborted stream would otherwise
+// bill nothing while the provider bills everything generated; the
+// character-count estimate keeps the quota and the budget honest, and the log
+// marks it as an estimate.
+func (h *PublicHandler) bookStreamUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage, contentChars int) {
+	if !usage.HasTokens() && contentChars > 0 {
+		usage = store.Usage{OutputTokens: int64((contentChars + 3) / 4)}
+		slog.Warn("stream ended before usage arrived; booking estimated output tokens",
+			"key_id", adm.Key.ID, "model", publicModel, "estimated_output_tokens", usage.OutputTokens)
+	}
+	if !usage.HasTokens() {
+		return
+	}
+	h.recordUsage(ctx, adm, publicModel, usage)
 }
 
 // storeUsageFromOAI clamps the cached count into [0, PromptTokens]: a
@@ -293,55 +327,135 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 	st := translate.NewStreamTranslator(req.Model, h.now().Unix(), id)
 	sw := newSSEWriter(w)
 
-	h.metrics.IncInFlight()
-	err := h.up.Anthropic.MessagesStream(ctx, areq, func(ev anthro.StreamEvent) error {
-		chunks, err := st.Next(ev)
-		if err != nil {
-			return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
-		}
-		for _, chunk := range chunks {
-			if err := sw.chunk(chunk); err != nil {
-				return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
+	var contentChars int
+	ok := h.callUpstream(breaker, observe, sw.fail, func() error {
+		return h.up.Anthropic.MessagesStream(ctx, areq, func(ev anthro.StreamEvent) error {
+			chunks, err := st.Next(ev)
+			if err != nil {
+				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 			}
-		}
-		return nil
+			for _, chunk := range chunks {
+				contentChars += chunkContentChars(chunk)
+				if err := sw.chunk(chunk); err != nil {
+					return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
+				}
+			}
+			return nil
+		})
 	})
-	h.metrics.DecInFlight()
-	breaker.Record(err)
-
-	// The provider bills every token the translator saw, aborted stream or
-	// not, so spend is booked on every exit path.
 	defer func() {
-		u := translate.ToStoreUsage(st.Usage())
-		if u.HasTokens() {
-			h.recordUsage(r.Context(), adm, req.Model, u)
-		}
+		h.bookStreamUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(st.Usage()), contentChars)
 	}()
-
-	if errors.Is(err, provider.ErrClientAborted) {
-		observe("client_aborted")
-		return
-	}
-	if err != nil {
-		code := h.recordProviderError(err)
-		observe(code)
-		sw.fail(w, code)
+	if !ok {
 		return
 	}
 
 	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
 		u := translate.OAIUsage(st.Usage())
-		if err := sw.chunk(oai.ChatChunk{
-			ID: id, Object: "chat.completion.chunk", Created: h.now().Unix(),
-			Model: req.Model, Choices: []oai.ChunkChoice{},
-			Usage: &u,
-		}); err != nil {
-			observe("client_aborted")
+		if !h.streamUsageChunk(sw, id, req.Model, u, observe) {
 			return
 		}
 	}
 	sw.done()
 	observe("success")
+}
+
+// chatResponses serves a model the table routes through the Responses API,
+// translating in both directions around the same guards the other upstreams
+// run under.
+func (h *PublicHandler) chatResponses(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string), fail func(code, message string)) {
+	rreq, err := translate.ToResponses(req, adm.Model.ProviderModel, h.defaultMaxTokens)
+	if err != nil {
+		fail(CodeInvalidRequest, err.Error())
+		return
+	}
+
+	if req.Stream {
+		h.streamResponses(ctx, w, r, req, rreq, adm, breaker, observe)
+		return
+	}
+
+	var resp oairesp.Response
+	if !h.callUpstream(breaker, observe, writeProviderError(w), func() (err error) {
+		resp, err = h.up.OpenAI.Responses(ctx, rreq)
+		return err
+	}) {
+		return
+	}
+
+	h.recordUsage(r.Context(), adm, req.Model, translate.ResponsesStoreUsage(resp.Usage))
+
+	// A 200 reporting a failed run would otherwise translate to an empty but
+	// successful answer, sending the agent back to retry work the provider
+	// has already finished and billed.
+	if resp.Status == "failed" || resp.Error != nil {
+		fail(CodeProviderUnavailable, messageForProviderCode(CodeProviderUnavailable))
+		return
+	}
+
+	id := "chatcmpl-" + randomHex16()
+	observe("success")
+	writeJSONStatus(w, http.StatusOK, translate.FromResponses(resp, req.Model, h.now().Unix(), id))
+}
+
+func (h *PublicHandler) streamResponses(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, rreq oairesp.Request, adm Admission, breaker *provider.Breaker, observe func(string)) {
+	id := "chatcmpl-" + randomHex16()
+	st := translate.NewResponsesStreamTranslator(req.Model, h.now().Unix(), id)
+	sw := newSSEWriter(w)
+
+	var contentChars int
+	ok := h.callUpstream(breaker, observe, sw.fail, func() error {
+		return h.up.OpenAI.ResponsesStream(ctx, rreq, func(ev oairesp.StreamEvent) error {
+			chunks, err := st.Next(ev)
+			if err != nil {
+				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
+			}
+			for _, chunk := range chunks {
+				contentChars += chunkContentChars(chunk)
+				if err := sw.chunk(chunk); err != nil {
+					return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
+				}
+			}
+			return nil
+		})
+	})
+	defer func() {
+		h.bookStreamUsage(r.Context(), adm, req.Model, translate.ResponsesStoreUsage(st.Usage()), contentChars)
+	}()
+	if !ok {
+		return
+	}
+
+	// The Responses stream carries no usage chunk of its own; the client that
+	// asked for one gets it synthesized from the terminal event.
+	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+		if !h.streamUsageChunk(sw, id, req.Model, translate.ResponsesOAIUsage(st.Usage()), observe) {
+			return
+		}
+	}
+	sw.done()
+	observe("success")
+}
+
+func (h *PublicHandler) streamUsageChunk(sw *sseWriter, id, publicModel string, usage oai.Usage, observe func(string)) bool {
+	err := sw.chunk(oai.ChatChunk{
+		ID: id, Object: "chat.completion.chunk", Created: h.now().Unix(),
+		Model: publicModel, Choices: []oai.ChunkChoice{},
+		Usage: &usage,
+	})
+	if err != nil {
+		observe("client_aborted")
+		return false
+	}
+	return true
+}
+
+func chunkContentChars(chunk oai.ChatChunk) int {
+	total := 0
+	for _, choice := range chunk.Choices {
+		total += len(choice.Delta.Content)
+	}
+	return total
 }
 
 // sseWriter frames chat chunks as server-sent events, deferring the
@@ -384,9 +498,9 @@ func (sw *sseWriter) chunk(chunk oai.ChatChunk) error {
 
 // fail answers a mid-stream error inside the SSE body, or as a plain JSON
 // error when nothing has streamed yet.
-func (sw *sseWriter) fail(w http.ResponseWriter, code string) {
+func (sw *sseWriter) fail(code string) {
 	if !sw.wrote {
-		writeError(w, code, messageForProviderCode(code))
+		writeError(sw.w, code, messageForProviderCode(code))
 		return
 	}
 	payload, _ := json.Marshal(errorBody(errorTypeForStatus(statusForCode(code)), code, messageForProviderCode(code)))

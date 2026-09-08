@@ -20,8 +20,14 @@ const (
 	ProviderOpenAI    = "openai"
 )
 
+const (
+	UpstreamChatCompletions = "chat_completions"
+	UpstreamResponses       = "responses"
+)
+
 type Model struct {
 	Provider      string
+	UpstreamAPI   string
 	ProviderModel string
 	Pricing       Pricing
 }
@@ -36,6 +42,7 @@ type modelFile struct {
 
 type modelEntry struct {
 	Provider             string   `json:"provider"`
+	UpstreamAPI          string   `json:"upstream_api"`
 	ProviderModel        string   `json:"provider_model"`
 	InputUSDPerMTok      *float64 `json:"input_usd_per_mtok"`
 	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok"`
@@ -46,8 +53,10 @@ type modelEntry struct {
 // LoadTable reads the model pricing table at path. Cost accounting fails
 // closed by construction — nothing unpriced can run — so any unreadable
 // file, invalid JSON, empty table, empty provider_model, unknown provider,
-// or absent, zero, or negative price field yields an error and no table.
-// An omitted provider means anthropic.
+// unusable upstream_api, or absent, zero, or negative price field yields an
+// error and no table. An omitted provider means anthropic, and an omitted
+// upstream_api means chat_completions on openai models and nothing on
+// anthropic ones.
 func LoadTable(path string) (*Table, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -82,6 +91,16 @@ func (e modelEntry) validate() (Model, error) {
 	if provider != ProviderAnthropic && provider != ProviderOpenAI {
 		return Model{}, fmt.Errorf("unknown provider %q", provider)
 	}
+	upstream := e.UpstreamAPI
+	switch {
+	case upstream == "" && provider == ProviderOpenAI:
+		upstream = UpstreamChatCompletions
+	case upstream == "":
+	case provider != ProviderOpenAI:
+		return Model{}, fmt.Errorf("upstream_api is only valid for openai models")
+	case upstream != UpstreamChatCompletions && upstream != UpstreamResponses:
+		return Model{}, fmt.Errorf("unknown upstream_api %q", upstream)
+	}
 	prices := []struct {
 		field string
 		value *float64
@@ -101,6 +120,7 @@ func (e modelEntry) validate() (Model, error) {
 	}
 	return Model{
 		Provider:      provider,
+		UpstreamAPI:   upstream,
 		ProviderModel: e.ProviderModel,
 		Pricing: Pricing{
 			InputUSDPerMTok:      *e.InputUSDPerMTok,

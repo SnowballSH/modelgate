@@ -1,0 +1,8 @@
+{"model":"gpt-x","max_completion_tokens":256,"parallel_tool_calls":true,"messages":[
+ {"role":"user","content":"weather in both?"},
+ {"role":"assistant","content":null,"tool_calls":[
+  {"id":"call_a","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}},
+  {"id":"call_b","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Rome\"}"}}]},
+ {"role":"tool","tool_call_id":"call_a","content":"18C"},
+ {"role":"tool","tool_call_id":"call_b","content":"24C"},
+ {"role":"assistant","content":"Paris 18C, Rome 24C."}]}

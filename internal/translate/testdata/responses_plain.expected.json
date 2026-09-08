@@ -1,0 +1,1 @@
+{"model":"gpt-real","instructions":"Be brief.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"reasoning":{"effort":"xhigh"},"max_output_tokens":1024,"store":false}

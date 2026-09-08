@@ -311,7 +311,7 @@ func TestAdminListModels(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list models: status %d body %s", rec.Code, rec.Body.String())
 	}
-	want := `{"models":[{"id":"claude-sonnet-5","provider":"anthropic"},{"id":"gpt-5","provider":"openai"}]}`
+	want := `{"models":[{"id":"claude-sonnet-5","provider":"anthropic"},{"id":"gpt-5","provider":"openai"},{"id":"gpt-responses","provider":"openai"}]}`
 	if got := strings.TrimSpace(rec.Body.String()); got != want {
 		t.Errorf("body = %s, want %s", got, want)
 	}

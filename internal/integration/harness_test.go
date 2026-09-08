@@ -12,15 +12,33 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
 	"github.com/SnowballSH/modelgate/internal/config"
+	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/oairesp"
 	"github.com/SnowballSH/modelgate/internal/server"
 )
 
 const testModel = "claude-sonnet-5"
+
+var defaultTable = fmt.Sprintf(`{"models":{%q:{"provider_model":%q,
+	"input_usd_per_mtok":3,"output_usd_per_mtok":15,
+	"cache_read_usd_per_mtok":0.3,"cache_write_usd_per_mtok":3.75}}}`, testModel, testModel)
+
+const farmTable = `{"models":{
+	"gpt-flag":{"provider":"openai","upstream_api":"responses","provider_model":"gpt-5.6-luna",
+		"input_usd_per_mtok":1.25,"output_usd_per_mtok":10,
+		"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25},
+	"gpt-plain":{"provider":"openai","provider_model":"gpt-5.6-terra",
+		"input_usd_per_mtok":1.25,"output_usd_per_mtok":10,
+		"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`
 
 func fakeAnthropic(t *testing.T) *httptest.Server {
 	t.Helper()
@@ -86,15 +104,149 @@ func serveFakeStream(w http.ResponseWriter, model string) {
 	}
 }
 
+// upstreamRecorder keeps every request a fake upstream served, so a test can
+// assert which API the gateway spoke and what it sent.
+type upstreamRecorder struct {
+	mu       sync.Mutex
+	requests []upstreamRequest
+}
+
+type upstreamRequest struct {
+	Path string
+	Body []byte
+}
+
+func (rec *upstreamRecorder) record(path string, body []byte) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.requests = append(rec.requests, upstreamRequest{Path: path, Body: body})
+}
+
+func (rec *upstreamRecorder) seen() []upstreamRequest {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return slices.Clone(rec.requests)
+}
+
+func fakeOpenAI(t *testing.T) (*httptest.Server, *upstreamRecorder) {
+	t.Helper()
+	rec := &upstreamRecorder{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		rec.record(r.URL.Path, body)
+		var probe struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch {
+		case r.URL.Path == "/v1/chat/completions":
+			serveFakeOpenAIChat(w)
+		case r.URL.Path == "/v1/responses" && probe.Stream:
+			serveFakeResponsesStream(w)
+		case r.URL.Path == "/v1/responses":
+			serveFakeResponse(w)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	return upstream, rec
+}
+
+func serveFakeOpenAIChat(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	content := "hello from fake chat completions"
+	json.NewEncoder(w).Encode(oai.ChatResponse{
+		ID:      "chatcmpl-fake",
+		Object:  "chat.completion",
+		Model:   "gpt-5.6-terra",
+		Choices: []oai.Choice{{Message: oai.ResponseMessage{Role: "assistant", Content: &content}, FinishReason: "stop"}},
+		Usage:   oai.Usage{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150},
+	})
+}
+
+func serveFakeResponse(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(oairesp.Response{
+		ID:     "resp_fake",
+		Object: "response",
+		Status: "completed",
+		Model:  "gpt-5.6-luna",
+		Output: []oairesp.Item{
+			{Type: "reasoning", ID: "rs_1"},
+			{Type: "function_call", ID: "fc_1", CallID: "call_1", Name: "get_weather", Arguments: `{"city":"Paris"}`},
+		},
+		Usage: &oairesp.Usage{
+			InputTokens:         100,
+			InputTokensDetails:  &oairesp.InputTokenDetails{CachedTokens: 40},
+			OutputTokens:        60,
+			OutputTokensDetails: &oairesp.OutputTokenDetails{ReasoningTokens: 30},
+			TotalTokens:         160,
+		},
+	})
+}
+
+// serveFakeResponsesStream replays the tool-call event sequence the translator
+// unit tests are built on, with usage on the terminal event.
+func serveFakeResponsesStream(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	events := []string{
+		`{"type":"response.created","response":{"id":"resp_fake","object":"response","status":"in_progress","model":"gpt-5.6-luna","output":[]}}`,
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1"}}`,
+		`{"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}`,
+		`{"type":"response.output_text.delta","output_index":1,"item_id":"msg_1","delta":"Let me "}`,
+		`{"type":"response.output_text.delta","output_index":1,"item_id":"msg_1","delta":"check."}`,
+		`{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""}}`,
+		`{"type":"response.function_call_arguments.delta","output_index":2,"item_id":"fc_1","delta":"{\"city\":"}`,
+		`{"type":"response.function_call_arguments.delta","output_index":2,"item_id":"fc_1","delta":"\"Paris\"}"}`,
+		`{"type":"response.function_call_arguments.done","output_index":2,"item_id":"fc_1","arguments":"{\"city\":\"Paris\"}"}`,
+		`{"type":"response.completed","response":{"id":"resp_fake","object":"response","status":"completed","model":"gpt-5.6-luna","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"}],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":40},"output_tokens":60,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":160}}}`,
+	}
+	flusher, _ := w.(http.Flusher)
+	for _, ev := range events {
+		fmt.Fprintf(w, "data: %s\n\n", ev)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+}
+
+func tableUsesOpenAI(t *testing.T, table string) bool {
+	t.Helper()
+	var parsed struct {
+		Models map[string]struct {
+			Provider string `json:"provider"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(table), &parsed); err != nil {
+		t.Fatalf("model table is not valid JSON: %v", err)
+	}
+	for _, model := range parsed.Models {
+		if model.Provider == "openai" {
+			return true
+		}
+	}
+	return false
+}
+
 type gateway struct {
 	PublicAddr  string
 	AdminAddr   string
 	MetricsAddr string
+	OpenAI      *upstreamRecorder
 }
 
-func startGateway(t *testing.T, budgetUSD float64) gateway {
+func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 	t.Helper()
 	upstream := fakeAnthropic(t)
+	openaiUpstream, openaiSeen := fakeOpenAI(t)
 
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "anthropic-key")
@@ -102,9 +254,6 @@ func startGateway(t *testing.T, budgetUSD float64) gateway {
 		t.Fatal(err)
 	}
 	modelsFile := filepath.Join(dir, "models.json")
-	table := fmt.Sprintf(`{"models":{%q:{"provider_model":%q,
-		"input_usd_per_mtok":3,"output_usd_per_mtok":15,
-		"cache_read_usd_per_mtok":0.3,"cache_write_usd_per_mtok":3.75}}}`, testModel, testModel)
 	if err := os.WriteFile(modelsFile, []byte(table), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -124,6 +273,14 @@ func startGateway(t *testing.T, budgetUSD float64) gateway {
 		RateLimitPerKeyRPM:    600,
 		MaxConcurrentRequests: 8,
 		RequestDeadline:       time.Minute,
+	}
+	if tableUsesOpenAI(t, table) {
+		openaiKeyFile := filepath.Join(dir, "openai-key")
+		if err := os.WriteFile(openaiKeyFile, []byte("sk-oai-fake\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.OpenAIAPIKeyFile = openaiKeyFile
+		cfg.OpenAIBaseURL = openaiUpstream.URL
 	}
 
 	s, err := server.New(cfg, nil)
@@ -149,6 +306,7 @@ func startGateway(t *testing.T, budgetUSD float64) gateway {
 		PublicAddr:  s.PublicAddr(),
 		AdminAddr:   s.AdminAddr(),
 		MetricsAddr: s.MetricsAddr(),
+		OpenAI:      openaiSeen,
 	}
 	waitForReady(t, "http://"+gw.MetricsAddr+"/ready")
 	return gw
@@ -227,7 +385,12 @@ func adminGetJSON(t *testing.T, adminAddr, path string, dst any) {
 
 func chatCompletionRaw(t *testing.T, publicAddr, bearer string) *http.Response {
 	t.Helper()
-	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, testModel)
+	return chatCompletion(t, publicAddr, bearer,
+		fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}]}`, testModel))
+}
+
+func chatCompletion(t *testing.T, publicAddr, bearer, body string) *http.Response {
+	t.Helper()
 	req, err := http.NewRequest(http.MethodPost,
 		"http://"+publicAddr+"/v1/chat/completions", bytes.NewReader([]byte(body)))
 	if err != nil {
@@ -240,6 +403,34 @@ func chatCompletionRaw(t *testing.T, publicAddr, bearer string) *http.Response {
 		t.Fatal(err)
 	}
 	return res
+}
+
+// metricValue reads one counter or gauge out of the /metrics exposition; the
+// series must be spelled with its labels exactly as the registry renders them.
+func metricValue(t *testing.T, metricsAddr, series string) float64 {
+	t.Helper()
+	res, err := http.Get("http://" + metricsAddr + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for line := range strings.Lines(string(body)) {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), series+" ")
+		if !ok {
+			continue
+		}
+		value, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
+		if err != nil {
+			t.Fatalf("series %s has unparsable value %q: %v", series, rest, err)
+		}
+		return value
+	}
+	t.Fatalf("series %s absent from /metrics", series)
+	return 0
 }
 
 func decodeErrorCode(t *testing.T, res *http.Response) string {

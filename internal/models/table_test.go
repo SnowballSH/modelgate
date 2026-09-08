@@ -169,3 +169,32 @@ func TestTableEntries(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadTableUpstreamAPI(t *testing.T) {
+	path := writeTable(t, `{"models":{
+		"gpt-x":{"provider":"openai","upstream_api":"responses","provider_model":"gpt-x","input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1},
+		"gpt-y":{"provider":"openai","provider_model":"gpt-y","input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1}}}`)
+	table, err := LoadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	x, _ := table.Resolve("gpt-x")
+	y, _ := table.Resolve("gpt-y")
+	if x.UpstreamAPI != UpstreamResponses || y.UpstreamAPI != UpstreamChatCompletions {
+		t.Fatalf("upstream_api: x=%q y=%q", x.UpstreamAPI, y.UpstreamAPI)
+	}
+}
+
+func TestLoadTableRejectsUpstreamAPIOutsideOpenAI(t *testing.T) {
+	path := writeTable(t, `{"models":{"claude-x":{"upstream_api":"responses","provider_model":"claude-x","input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1}}}`)
+	if _, err := LoadTable(path); err == nil {
+		t.Fatal("expected an error: upstream_api is an openai-only field")
+	}
+}
+
+func TestLoadTableRejectsUnknownUpstreamAPI(t *testing.T) {
+	path := writeTable(t, `{"models":{"gpt-x":{"provider":"openai","upstream_api":"grpc","provider_model":"gpt-x","input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1}}}`)
+	if _, err := LoadTable(path); err == nil {
+		t.Fatal("expected an error for an unknown upstream_api")
+	}
+}

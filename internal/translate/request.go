@@ -1,12 +1,14 @@
 // Package translate converts between the OpenAI Chat Completions wire
-// format and the Anthropic Messages wire format, in both directions,
-// including SSE stream events.
+// format and the wire formats modelgate speaks upstream: the Anthropic
+// Messages API, in both directions and including SSE stream events, and
+// the OpenAI Responses API.
 package translate
 
 import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
@@ -14,6 +16,45 @@ import (
 )
 
 var defaultInputSchema = json.RawMessage(`{"type":"object"}`)
+
+// effortLevels is the reasoning_effort vocabulary both upstreams accept.
+var effortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+var anthropicEfforts = map[string]string{
+	"none":    "low",
+	"minimal": "low",
+	"low":     "low",
+	"medium":  "medium",
+	"high":    "high",
+	"xhigh":   "xhigh",
+	"max":     "max",
+}
+
+// KnownEffort canonicalises a client-supplied reasoning_effort, reporting
+// false for anything outside the accepted vocabulary, so callers never carry
+// an arbitrary request string into an upstream call, a metric or a log line.
+func KnownEffort(level string) (string, bool) {
+	canonical := strings.ToLower(level)
+	if !slices.Contains(effortLevels, canonical) {
+		return "", false
+	}
+	return canonical, true
+}
+
+func errUnknownEffort(level string) error {
+	return fmt.Errorf("reasoning_effort %q is not one of %s", level, strings.Join(effortLevels, ", "))
+}
+
+func EffortForAnthropic(level string) (string, error) {
+	if level == "" {
+		return "", nil
+	}
+	canonical, ok := KnownEffort(level)
+	if !ok {
+		return "", errUnknownEffort(level)
+	}
+	return anthropicEfforts[canonical], nil
+}
 
 func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (anthro.MessagesRequest, error) {
 	if req.ResponseFormat != nil {
@@ -27,18 +68,27 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 		"presence_penalty":  req.PresencePenalty != nil,
 		"seed":              req.Seed != nil,
 		"logprobs":          req.Logprobs != nil && *req.Logprobs,
-		"reasoning_effort":  req.ReasoningEffort != "",
 	} {
 		if set {
 			return anthro.MessagesRequest{}, fmt.Errorf("%s is not supported for anthropic models", name)
 		}
 	}
+	effort, err := EffortForAnthropic(req.ReasoningEffort)
+	if err != nil {
+		return anthro.MessagesRequest{}, err
+	}
 	out := anthro.MessagesRequest{
-		Model:       providerModel,
-		MaxTokens:   defaultMaxTokens,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		Stream:      req.Stream,
+		Model:     providerModel,
+		MaxTokens: defaultMaxTokens,
+		Stream:    req.Stream,
+	}
+	// Models that accept output_config.effort reject any temperature other
+	// than 1.0 and any top_p below 0.99, so effort displaces both.
+	if effort != "" {
+		out.OutputConfig = &anthro.OutputConfig{Effort: effort}
+	} else {
+		out.Temperature = req.Temperature
+		out.TopP = req.TopP
 	}
 	if req.MaxTokens != nil {
 		out.MaxTokens = *req.MaxTokens
@@ -80,7 +130,7 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 	for i := 0; i < len(messages); i++ {
 		msg := messages[i]
 		switch msg.Role {
-		case "system":
+		case "system", "developer":
 			text, err := contentText(msg.Content)
 			if err != nil {
 				return "", nil, err
@@ -121,20 +171,15 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 }
 
 func assistantMessage(msg oai.Message) (anthro.Message, error) {
-	var blocks []anthro.ContentBlock
-	if len(msg.Content) > 0 {
-		text, err := contentText(msg.Content)
-		if err != nil {
-			return anthro.Message{}, err
-		}
-		if text != "" {
-			blocks = append(blocks, anthro.ContentBlock{Type: "text", Text: text})
-		}
+	text, calls, err := assistantParts(msg)
+	if err != nil {
+		return anthro.Message{}, err
 	}
-	for _, call := range msg.ToolCalls {
-		if !json.Valid([]byte(call.Function.Arguments)) {
-			return anthro.Message{}, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
-		}
+	var blocks []anthro.ContentBlock
+	if text != "" {
+		blocks = append(blocks, anthro.ContentBlock{Type: "text", Text: text})
+	}
+	for _, call := range calls {
 		blocks = append(blocks, anthro.ContentBlock{
 			Type:  "tool_use",
 			ID:    call.ID,
@@ -142,35 +187,69 @@ func assistantMessage(msg oai.Message) (anthro.Message, error) {
 			Input: json.RawMessage(call.Function.Arguments),
 		})
 	}
-	if len(blocks) == 0 {
-		return anthro.Message{}, errors.New("assistant message has neither content nor tool calls")
-	}
 	return anthro.Message{Role: "assistant", Content: blocks}, nil
 }
 
+// assistantParts reads an assistant message as the text and the tool calls a
+// history item should carry, refusing one that would render as neither. Both
+// translators build their assistant items from it, so the rules stay one rule.
+func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
+	var text string
+	if len(msg.Content) > 0 {
+		content, err := contentText(msg.Content)
+		if err != nil {
+			return "", nil, err
+		}
+		text = content
+	}
+	for _, call := range msg.ToolCalls {
+		if !json.Valid([]byte(call.Function.Arguments)) {
+			return "", nil, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
+		}
+	}
+	if text == "" && len(msg.ToolCalls) == 0 {
+		return "", nil, errors.New("assistant message has neither content nor tool calls")
+	}
+	return text, msg.ToolCalls, nil
+}
+
 func contentBlocks(content json.RawMessage) ([]anthro.ContentBlock, error) {
+	texts, err := nonEmptyTexts(content)
+	if err != nil {
+		return nil, err
+	}
+	blocks := make([]anthro.ContentBlock, len(texts))
+	for i, text := range texts {
+		blocks[i] = anthro.ContentBlock{Type: "text", Text: text}
+	}
+	return blocks, nil
+}
+
+// nonEmptyTexts reads a message content field — a plain string or an array of
+// text parts — as the texts a content builder should render, refusing content
+// that carries no text at all. Both translators map over it.
+func nonEmptyTexts(content json.RawMessage) ([]string, error) {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
 		if s == "" {
 			return nil, errors.New("message content is empty")
 		}
-		return []anthro.ContentBlock{{Type: "text", Text: s}}, nil
+		return []string{s}, nil
 	}
 	parts, err := textParts(content)
 	if err != nil {
 		return nil, err
 	}
-	var blocks []anthro.ContentBlock
-	for _, p := range parts {
-		if p == "" {
-			continue
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			texts = append(texts, part)
 		}
-		blocks = append(blocks, anthro.ContentBlock{Type: "text", Text: p})
 	}
-	if len(blocks) == 0 {
+	if len(texts) == 0 {
 		return nil, errors.New("message content is empty")
 	}
-	return blocks, nil
+	return texts, nil
 }
 
 func contentText(content json.RawMessage) (string, error) {
@@ -203,26 +282,47 @@ func textParts(content json.RawMessage) ([]string, error) {
 	return texts, nil
 }
 
+// parseStop reads the Chat Completions stop field for the two translated
+// paths, Anthropic and Responses. A JSON null, an empty string and a list that
+// contributes no non-empty sequence all mean unset, so neither is asked to stop
+// on a sequence the client did not name.
 func parseStop(raw json.RawMessage) ([]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	var one string
 	if err := json.Unmarshal(raw, &one); err == nil {
-		return []string{one}, nil
+		return nonEmptyStops([]string{one}), nil
 	}
 	var many []string
 	if err := json.Unmarshal(raw, &many); err == nil {
-		return many, nil
+		return nonEmptyStops(many), nil
 	}
 	return nil, errors.New("stop must be a string or array of strings")
 }
 
+func nonEmptyStops(stops []string) []string {
+	kept := slices.DeleteFunc(stops, func(s string) bool { return s == "" })
+	if len(kept) == 0 {
+		return nil
+	}
+	return kept
+}
+
 func convertTools(tools []oai.Tool) ([]anthro.Tool, error) {
+	return functionTools(tools, func(fn oai.ToolFunction, schema json.RawMessage) anthro.Tool {
+		return anthro.Tool{Name: fn.Name, Description: fn.Description, InputSchema: schema}
+	})
+}
+
+// functionTools refuses any tool type but function and renders the rest
+// through build, substituting the empty-object schema both upstreams require
+// for a tool that declares no parameters.
+func functionTools[T any](tools []oai.Tool, build func(fn oai.ToolFunction, schema json.RawMessage) T) ([]T, error) {
 	if len(tools) == 0 {
 		return nil, nil
 	}
-	result := make([]anthro.Tool, len(tools))
+	result := make([]T, len(tools))
 	for i, t := range tools {
 		if t.Type != "function" {
 			return nil, fmt.Errorf("unsupported tool type: %q", t.Type)
@@ -231,11 +331,7 @@ func convertTools(tools []oai.Tool) ([]anthro.Tool, error) {
 		if schema == nil {
 			schema = defaultInputSchema
 		}
-		result[i] = anthro.Tool{
-			Name:        t.Function.Name,
-			Description: t.Function.Description,
-			InputSchema: schema,
-		}
+		result[i] = build(t.Function, schema)
 	}
 	return result, nil
 }

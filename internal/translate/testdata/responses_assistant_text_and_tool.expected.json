@@ -1,0 +1,7 @@
+{"model":"gpt-real","input":[
+ {"type":"message","role":"user","content":[{"type":"input_text","text":"weather?"}]},
+ {"role":"assistant","content":"Let me check."},
+ {"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},
+ {"type":"function_call_output","call_id":"call_1","output":"18C"}],
+ "tools":[{"type":"function","name":"get_weather","parameters":{"type":"object"},"strict":false}],
+ "tool_choice":"required","reasoning":{"effort":"medium"},"max_output_tokens":1024,"store":false}

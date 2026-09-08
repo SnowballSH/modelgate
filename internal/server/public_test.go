@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,7 @@ import (
 	"github.com/SnowballSH/modelgate/internal/keys"
 	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/oairesp"
 	"github.com/SnowballSH/modelgate/internal/provider"
 	"github.com/SnowballSH/modelgate/internal/store"
 )
@@ -417,29 +420,48 @@ func TestUpstreamRejectionIsInvalidRequestAndSparesBreaker(t *testing.T) {
 
 const dualModelJSON = `{"models":{
 	"claude-sonnet-5":{"provider_model":"claude-sonnet-5-20260115","input_usd_per_mtok":3,"output_usd_per_mtok":15,"cache_read_usd_per_mtok":0.30,"cache_write_usd_per_mtok":3.75},
-	"gpt-5":{"provider":"openai","provider_model":"gpt-5-2026-01-01","input_usd_per_mtok":1.25,"output_usd_per_mtok":10,"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`
+	"gpt-5":{"provider":"openai","provider_model":"gpt-5-2026-01-01","input_usd_per_mtok":1.25,"output_usd_per_mtok":10,"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25},
+	"gpt-responses":{"provider":"openai","upstream_api":"responses","provider_model":"gpt-5.6-luna","input_usd_per_mtok":1.25,"output_usd_per_mtok":10,"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`
+
+type upstreamCall struct {
+	path string
+	body []byte
+}
+
+func upstreamPaths(calls []upstreamCall) []string {
+	paths := make([]string, len(calls))
+	for i, call := range calls {
+		paths[i] = call.path
+	}
+	return paths
+}
 
 type dualEnv struct {
 	handler       http.Handler
 	store         *store.Store
 	now           time.Time
 	openaiSeen    *[]oai.ChatRequest
+	openaiCalls   *[]upstreamCall
 	anthropicHits *int
 }
 
 func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, breakerThreshold int) *dualEnv {
 	t.Helper()
 	var openaiSeen []oai.ChatRequest
+	var openaiCalls []upstreamCall
 	var anthropicHits int
 
 	openaiUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer oai-upstream-key" {
 			t.Errorf("openai upstream Authorization = %q", got)
 		}
-		var req oai.ChatRequest
 		body, _ := io.ReadAll(r.Body)
-		if err := json.Unmarshal(body, &req); err == nil {
-			openaiSeen = append(openaiSeen, req)
+		openaiCalls = append(openaiCalls, upstreamCall{path: r.URL.Path, body: body})
+		var req oai.ChatRequest
+		if r.URL.Path == "/v1/chat/completions" {
+			if err := json.Unmarshal(body, &req); err == nil {
+				openaiSeen = append(openaiSeen, req)
+			}
 		}
 		openaiHandler(w, r)
 	}))
@@ -471,7 +493,7 @@ func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, 
 	}
 	m := NewMetrics(100)
 	handler := NewPublicHandler(guards, table, acct, s, up, m, PublicConfig{DefaultMaxTokens: 4096, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second}, nowFn)
-	return &dualEnv{handler: handler, store: s, now: now, openaiSeen: &openaiSeen, anthropicHits: &anthropicHits}
+	return &dualEnv{handler: handler, store: s, now: now, openaiSeen: &openaiSeen, openaiCalls: &openaiCalls, anthropicHits: &anthropicHits}
 }
 
 func openaiChatResponse() http.HandlerFunc {
@@ -621,5 +643,288 @@ func TestOpenAIDefaultCompletionCapApplied(t *testing.T) {
 	seen := *env.openaiSeen
 	if len(seen) != 1 || seen[0].MaxCompletionTokens == nil || *seen[0].MaxCompletionTokens != 4096 {
 		t.Fatalf("upstream request = %+v; want max_completion_tokens defaulted to 4096", seen)
+	}
+}
+
+func openaiResponsesHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(oairesp.Response{
+			ID: "resp_1", Object: "response", Status: "completed", Model: "gpt-5.6-luna",
+			Output: []oairesp.Item{
+				{Type: "reasoning", ID: "rs_1"},
+				{Type: "function_call", ID: "fc_1", CallID: "call_1", Name: "get_weather", Arguments: `{"city":"Paris"}`},
+			},
+			Usage: &oairesp.Usage{
+				InputTokens:         100,
+				InputTokensDetails:  &oairesp.InputTokenDetails{CachedTokens: 40},
+				OutputTokens:        60,
+				OutputTokensDetails: &oairesp.OutputTokenDetails{ReasoningTokens: 30},
+				TotalTokens:         160,
+			},
+		})
+	}
+}
+
+func TestResponsesRoutingAndUsage(t *testing.T) {
+	env := newDualEnv(t, openaiResponsesHandler(), fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	rec := doDual(env, auth, `{"model":"gpt-responses","reasoning_effort":"xhigh","messages":[{"role":"user","content":"weather?"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var resp oai.ChatResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Model != "gpt-responses" {
+		t.Errorf("response model = %q, want the public id", resp.Model)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("choices = %+v, want one with finish_reason tool_calls", resp.Choices)
+	}
+	calls := resp.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].ID != "call_1" || calls[0].Function.Name != "get_weather" {
+		t.Errorf("tool calls = %+v", calls)
+	}
+	if resp.Usage.CompletionTokensDetails == nil || resp.Usage.CompletionTokensDetails.ReasoningTokens != 30 {
+		t.Errorf("usage = %+v, want reasoning tokens reported", resp.Usage)
+	}
+
+	seen := *env.openaiCalls
+	if len(seen) != 1 || seen[0].path != "/v1/responses" {
+		t.Fatalf("upstream calls = %v, want one to /v1/responses", upstreamPaths(seen))
+	}
+	var upstream oairesp.Request
+	if err := json.Unmarshal(seen[0].body, &upstream); err != nil {
+		t.Fatal(err)
+	}
+	if upstream.Model != "gpt-5.6-luna" {
+		t.Errorf("upstream model = %q", upstream.Model)
+	}
+	if upstream.Reasoning == nil || upstream.Reasoning.Effort != "xhigh" {
+		t.Errorf("upstream reasoning = %+v, want effort xhigh", upstream.Reasoning)
+	}
+	if *env.anthropicHits != 0 {
+		t.Errorf("anthropic upstream hit %d times for an openai model", *env.anthropicHits)
+	}
+
+	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 60*1.25/1e6 + 60*10.0/1e6 + 40*0.125/1e6
+	if math.Abs(spend-want) > 1e-12 {
+		t.Fatalf("spend = %v, want %v (reasoning billed as output, cached input at the cache-read rate)", spend, want)
+	}
+}
+
+func TestResponsesTerminalFailureBooksUsageAndFails(t *testing.T) {
+	failed := func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(oairesp.Response{
+			ID: "resp_1", Object: "response", Status: "failed", Model: "gpt-5.6-luna",
+			Error:  &oairesp.APIError{Code: "server_error", Message: "upstream detail nobody should see"},
+			Output: []oairesp.Item{},
+			Usage:  &oairesp.Usage{InputTokens: 100, OutputTokens: 40, TotalTokens: 140},
+		})
+	}
+	env := newDualEnv(t, failed, fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	rec := doDual(env, auth, `{"model":"gpt-responses","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusServiceUnavailable || decodeErrorCode(t, rec) != CodeProviderUnavailable {
+		t.Fatalf("terminal failure: status %d code %s (a failed response must not read as an empty answer)", rec.Code, decodeErrorCode(t, rec))
+	}
+	if strings.Contains(rec.Body.String(), "upstream detail nobody should see") {
+		t.Error("upstream error detail leaked into our error")
+	}
+
+	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 100*1.25/1e6 + 40*10.0/1e6
+	if math.Abs(spend-want) > 1e-12 {
+		t.Fatalf("failed response spend = %v, want %v — the provider billed the run", spend, want)
+	}
+}
+
+func openaiResponsesStreamHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		events := []string{
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}`,
+			`{"type":"response.output_text.delta","output_index":0,"item_id":"msg_1","delta":"twelve chars"}`,
+			`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","model":"gpt-5.6-luna","output":[],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":40},"output_tokens":60,"output_tokens_details":{"reasoning_tokens":30},"total_tokens":160}}}`,
+		}
+		for _, ev := range events {
+			fmt.Fprintf(w, "data: %s\n\n", ev)
+		}
+	}
+}
+
+func TestResponsesStreamUsageChunkSuppressedUnlessRequested(t *testing.T) {
+	for _, wantUsage := range []bool{false, true} {
+		env := newDualEnv(t, openaiResponsesStreamHandler(), fullResponseHandler(), 100)
+		auth, _ := insertTestKey(t, env.store, nil)
+		body := `{"model":"gpt-responses","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+		if wantUsage {
+			body = `{"model":"gpt-responses","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hi"}]}`
+		}
+		rec := doDual(env, auth, body)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("include_usage=%v: status = %d, body %s", wantUsage, rec.Code, rec.Body.String())
+		}
+		got := rec.Body.String()
+		if strings.Contains(got, `"completion_tokens":60`) != wantUsage {
+			t.Errorf("include_usage=%v: usage chunk presence = %v; body:\n%s", wantUsage, !wantUsage, got)
+		}
+		if !strings.Contains(got, "data: [DONE]") {
+			t.Errorf("include_usage=%v: missing [DONE]", wantUsage)
+		}
+		if strings.Contains(got, "gpt-5.6-luna") {
+			t.Errorf("include_usage=%v: provider model name leaked into the stream", wantUsage)
+		}
+		if seen := *env.openaiCalls; len(seen) != 1 || seen[0].path != "/v1/responses" {
+			t.Fatalf("include_usage=%v: upstream calls = %v, want one to /v1/responses", wantUsage, upstreamPaths(seen))
+		}
+
+		spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := 60*1.25/1e6 + 60*10.0/1e6 + 40*0.125/1e6
+		if math.Abs(spend-want) > 1e-12 {
+			t.Fatalf("include_usage=%v: streamed spend = %v, want %v (booked once, from the terminal event)", wantUsage, spend, want)
+		}
+	}
+}
+
+func TestResponsesStreamAbortBooksEstimatedUsage(t *testing.T) {
+	truncated := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"twelve chars\"}\n\n")
+	}
+	env := newDualEnv(t, truncated, fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	doDual(env, auth, `{"model":"gpt-responses","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 3 * 10.0 / 1e6
+	if math.Abs(spend-want) > 1e-12 {
+		t.Fatalf("aborted responses stream spend = %v, want estimate %v (12 chars -> 3 tokens)", spend, want)
+	}
+}
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buf
+}
+
+func requestLogRecords(t *testing.T, logs *bytes.Buffer) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for line := range strings.Lines(logs.String()) {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("log line %q is not JSON: %v", line, err)
+		}
+		if record["msg"] == "request" {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+func TestRequestLogRecordsResolvedEffortAndUpstream(t *testing.T) {
+	logs := captureLogs(t)
+	env := newDualEnv(t, openaiResponsesHandler(), fullResponseHandler(), 100)
+	auth, gen := insertTestKey(t, env.store, nil)
+
+	rec := doDual(env, auth, `{"model":"gpt-responses","reasoning_effort":"xhigh","messages":[{"role":"user","content":"a prompt nobody should log"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	records := requestLogRecords(t, logs)
+	if len(records) != 1 {
+		t.Fatalf("request log records = %d, want 1: %s", len(records), logs.String())
+	}
+	want := map[string]any{
+		"key_id":           gen.ID,
+		"model":            "gpt-responses",
+		"upstream":         models.UpstreamResponses,
+		"reasoning_effort": "xhigh",
+		"stream":           false,
+		"status":           "success",
+	}
+	for field, value := range want {
+		if got := records[0][field]; got != value {
+			t.Errorf("log field %s = %v, want %v", field, got, value)
+		}
+	}
+
+	rec = doDual(env, auth, `{"model":"gpt-5","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("chat completions status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	records = requestLogRecords(t, logs)
+	if len(records) != 2 {
+		t.Fatalf("request log records = %d, want 2: %s", len(records), logs.String())
+	}
+	if got := records[1]["upstream"]; got != models.UpstreamChatCompletions {
+		t.Errorf("second record upstream = %v, want %v", got, models.UpstreamChatCompletions)
+	}
+
+	secret := gen.Full[strings.LastIndex(gen.Full, "_")+1:]
+	for _, forbidden := range []string{secret, gen.Full, "a prompt nobody should log", "oai-upstream-key"} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Errorf("the request log leaks %q", forbidden)
+		}
+	}
+}
+
+func TestRequestLogRecordsOnlyKnownReasoningEfforts(t *testing.T) {
+	logs := captureLogs(t)
+	env := newDualEnv(t, openaiChatResponse(), fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	injected := "high\" evict=" + strings.Repeat("x", 256)
+	body := func(model, effort string) string {
+		return fmt.Sprintf(`{"model":%q,"reasoning_effort":%q,"messages":[{"role":"user","content":"hi"}]}`, model, effort)
+	}
+
+	if rec := doDual(env, auth, body("gpt-5", injected)); rec.Code != http.StatusOK {
+		t.Fatalf("chat completions status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if rec := doDual(env, auth, body("gpt-responses", injected)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("responses status = %d, want 400, body %s", rec.Code, rec.Body.String())
+	}
+	if rec := doDual(env, auth, body("gpt-5", "XHigh")); rec.Code != http.StatusOK {
+		t.Fatalf("canonicalisation status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	records := requestLogRecords(t, logs)
+	if len(records) != 3 {
+		t.Fatalf("request log records = %d, want 3: %s", len(records), logs.String())
+	}
+	for i, want := range []string{"", "", "xhigh"} {
+		got, _ := records[i]["reasoning_effort"].(string)
+		if got != want {
+			t.Errorf("record %d reasoning_effort = %.32q (%d bytes), want %q", i, got, len(got), want)
+		}
+	}
+	if strings.Contains(logs.String(), injected) || strings.Contains(logs.String(), "evict=") {
+		t.Error("the request log echoes the client's reasoning_effort")
 	}
 }

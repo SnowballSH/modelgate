@@ -1,0 +1,8 @@
+{
+  "model": "claude-real",
+  "max_tokens": 1024,
+  "messages": [
+    {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+  ],
+  "output_config": {"effort": "low"}
+}

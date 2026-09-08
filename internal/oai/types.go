@@ -85,21 +85,30 @@ type Choice struct {
 	FinishReason string          `json:"finish_reason"`
 }
 
+// ResponseMessage.Refusal carries a declined answer, which is distinct from
+// an empty Content: a completion that drops the refusal reads as a successful
+// blank answer, and the caller retries a request the provider already refused.
 type ResponseMessage struct {
 	Role      string     `json:"role"`
 	Content   *string    `json:"content"`
+	Refusal   *string    `json:"refusal,omitempty"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 type Usage struct {
-	PromptTokens        int64                `json:"prompt_tokens"`
-	CompletionTokens    int64                `json:"completion_tokens"`
-	TotalTokens         int64                `json:"total_tokens"`
-	PromptTokensDetails *PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int64                    `json:"prompt_tokens"`
+	CompletionTokens        int64                    `json:"completion_tokens"`
+	TotalTokens             int64                    `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
 type PromptTokensDetails struct {
 	CachedTokens int64 `json:"cached_tokens"`
+}
+
+type CompletionTokensDetails struct {
+	ReasoningTokens int64 `json:"reasoning_tokens"`
 }
 
 type ChatChunk struct {
@@ -120,6 +129,7 @@ type ChunkChoice struct {
 type Delta struct {
 	Role      string          `json:"role,omitempty"`
 	Content   string          `json:"content,omitempty"`
+	Refusal   *string         `json:"refusal,omitempty"`
 	ToolCalls []ChunkToolCall `json:"tool_calls,omitempty"`
 }
 
