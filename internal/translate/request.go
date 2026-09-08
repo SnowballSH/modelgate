@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
@@ -16,8 +17,10 @@ import (
 
 var defaultInputSchema = json.RawMessage(`{"type":"object"}`)
 
+// effortLevels is the reasoning_effort vocabulary both upstreams accept.
+var effortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
 var anthropicEfforts = map[string]string{
-	"":        "",
 	"none":    "low",
 	"minimal": "low",
 	"low":     "low",
@@ -27,12 +30,30 @@ var anthropicEfforts = map[string]string{
 	"max":     "max",
 }
 
-func EffortForAnthropic(level string) (string, error) {
-	mapped, ok := anthropicEfforts[strings.ToLower(level)]
-	if !ok {
-		return "", fmt.Errorf("reasoning_effort %q is not one of none, minimal, low, medium, high, xhigh, max", level)
+// KnownEffort canonicalises a client-supplied reasoning_effort, reporting
+// false for anything outside the accepted vocabulary, so callers never carry
+// an arbitrary request string into an upstream call, a metric or a log line.
+func KnownEffort(level string) (string, bool) {
+	canonical := strings.ToLower(level)
+	if !slices.Contains(effortLevels, canonical) {
+		return "", false
 	}
-	return mapped, nil
+	return canonical, true
+}
+
+func errUnknownEffort(level string) error {
+	return fmt.Errorf("reasoning_effort %q is not one of %s", level, strings.Join(effortLevels, ", "))
+}
+
+func EffortForAnthropic(level string) (string, error) {
+	if level == "" {
+		return "", nil
+	}
+	canonical, ok := KnownEffort(level)
+	if !ok {
+		return "", errUnknownEffort(level)
+	}
+	return anthropicEfforts[canonical], nil
 }
 
 func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (anthro.MessagesRequest, error) {

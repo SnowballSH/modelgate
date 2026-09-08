@@ -893,3 +893,38 @@ func TestRequestLogRecordsResolvedEffortAndUpstream(t *testing.T) {
 		}
 	}
 }
+
+func TestRequestLogRecordsOnlyKnownReasoningEfforts(t *testing.T) {
+	logs := captureLogs(t)
+	env := newDualEnv(t, openaiChatResponse(), fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	injected := "high\" evict=" + strings.Repeat("x", 256)
+	body := func(model, effort string) string {
+		return fmt.Sprintf(`{"model":%q,"reasoning_effort":%q,"messages":[{"role":"user","content":"hi"}]}`, model, effort)
+	}
+
+	if rec := doDual(env, auth, body("gpt-5", injected)); rec.Code != http.StatusOK {
+		t.Fatalf("chat completions status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if rec := doDual(env, auth, body("gpt-responses", injected)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("responses status = %d, want 400, body %s", rec.Code, rec.Body.String())
+	}
+	if rec := doDual(env, auth, body("gpt-5", "XHigh")); rec.Code != http.StatusOK {
+		t.Fatalf("canonicalisation status = %d, body %s", rec.Code, rec.Body.String())
+	}
+
+	records := requestLogRecords(t, logs)
+	if len(records) != 3 {
+		t.Fatalf("request log records = %d, want 3: %s", len(records), logs.String())
+	}
+	for i, want := range []string{"", "", "xhigh"} {
+		got, _ := records[i]["reasoning_effort"].(string)
+		if got != want {
+			t.Errorf("record %d reasoning_effort = %.32q (%d bytes), want %q", i, got, len(got), want)
+		}
+	}
+	if strings.Contains(logs.String(), injected) || strings.Contains(logs.String(), "evict=") {
+		t.Error("the request log echoes the client's reasoning_effort")
+	}
+}

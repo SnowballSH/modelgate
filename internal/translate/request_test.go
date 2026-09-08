@@ -106,6 +106,29 @@ func TestEffortForAnthropic(t *testing.T) {
 	}
 }
 
+func TestKnownEffort(t *testing.T) {
+	cases := []struct {
+		name  string
+		level string
+		want  string
+		ok    bool
+	}{
+		{name: "canonical", level: "medium", want: "medium", ok: true},
+		{name: "mixed case", level: "XHigh", want: "xhigh", ok: true},
+		{name: "unset", level: ""},
+		{name: "unknown", level: "adaptive"},
+		{name: "prefixed", level: "high evict=" + strings.Repeat("x", 64)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := KnownEffort(tc.level)
+			if got != tc.want || ok != tc.ok {
+				t.Errorf("KnownEffort(%.24q) = %q, %v; want %q, %v", tc.level, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
 func TestToAnthropicRejectsUnknownEffort(t *testing.T) {
 	req := loadChatRequest(t, filepath.Join("testdata", "reasoning_low.input.json"))
 	req.ReasoningEffort = "adaptive"

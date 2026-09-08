@@ -100,8 +100,9 @@ func (h *PublicHandler) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSONStatus(w, http.StatusOK, resp)
 }
 
-// requestRecord is what the per-request log line reports: resolved values
-// only, never the key, the prompt or any body.
+// requestRecord is what the per-request log line reports: values resolved
+// against the model table and the accepted reasoning_effort vocabulary,
+// never a raw request string, the key, the prompt or any body.
 type requestRecord struct {
 	KeyID           string
 	Model           string
@@ -169,11 +170,12 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer adm.Release()
+	effort, _ := translate.KnownEffort(req.ReasoningEffort)
 	record = requestRecord{
 		KeyID:           adm.Key.ID,
 		Model:           req.Model,
 		Upstream:        adm.Model.UpstreamAPI,
-		ReasoningEffort: req.ReasoningEffort,
+		ReasoningEffort: effort,
 		Stream:          req.Stream,
 	}
 

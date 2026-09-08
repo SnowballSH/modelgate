@@ -10,16 +10,6 @@ import (
 	"github.com/SnowballSH/modelgate/internal/oairesp"
 )
 
-var responsesEfforts = map[string]bool{
-	"none":    true,
-	"minimal": true,
-	"low":     true,
-	"medium":  true,
-	"high":    true,
-	"xhigh":   true,
-	"max":     true,
-}
-
 // ToResponses builds a Responses API request from a Chat Completions one.
 // temperature and top_p are normalised away rather than refused: this upstream
 // serves reasoning models, which accept only the default value of either.
@@ -57,9 +47,9 @@ func ToResponses(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 	}
 
 	if req.ReasoningEffort != "" {
-		level := strings.ToLower(req.ReasoningEffort)
-		if !responsesEfforts[level] {
-			return oairesp.Request{}, fmt.Errorf("reasoning_effort %q is not one of none, minimal, low, medium, high, xhigh, max", req.ReasoningEffort)
+		level, ok := KnownEffort(req.ReasoningEffort)
+		if !ok {
+			return oairesp.Request{}, errUnknownEffort(req.ReasoningEffort)
 		}
 		out.Reasoning = &oairesp.Reasoning{Effort: level}
 	}
