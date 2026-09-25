@@ -482,6 +482,11 @@ type dualEnv struct {
 
 func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, breakerThreshold int) *dualEnv {
 	t.Helper()
+	return newDualEnvWithTable(t, dualModelJSON, openaiHandler, anthropicHandler, breakerThreshold)
+}
+
+func newDualEnvWithTable(t *testing.T, tableJSON string, openaiHandler, anthropicHandler http.HandlerFunc, breakerThreshold int) *dualEnv {
+	t.Helper()
 	var openaiSeen []oai.ChatRequest
 	var openaiCalls []upstreamCall
 	var anthropicHits int
@@ -509,7 +514,7 @@ func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, 
 
 	s := testStore(t)
 	path := filepath.Join(t.TempDir(), "models.json")
-	if err := os.WriteFile(path, []byte(dualModelJSON), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(tableJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	table, err := models.LoadTable(path)

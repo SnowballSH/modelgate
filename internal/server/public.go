@@ -215,6 +215,10 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		ReasoningEffort: effort,
 		Stream:          req.Stream,
 	}
+	if violation := limitViolation(req.Model, adm.Model.Limits, req, effort); violation != "" {
+		fail(CodeInvalidRequest, violation)
+		return
+	}
 
 	breaker := h.up.breakerFor(adm.Model.Provider)
 	if !breaker.Allow() {

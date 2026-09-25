@@ -47,3 +47,26 @@ func TestChoiceWithoutLogprobsOmitsThem(t *testing.T) {
 		t.Errorf("a translated response grew a logprobs key: %s", out)
 	}
 }
+
+func TestForcesToolCall(t *testing.T) {
+	tests := []struct {
+		toolChoice string
+		want       bool
+	}{
+		{``, false},
+		{`null`, false},
+		{`"auto"`, false},
+		{`"none"`, false},
+		{`"required"`, true},
+		{`{"type":"function","function":{"name":"get_weather"}}`, true},
+		{`{"type":"custom","custom":{"name":"grammar"}}`, true},
+		{`{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[]}}`, true},
+		{`{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, false},
+	}
+	for _, tc := range tests {
+		req := ChatRequest{ToolChoice: json.RawMessage(tc.toolChoice)}
+		if got := req.ForcesToolCall(); got != tc.want {
+			t.Errorf("ForcesToolCall(%s) = %v, want %v", tc.toolChoice, got, tc.want)
+		}
+	}
+}

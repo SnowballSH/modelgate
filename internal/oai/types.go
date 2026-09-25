@@ -28,6 +28,32 @@ type ChatRequest struct {
 	User                string          `json:"user,omitempty"`
 }
 
+// ForcesToolCall reports whether tool_choice obliges the model to call a
+// tool rather than leaving the choice to it: "required", a named function or
+// custom tool, or an allowed_tools set in required mode.
+func (r ChatRequest) ForcesToolCall() bool {
+	var mode string
+	if json.Unmarshal(r.ToolChoice, &mode) == nil {
+		return mode == "required"
+	}
+	var choice struct {
+		Type         string `json:"type"`
+		AllowedTools struct {
+			Mode string `json:"mode"`
+		} `json:"allowed_tools"`
+	}
+	if json.Unmarshal(r.ToolChoice, &choice) != nil {
+		return false
+	}
+	switch choice.Type {
+	case "function", "custom":
+		return true
+	case "allowed_tools":
+		return choice.AllowedTools.Mode == "required"
+	}
+	return false
+}
+
 // Message is a request message. Content is either a JSON string or an
 // array of content parts; modelgate accepts text parts only.
 type Message struct {

@@ -2,10 +2,12 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
 	"slices"
+	"strings"
 )
 
 type Pricing struct {
@@ -25,11 +27,30 @@ const (
 	UpstreamResponses       = "responses"
 )
 
+// EffortLevels is the reasoning_effort vocabulary modelgate accepts from
+// clients, in ascending order.
+var EffortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// Limits are the request features a model's provider refuses, declared in the
+// table so modelgate can refuse them itself before any upstream call. The zero
+// value refuses nothing, which is what a table without the fields means.
+type Limits struct {
+	NoForcedToolChoice bool
+	// ReasoningEfforts lists the levels the model accepts; nil accepts every
+	// level in EffortLevels.
+	ReasoningEfforts []string
+}
+
+func (l Limits) AllowsEffort(level string) bool {
+	return l.ReasoningEfforts == nil || slices.Contains(l.ReasoningEfforts, level)
+}
+
 type Model struct {
 	Provider      string
 	UpstreamAPI   string
 	ProviderModel string
 	Pricing       Pricing
+	Limits        Limits
 }
 
 type Table struct {
@@ -48,15 +69,18 @@ type modelEntry struct {
 	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok"`
 	CacheReadUSDPerMTok  *float64 `json:"cache_read_usd_per_mtok"`
 	CacheWriteUSDPerMTok *float64 `json:"cache_write_usd_per_mtok"`
+	ForcedToolChoice     *bool    `json:"forced_tool_choice"`
+	ReasoningEfforts     []string `json:"reasoning_efforts"`
 }
 
 // LoadTable reads the model pricing table at path. Cost accounting fails
 // closed by construction — nothing unpriced can run — so any unreadable
 // file, invalid JSON, empty table, empty provider_model, unknown provider,
-// unusable upstream_api, or absent, zero, or negative price field yields an
-// error and no table. An omitted provider means anthropic, and an omitted
-// upstream_api means chat_completions on openai models and nothing on
-// anthropic ones.
+// unusable upstream_api, absent, zero, or negative price field, or empty or
+// unknown reasoning_efforts yields an error and no table. An omitted provider
+// means anthropic, an omitted upstream_api means chat_completions on openai
+// models and nothing on anthropic ones, and omitted limits refuse nothing.
+// Fields this build does not know are ignored, so a newer table still loads.
 func LoadTable(path string) (*Table, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -118,10 +142,15 @@ func (e modelEntry) validate() (Model, error) {
 			return Model{}, fmt.Errorf("%s must be positive, got %v", p.field, *p.value)
 		}
 	}
+	limits, err := e.limits()
+	if err != nil {
+		return Model{}, err
+	}
 	return Model{
 		Provider:      provider,
 		UpstreamAPI:   upstream,
 		ProviderModel: e.ProviderModel,
+		Limits:        limits,
 		Pricing: Pricing{
 			InputUSDPerMTok:      *e.InputUSDPerMTok,
 			OutputUSDPerMTok:     *e.OutputUSDPerMTok,
@@ -129,6 +158,23 @@ func (e modelEntry) validate() (Model, error) {
 			CacheWriteUSDPerMTok: *e.CacheWriteUSDPerMTok,
 		},
 	}, nil
+}
+
+func (e modelEntry) limits() (Limits, error) {
+	limits := Limits{NoForcedToolChoice: e.ForcedToolChoice != nil && !*e.ForcedToolChoice}
+	if e.ReasoningEfforts == nil {
+		return limits, nil
+	}
+	if len(e.ReasoningEfforts) == 0 {
+		return Limits{}, errors.New("reasoning_efforts is empty; omit it to accept every level")
+	}
+	for _, level := range e.ReasoningEfforts {
+		if !slices.Contains(EffortLevels, level) {
+			return Limits{}, fmt.Errorf("reasoning_efforts: %q is not one of %s", level, strings.Join(EffortLevels, ", "))
+		}
+	}
+	limits.ReasoningEfforts = slices.Clone(e.ReasoningEfforts)
+	return limits, nil
 }
 
 func (t *Table) Resolve(publicID string) (Model, bool) {
