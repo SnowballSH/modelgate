@@ -81,22 +81,36 @@ func insertKey(t *testing.T, s *store.Store, at time.Time, mutate func(*store.Ke
 
 func bearer(full string) string { return "Bearer " + full }
 
-func mustDeny(t *testing.T, g *Guards, auth string, bodyLen int64, model, wantCode string) {
-	t.Helper()
-	_, code, ok := g.Admit(context.Background(), auth, bodyLen, model)
-	if ok {
-		t.Fatalf("Admit unexpectedly succeeded, want code %q", wantCode)
+var smallDemand = accounting.Demand{InputTokens: 10, OutputTokens: 10}
+
+func admitBearer(g *Guards, auth, model string, demand accounting.Demand) (Admission, *Refusal) {
+	key, ok, err := g.Authenticate(context.Background(), auth)
+	switch {
+	case err != nil:
+		return Admission{}, &Refusal{Code: CodeInternal}
+	case !ok:
+		return Admission{}, &Refusal{Code: CodeInvalidAPIKey}
 	}
-	if code != wantCode {
-		t.Fatalf("Admit code = %q, want %q", code, wantCode)
-	}
+	return g.Admit(context.Background(), key, model, demand)
 }
 
-func mustAdmit(t *testing.T, g *Guards, auth string, bodyLen int64, model string) Admission {
+func mustDeny(t *testing.T, g *Guards, auth, model, wantCode string) *Refusal {
 	t.Helper()
-	adm, code, ok := g.Admit(context.Background(), auth, bodyLen, model)
-	if !ok {
-		t.Fatalf("Admit failed with code %q, want success", code)
+	_, refusal := admitBearer(g, auth, model, smallDemand)
+	if refusal == nil {
+		t.Fatalf("Admit unexpectedly succeeded, want code %q", wantCode)
+	}
+	if refusal.Code != wantCode {
+		t.Fatalf("Admit code = %q, want %q", refusal.Code, wantCode)
+	}
+	return refusal
+}
+
+func mustAdmit(t *testing.T, g *Guards, auth, model string) Admission {
+	t.Helper()
+	adm, refusal := admitBearer(g, auth, model, smallDemand)
+	if refusal != nil {
+		t.Fatalf("Admit failed with code %q, want success", refusal.Code)
 	}
 	return adm
 }
@@ -106,7 +120,7 @@ func TestAdmitGuardOrder(t *testing.T) {
 	table := newTestTable(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
 	acct := accounting.New(s, 100)
-	g := NewGuards(s, acct, table, 1, 1, 1024, clk.now)
+	g := NewGuards(s, acct, table, 1, 1, clk.now)
 
 	valid := insertKey(t, s, clk.t, nil)
 	unknown, err := keys.Generate(rand.Reader)
@@ -122,38 +136,37 @@ func TestAdmitGuardOrder(t *testing.T) {
 	quotaed := insertKey(t, s, clk.t, func(r *store.KeyRecord) { r.QuotaUSD = &zeroQuota })
 	fresh := insertKey(t, s, clk.t, nil)
 
-	mustDeny(t, g, "garbage", 2048, "no-such-model", CodeRequestTooLarge)
-	mustDeny(t, g, "garbage", 10, "no-such-model", CodeInvalidAPIKey)
-	mustDeny(t, g, bearer(unknown.Full), 10, "no-such-model", CodeInvalidAPIKey)
-	mustDeny(t, g, bearer(valid.Prefix+"_wrongsecret"), 10, "no-such-model", CodeInvalidAPIKey)
-	mustDeny(t, g, bearer(revoked.Full), 10, "no-such-model", CodeInvalidAPIKey)
-	mustDeny(t, g, bearer(expired.Full), 10, "no-such-model", CodeInvalidAPIKey)
+	mustDeny(t, g, "garbage", "no-such-model", CodeInvalidAPIKey)
+	mustDeny(t, g, bearer(unknown.Full), "no-such-model", CodeInvalidAPIKey)
+	mustDeny(t, g, bearer(valid.Prefix+"_wrongsecret"), "no-such-model", CodeInvalidAPIKey)
+	mustDeny(t, g, bearer(revoked.Full), "no-such-model", CodeInvalidAPIKey)
+	mustDeny(t, g, bearer(expired.Full), "no-such-model", CodeInvalidAPIKey)
 
-	adm := mustAdmit(t, g, bearer(valid.Full), 10, sonnet)
+	adm := mustAdmit(t, g, bearer(valid.Full), sonnet)
 	adm.Release()
-	mustDeny(t, g, bearer(valid.Full), 10, sonnet, CodeRateLimited)
+	mustDeny(t, g, bearer(valid.Full), sonnet, CodeRateLimited)
 	clk.advance(61 * time.Second)
 
-	mustDeny(t, g, bearer(valid.Full), 10, "no-such-model", CodeModelNotFound)
-	mustDeny(t, g, bearer(restricted.Full), 10, sonnet, CodeModelNotFound)
+	mustDeny(t, g, bearer(valid.Full), "no-such-model", CodeModelNotFound)
+	mustDeny(t, g, bearer(restricted.Full), sonnet, CodeModelNotFound)
 
 	clk.advance(61 * time.Second)
-	held := mustAdmit(t, g, bearer(valid.Full), 10, sonnet)
-	mustDeny(t, g, bearer(fresh.Full), 10, sonnet, CodeRateLimited)
+	held := mustAdmit(t, g, bearer(valid.Full), sonnet)
+	mustDeny(t, g, bearer(fresh.Full), sonnet, CodeRateLimited)
 	held.Release()
 
 	clk.advance(61 * time.Second)
-	mustDeny(t, g, bearer(quotaed.Full), 10, sonnet, CodeQuotaExhausted)
+	mustDeny(t, g, bearer(quotaed.Full), sonnet, CodeQuotaExhausted)
 
 	usage := store.Usage{InputTokens: 100_000}
 	pricing, _ := table.Resolve(sonnet)
 	if err := acct.Record(context.Background(), clk.t, valid.ID, sonnet, usage, pricing.Pricing); err != nil {
 		t.Fatal(err)
 	}
-	tight := NewGuards(s, accounting.New(s, 0.01), table, 100, 1, 1024, clk.now)
-	mustDeny(t, tight, bearer(fresh.Full), 10, sonnet, CodeBudgetExhausted)
+	tight := NewGuards(s, accounting.New(s, 0.01), table, 100, 1, clk.now)
+	mustDeny(t, tight, bearer(fresh.Full), sonnet, CodeBudgetExhausted)
 
-	adm = mustAdmit(t, g, bearer(fresh.Full), 10, sonnet)
+	adm = mustAdmit(t, g, bearer(fresh.Full), sonnet)
 	defer adm.Release()
 	if adm.Key.ID != fresh.ID {
 		t.Errorf("admitted key = %q, want %q", adm.Key.ID, fresh.ID)
@@ -166,62 +179,64 @@ func TestAdmitGuardOrder(t *testing.T) {
 func TestAdmitRateLimitRefill(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1, 4, 1024, clk.now)
+	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1, 4, clk.now)
 	key := insertKey(t, s, clk.t, nil)
 
-	mustAdmit(t, g, bearer(key.Full), 10, sonnet).Release()
-	mustDeny(t, g, bearer(key.Full), 10, sonnet, CodeRateLimited)
+	mustAdmit(t, g, bearer(key.Full), sonnet).Release()
+	mustDeny(t, g, bearer(key.Full), sonnet, CodeRateLimited)
 	clk.advance(61 * time.Second)
-	mustAdmit(t, g, bearer(key.Full), 10, sonnet).Release()
+	mustAdmit(t, g, bearer(key.Full), sonnet).Release()
 }
 
 func TestAdmitConcurrency(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 1, 1024, clk.now)
+	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 1, clk.now)
 	a := insertKey(t, s, clk.t, nil)
 	b := insertKey(t, s, clk.t, nil)
 
-	held := mustAdmit(t, g, bearer(a.Full), 10, sonnet)
-	mustDeny(t, g, bearer(b.Full), 10, sonnet, CodeRateLimited)
+	held := mustAdmit(t, g, bearer(a.Full), sonnet)
+	if refusal := mustDeny(t, g, bearer(b.Full), sonnet, CodeRateLimited); refusal.RetryAfter != slotRetryAfter {
+		t.Errorf("slot refusal RetryAfter = %v, want %v", refusal.RetryAfter, slotRetryAfter)
+	}
 	held.Release()
-	mustAdmit(t, g, bearer(b.Full), 10, sonnet).Release()
+	mustAdmit(t, g, bearer(b.Full), sonnet).Release()
 }
 
 func TestReleaseIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 1, 1024, clk.now)
+	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 1, clk.now)
 	a := insertKey(t, s, clk.t, nil)
 	b := insertKey(t, s, clk.t, nil)
 	c := insertKey(t, s, clk.t, nil)
 
-	adm := mustAdmit(t, g, bearer(a.Full), 10, sonnet)
+	adm := mustAdmit(t, g, bearer(a.Full), sonnet)
 	adm.Release()
 	adm.Release()
-	third := mustAdmit(t, g, bearer(b.Full), 10, sonnet)
-	mustDeny(t, g, bearer(c.Full), 10, sonnet, CodeRateLimited)
+	third := mustAdmit(t, g, bearer(b.Full), sonnet)
+	mustDeny(t, g, bearer(c.Full), sonnet, CodeRateLimited)
 	third.Release()
 }
 
 func TestRevokedOverQuotaReportsInvalidKey(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 4, 1024, clk.now)
+	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 4, clk.now)
 	revokedAt := clk.t
 	zeroQuota := 0.0
 	key := insertKey(t, s, clk.t, func(r *store.KeyRecord) {
 		r.RevokedAt = &revokedAt
 		r.QuotaUSD = &zeroQuota
 	})
-	mustDeny(t, g, bearer(key.Full), 10, sonnet, CodeInvalidAPIKey)
+	mustDeny(t, g, bearer(key.Full), sonnet, CodeInvalidAPIKey)
 }
 
 func TestStoreErrorReportsInternal(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 4, 1024, clk.now)
+	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 4, clk.now)
 	key := insertKey(t, s, clk.t, nil)
 	s.Close()
-	mustDeny(t, g, bearer(key.Full), 10, sonnet, CodeInternal)
+	mustDeny(t, g, bearer(key.Full), sonnet, CodeInternal)
 }

@@ -91,6 +91,18 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		keyFiles = append(keyFiles, cred.path)
 	}
 
+	if cfg.MaxOutputTokens <= 0 || cfg.DefaultMaxTokens > cfg.MaxOutputTokens {
+		return nil, fmt.Errorf("startup: MAX_OUTPUT_TOKENS %d must be positive and at least DEFAULT_MAX_TOKENS %d", cfg.MaxOutputTokens, cfg.DefaultMaxTokens)
+	}
+	proxySecret, err := LoadProxySecret(cfg.AdminProxySecretFile)
+	if err != nil {
+		return nil, fmt.Errorf("startup: ADMIN_PROXY_SECRET_FILE: %w", err)
+	}
+	boundary, err := NewAdminBoundary(cfg.AdminIdentityHeader, cfg.AdminAllowedUsers, proxySecret)
+	if err != nil {
+		return nil, fmt.Errorf("startup: %w", err)
+	}
+
 	st, err := store.Open(cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("startup: open store: %w", err)
@@ -101,30 +113,36 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	if ks, err := st.ListKeys(context.Background()); err == nil {
 		metrics.SetKeyCount(float64(len(ks)))
 	}
-	if spend, err := st.MonthSpend(context.Background(), accounting.Month(time.Now())); err == nil {
-		metrics.SetMonthSpend(spend)
-	}
+	metrics.TrackMonthSpend(st, time.Now)
 	var up Upstreams
 	if key, ok := apiKeys[models.ProviderAnthropic]; ok {
 		up.Anthropic = provider.NewClient(cfg.AnthropicBaseURL, key, &http.Client{})
 		up.AnthropicBreaker = provider.NewBreaker(breakerThreshold, breakerCooldown, time.Now)
+		metrics.TrackBreaker(models.ProviderAnthropic, up.AnthropicBreaker)
 	}
 	if key, ok := apiKeys[models.ProviderOpenAI]; ok {
 		up.OpenAI = provider.NewOpenAIClient(cfg.OpenAIBaseURL, key, &http.Client{})
 		up.OpenAIBreaker = provider.NewBreaker(breakerThreshold, breakerCooldown, time.Now)
+		metrics.TrackBreaker(models.ProviderOpenAI, up.OpenAIBreaker)
 	}
-	guards := NewGuards(st, acct, table, cfg.RateLimitPerKeyRPM, cfg.MaxConcurrentRequests, cfg.MaxBodyBytes, time.Now)
+	guards := NewGuards(st, acct, table, cfg.RateLimitPerKeyRPM, cfg.MaxConcurrentRequests, time.Now)
+	version := cfg.Version
+	if version == "" {
+		version = "dev"
+	}
 
 	s := &Server{store: st, sentinel: metrics}
 	s.public = httpServer(NewPublicHandler(
 		guards, table, acct, st, up, metrics,
 		PublicConfig{
 			DefaultMaxTokens: cfg.DefaultMaxTokens,
+			MaxOutputTokens:  cfg.MaxOutputTokens,
 			MaxBodyBytes:     cfg.MaxBodyBytes,
 			RequestDeadline:  cfg.RequestDeadline,
+			Version:          version,
 		}, time.Now))
 	s.admin = httpServer(NewAdminHandler(
-		st, acct, table, metrics, cfg.AdminIdentityHeader,
+		st, acct, table, metrics, boundary,
 		cfg.BudgetMonthlyUSD, time.Now, rand.Reader, static))
 
 	if s.pubLn, err = net.Listen("tcp", cfg.PublicAddr); err != nil {
@@ -135,13 +153,13 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		s.closeAll()
 		return nil, fmt.Errorf("startup: ADMIN_ADDR: %w", err)
 	}
-	slog.Info("modelgate starting",
+	slog.Info("modelgate starting", "version", version,
 		"models", len(table.IDs()), "budget_usd", cfg.BudgetMonthlyUSD,
 		"public_addr", cfg.PublicAddr, "admin_addr", cfg.AdminAddr, "metrics_addr", cfg.MetricsAddr)
 	if cfg.MetricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metrics.Handler())
-		mux.Handle("/ready", NewReadyHandler(st, keyFiles...))
+		mux.Handle("/ready", NewReadyHandler(st, time.Now, keyFiles...))
 		s.metrics = httpServer(mux)
 		if s.metLn, err = net.Listen("tcp", cfg.MetricsAddr); err != nil {
 			s.closeAll()

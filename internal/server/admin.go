@@ -16,28 +16,28 @@ import (
 )
 
 type AdminHandler struct {
-	store          *store.Store
-	acct           *accounting.Accountant
-	table          *models.Table
-	metrics        *Metrics
-	identityHeader string
-	budgetUSD      float64
-	now            func() time.Time
-	keyRand        io.Reader
-	static         http.Handler
+	store     *store.Store
+	acct      *accounting.Accountant
+	table     *models.Table
+	metrics   *Metrics
+	boundary  *AdminBoundary
+	budgetUSD float64
+	now       func() time.Time
+	keyRand   io.Reader
+	static    http.Handler
 }
 
-func NewAdminHandler(s *store.Store, acct *accounting.Accountant, table *models.Table, m *Metrics, identityHeader string, budgetUSD float64, now func() time.Time, keyRand io.Reader, static http.Handler) http.Handler {
+func NewAdminHandler(s *store.Store, acct *accounting.Accountant, table *models.Table, m *Metrics, boundary *AdminBoundary, budgetUSD float64, now func() time.Time, keyRand io.Reader, static http.Handler) http.Handler {
 	return &AdminHandler{
-		store:          s,
-		acct:           acct,
-		table:          table,
-		metrics:        m,
-		identityHeader: identityHeader,
-		budgetUSD:      budgetUSD,
-		now:            now,
-		keyRand:        keyRand,
-		static:         static,
+		store:     s,
+		acct:      acct,
+		table:     table,
+		metrics:   m,
+		boundary:  boundary,
+		budgetUSD: budgetUSD,
+		now:       now,
+		keyRand:   keyRand,
+		static:    static,
 	}
 }
 
@@ -83,9 +83,10 @@ func (h *AdminHandler) keyJSON(ctx context.Context, k store.KeyRecord) adminKeyJ
 }
 
 func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	identity := r.Header.Get(h.identityHeader)
-	if identity == "" {
-		writeErrorStatus(w, http.StatusUnauthorized, "authentication_error", "missing_identity", "missing identity header")
+	identity, refusal := h.boundary.Authorize(r)
+	if refusal != "" {
+		slog.Warn("admin request refused", "reason", refusal, "remote_addr", r.RemoteAddr)
+		writeErrorStatus(w, http.StatusForbidden, "permission_error", "forbidden", "admin access denied")
 		return
 	}
 

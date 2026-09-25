@@ -85,7 +85,19 @@ type publicEnv struct {
 	now     time.Time
 }
 
+type publicEnvOptions struct {
+	maxBodyBytes    int64
+	budgetUSD       float64
+	rpm             int
+	bodyReadTimeout time.Duration
+}
+
 func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes int64) *publicEnv {
+	t.Helper()
+	return newPublicEnvWith(t, providerHandler, publicEnvOptions{maxBodyBytes: maxBodyBytes, budgetUSD: 100, rpm: 1000})
+}
+
+func newPublicEnvWith(t *testing.T, providerHandler http.HandlerFunc, opts publicEnvOptions) *publicEnv {
 	t.Helper()
 	upstream := httptest.NewServer(providerHandler)
 	t.Cleanup(upstream.Close)
@@ -94,13 +106,36 @@ func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes i
 	table := testTable(t)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
-	acct := accounting.New(s, 100)
-	guards := NewGuards(s, acct, table, 1000, 8, maxBodyBytes, nowFn)
+	acct := accounting.New(s, opts.budgetUSD)
+	guards := NewGuards(s, acct, table, opts.rpm, 8, nowFn)
 	client := provider.NewClient(upstream.URL, "test-upstream-key", upstream.Client())
 	breaker := provider.NewBreaker(100, time.Minute, nowFn)
-	m := NewMetrics(100)
-	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxBodyBytes: maxBodyBytes, RequestDeadline: 5 * time.Second}, nowFn)
+	m := NewMetrics(opts.budgetUSD)
+	m.TrackMonthSpend(s, nowFn)
+	m.TrackBreaker(models.ProviderAnthropic, breaker)
+	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: opts.maxBodyBytes, BodyReadTimeout: opts.bodyReadTimeout, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
 	return &publicEnv{handler: handler, store: s, acct: acct, metrics: m, now: now}
+}
+
+func insertQuotaKey(t *testing.T, env *publicEnv, quotaUSD float64) string {
+	t.Helper()
+	gen, err := keys.Generate(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = env.store.InsertKey(t.Context(), store.KeyRecord{
+		ID:           gen.ID,
+		Prefix:       gen.Prefix,
+		SecretSHA256: gen.SecretSHA256[:],
+		Label:        "quota",
+		QuotaUSD:     &quotaUSD,
+		CreatedAt:    env.now,
+		CreatedBy:    "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "Bearer " + gen.Full
 }
 
 func chatBody(stream bool) string {
@@ -484,7 +519,7 @@ func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, 
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
 	acct := accounting.New(s, 100)
-	guards := NewGuards(s, acct, table, 1000, 8, 1<<20, nowFn)
+	guards := NewGuards(s, acct, table, 1000, 8, nowFn)
 	up := Upstreams{
 		Anthropic:        provider.NewClient(anthropicUpstream.URL, "ant-upstream-key", anthropicUpstream.Client()),
 		AnthropicBreaker: provider.NewBreaker(breakerThreshold, time.Minute, nowFn),
@@ -492,7 +527,7 @@ func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, 
 		OpenAIBreaker:    provider.NewBreaker(breakerThreshold, time.Minute, nowFn),
 	}
 	m := NewMetrics(100)
-	handler := NewPublicHandler(guards, table, acct, s, up, m, PublicConfig{DefaultMaxTokens: 4096, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second}, nowFn)
+	handler := NewPublicHandler(guards, table, acct, s, up, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
 	return &dualEnv{handler: handler, store: s, now: now, openaiSeen: &openaiSeen, openaiCalls: &openaiCalls, anthropicHits: &anthropicHits}
 }
 
@@ -624,15 +659,16 @@ func TestOpenAIStreamAbortBooksEstimatedUsage(t *testing.T) {
 	env := newDualEnv(t, truncated, fullResponseHandler(), 100)
 	auth, _ := insertTestKey(t, env.store, nil)
 
-	doDual(env, auth, `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	body := `{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	doDual(env, auth, body)
 
 	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := 3 * 10.0 / 1e6
+	want := float64((len(body)+3)/4)*1.25/1e6 + 3*10.0/1e6
 	if math.Abs(spend-want) > 1e-12 {
-		t.Fatalf("aborted openai stream spend = %v, want estimate %v (12 chars -> 3 tokens)", spend, want)
+		t.Fatalf("aborted openai stream spend = %v, want estimate %v (prompt bytes / 4 input, 12 chars -> 3 output tokens)", spend, want)
 	}
 }
 
@@ -808,15 +844,16 @@ func TestResponsesStreamAbortBooksEstimatedUsage(t *testing.T) {
 	env := newDualEnv(t, truncated, fullResponseHandler(), 100)
 	auth, _ := insertTestKey(t, env.store, nil)
 
-	doDual(env, auth, `{"model":"gpt-responses","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	body := `{"model":"gpt-responses","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	doDual(env, auth, body)
 
 	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := 3 * 10.0 / 1e6
+	want := float64((len(body)+3)/4)*1.25/1e6 + 3*10.0/1e6
 	if math.Abs(spend-want) > 1e-12 {
-		t.Fatalf("aborted responses stream spend = %v, want estimate %v (12 chars -> 3 tokens)", spend, want)
+		t.Fatalf("aborted responses stream spend = %v, want estimate %v (prompt bytes / 4 input, 12 chars -> 3 output tokens)", spend, want)
 	}
 }
 
@@ -886,7 +923,7 @@ func TestRequestLogRecordsResolvedEffortAndUpstream(t *testing.T) {
 		t.Errorf("second record upstream = %v, want %v", got, models.UpstreamChatCompletions)
 	}
 
-	secret := gen.Full[strings.LastIndex(gen.Full, "_")+1:]
+	secret := strings.TrimPrefix(gen.Full, gen.Prefix+"_")
 	for _, forbidden := range []string{secret, gen.Full, "a prompt nobody should log", "oai-upstream-key"} {
 		if strings.Contains(logs.String(), forbidden) {
 			t.Errorf("the request log leaks %q", forbidden)

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -8,12 +9,14 @@ import (
 
 func validEnv() map[string]string {
 	return map[string]string{
-		"PUBLIC_ADDR":            "127.0.0.1:8080",
-		"ADMIN_ADDR":             "127.0.0.1:8081",
-		"DATA_DIR":               "/var/lib/modelgate",
-		"ANTHROPIC_API_KEY_FILE": "/run/secrets/anthropic",
-		"MODELS_CONFIG_FILE":     "/etc/modelgate/models.json",
-		"BUDGET_MONTHLY_USD":     "25.50",
+		"PUBLIC_ADDR":             "127.0.0.1:8080",
+		"ADMIN_ADDR":              "127.0.0.1:8081",
+		"DATA_DIR":                "/var/lib/modelgate",
+		"ANTHROPIC_API_KEY_FILE":  "/run/secrets/anthropic",
+		"MODELS_CONFIG_FILE":      "/etc/modelgate/models.json",
+		"BUDGET_MONTHLY_USD":      "25.50",
+		"ADMIN_ALLOWED_USERS":     "alice",
+		"ADMIN_PROXY_SECRET_FILE": "/run/secrets/admin-proxy",
 	}
 }
 
@@ -28,6 +31,8 @@ func TestLoadMissingRequired(t *testing.T) {
 		"DATA_DIR",
 		"MODELS_CONFIG_FILE",
 		"BUDGET_MONTHLY_USD",
+		"ADMIN_ALLOWED_USERS",
+		"ADMIN_PROXY_SECRET_FILE",
 	}
 	for _, name := range required {
 		t.Run(name, func(t *testing.T) {
@@ -60,13 +65,16 @@ func TestLoadDefaults(t *testing.T) {
 		ModelsConfigFile:      "/etc/modelgate/models.json",
 		BudgetMonthlyUSD:      25.50,
 		AdminIdentityHeader:   "Remote-User",
+		AdminAllowedUsers:     []string{"alice"},
+		AdminProxySecretFile:  "/run/secrets/admin-proxy",
 		DefaultMaxTokens:      4096,
+		MaxOutputTokens:       128_000,
 		MaxBodyBytes:          1 << 20,
 		RateLimitPerKeyRPM:    60,
 		MaxConcurrentRequests: 8,
 		RequestDeadline:       10 * time.Minute,
 	}
-	if cfg != want {
+	if !reflect.DeepEqual(cfg, want) {
 		t.Fatalf("Load = %+v, want %+v", cfg, want)
 	}
 }
@@ -80,6 +88,10 @@ func TestLoadRejectsGarbage(t *testing.T) {
 		{"bad float budget", "BUDGET_MONTHLY_USD", "not-a-number"},
 		{"zero budget", "BUDGET_MONTHLY_USD", "0"},
 		{"negative budget", "BUDGET_MONTHLY_USD", "-5"},
+		{"NaN budget", "BUDGET_MONTHLY_USD", "NaN"},
+		{"infinite budget", "BUDGET_MONTHLY_USD", "Inf"},
+		{"positive infinite budget", "BUDGET_MONTHLY_USD", "+Inf"},
+		{"negative infinite budget", "BUDGET_MONTHLY_USD", "-Inf"},
 		{"bad max tokens", "DEFAULT_MAX_TOKENS", "many"},
 		{"zero max tokens", "DEFAULT_MAX_TOKENS", "0"},
 		{"negative max tokens", "DEFAULT_MAX_TOKENS", "-1"},
@@ -92,6 +104,9 @@ func TestLoadRejectsGarbage(t *testing.T) {
 		{"bad duration", "REQUEST_DEADLINE", "soon"},
 		{"zero duration", "REQUEST_DEADLINE", "0s"},
 		{"negative duration", "REQUEST_DEADLINE", "-1m"},
+		{"blank admin allowlist", "ADMIN_ALLOWED_USERS", " , ,"},
+		{"zero output ceiling", "MAX_OUTPUT_TOKENS", "0"},
+		{"default above the output ceiling", "MAX_OUTPUT_TOKENS", "1024"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -121,6 +136,9 @@ func TestLoadFullEnv(t *testing.T) {
 		"MODELS_CONFIG_FILE":      "/conf/models.json",
 		"BUDGET_MONTHLY_USD":      "100.25",
 		"ADMIN_IDENTITY_HEADER":   "X-Auth-User",
+		"ADMIN_ALLOWED_USERS":     " alice, bob@example.com ,",
+		"ADMIN_PROXY_SECRET_FILE": "/secrets/admin-proxy",
+		"MAX_OUTPUT_TOKENS":       "64000",
 		"DEFAULT_MAX_TOKENS":      "2048",
 		"MAX_BODY_BYTES":          "5242880",
 		"RATE_LIMIT_PER_KEY_RPM":  "120",
@@ -143,13 +161,16 @@ func TestLoadFullEnv(t *testing.T) {
 		ModelsConfigFile:      "/conf/models.json",
 		BudgetMonthlyUSD:      100.25,
 		AdminIdentityHeader:   "X-Auth-User",
+		AdminAllowedUsers:     []string{"alice", "bob@example.com"},
+		AdminProxySecretFile:  "/secrets/admin-proxy",
 		DefaultMaxTokens:      2048,
+		MaxOutputTokens:       64_000,
 		MaxBodyBytes:          5242880,
 		RateLimitPerKeyRPM:    120,
 		MaxConcurrentRequests: 16,
 		RequestDeadline:       2*time.Minute + 30*time.Second,
 	}
-	if cfg != want {
+	if !reflect.DeepEqual(cfg, want) {
 		t.Fatalf("Load = %+v, want %+v", cfg, want)
 	}
 }

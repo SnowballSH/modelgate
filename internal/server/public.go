@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"slices"
 	"time"
 
@@ -47,18 +48,32 @@ type PublicHandler struct {
 	up               Upstreams
 	metrics          *Metrics
 	defaultMaxTokens int
+	maxOutputTokens  int
 	maxBodyBytes     int64
+	bodyReadTimeout  time.Duration
 	requestDeadline  time.Duration
+	version          string
 	now              func() time.Time
 }
 
 type PublicConfig struct {
 	DefaultMaxTokens int
+	MaxOutputTokens  int
 	MaxBodyBytes     int64
+	BodyReadTimeout  time.Duration
 	RequestDeadline  time.Duration
+	Version          string
 }
 
+const (
+	defaultBodyReadTimeout = 30 * time.Second
+	bookingTimeout         = 10 * time.Second
+)
+
 func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountant, s *store.Store, up Upstreams, m *Metrics, cfg PublicConfig, now func() time.Time) http.Handler {
+	if cfg.BodyReadTimeout <= 0 {
+		cfg.BodyReadTimeout = defaultBodyReadTimeout
+	}
 	return &PublicHandler{
 		guards:           g,
 		table:            table,
@@ -67,13 +82,17 @@ func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountan
 		up:               up,
 		metrics:          m,
 		defaultMaxTokens: cfg.DefaultMaxTokens,
+		maxOutputTokens:  cfg.MaxOutputTokens,
 		maxBodyBytes:     cfg.MaxBodyBytes,
+		bodyReadTimeout:  cfg.BodyReadTimeout,
 		requestDeadline:  cfg.RequestDeadline,
+		version:          cfg.Version,
 		now:              now,
 	}
 }
 
 func (h *PublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r = withRequestID(w, r)
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 		h.handleModels(w, r)
@@ -142,31 +161,48 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	record := requestRecord{Model: "unknown"}
 	observe := func(outcome string) {
-		h.metrics.ObserveRequest(outcome, record.Model, time.Since(start).Seconds())
-		slog.Info("request", "key_id", record.KeyID, "model", record.Model,
-			"upstream", record.Upstream, "reasoning_effort", record.ReasoningEffort,
-			"stream", record.Stream, "status", outcome)
+		elapsed := time.Since(start)
+		h.metrics.ObserveRequest(outcome, record.Model, elapsed.Seconds())
+		slog.Info("request", "request_id", requestIDFrom(r.Context()), "key_id", record.KeyID,
+			"model", record.Model, "upstream", record.Upstream, "reasoning_effort", record.ReasoningEffort,
+			"stream", record.Stream, "status", outcome, "duration_ms", elapsed.Milliseconds(),
+			"version", h.version)
 	}
 	fail := func(code, message string) {
 		observe(code)
 		writeError(w, code, message)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, h.maxBodyBytes+1))
-	if err != nil {
-		fail(CodeInvalidRequest, "failed to read request body")
+	key, ok, err := h.guards.Authenticate(r.Context(), r.Header.Get("Authorization"))
+	switch {
+	case err != nil:
+		fail(CodeInternal, messageForCode(CodeInternal))
+		return
+	case !ok:
+		fail(CodeInvalidAPIKey, messageForCode(CodeInvalidAPIKey))
+		return
+	}
+	record.KeyID = key.ID
+
+	body, code := h.readBody(w, r)
+	if code != "" {
+		fail(code, messageForBodyCode(code))
 		return
 	}
 	var req oai.ChatRequest
-	if int64(len(body)) <= h.maxBodyBytes {
-		if err := json.Unmarshal(body, &req); err != nil {
-			fail(CodeInvalidRequest, "invalid JSON body")
-			return
-		}
+	if err := json.Unmarshal(body, &req); err != nil {
+		fail(CodeInvalidRequest, "invalid JSON body")
+		return
 	}
-	adm, code, ok := h.guards.Admit(r.Context(), r.Header.Get("Authorization"), int64(len(body)), req.Model)
-	if !ok {
-		fail(code, messageForCode(code))
+	demand, err := worstCaseDemand(req, len(body), h.defaultMaxTokens, h.maxOutputTokens)
+	if err != nil {
+		fail(CodeInvalidRequest, err.Error())
+		return
+	}
+	adm, refusal := h.guards.Admit(r.Context(), key, req.Model, demand)
+	if refusal != nil {
+		observe(refusal.Code)
+		writeRefusal(w, *refusal, messageForCode(refusal.Code))
 		return
 	}
 	defer adm.Release()
@@ -181,21 +217,26 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	breaker := h.up.breakerFor(adm.Model.Provider)
 	if !breaker.Allow() {
-		h.metrics.SetBreakerOpen(adm.Model.Provider, true)
 		fail(CodeProviderUnavailable, "provider circuit open")
 		return
 	}
-	h.metrics.SetBreakerOpen(adm.Model.Provider, false)
 
-	ctx, cancel := context.WithTimeout(r.Context(), h.requestDeadline)
+	// A non-streaming call keeps running when the caller hangs up: the
+	// provider bills it either way, and only its answer says how much.
+	upstreamCtx := r.Context()
+	if !req.Stream {
+		upstreamCtx = context.WithoutCancel(upstreamCtx)
+	}
+	ctx, cancel := context.WithTimeout(upstreamCtx, h.requestDeadline)
 	defer cancel()
+	call := admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, promptBytes: len(body)}
 
 	if adm.Model.Provider == models.ProviderOpenAI {
 		if adm.Model.UpstreamAPI == models.UpstreamResponses {
-			h.chatResponses(ctx, w, r, req, adm, breaker, observe, fail)
+			h.chatResponses(ctx, call, fail)
 			return
 		}
-		h.chatOpenAI(ctx, w, r, req, adm, breaker, observe)
+		h.chatOpenAI(ctx, call)
 		return
 	}
 
@@ -206,7 +247,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		h.streamChat(ctx, w, r, req, areq, adm, breaker, observe)
+		h.streamChat(ctx, call, areq)
 		return
 	}
 
@@ -218,17 +259,72 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.recordUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(aresp.Usage))
+	if h.callerGone(r, observe) {
+		return
+	}
 	id := "chatcmpl-" + randomHex16()
 	resp := translate.FromAnthropic(aresp, req.Model, h.now().Unix(), id)
-	h.recordUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(aresp.Usage))
 	observe("success")
 	writeJSONStatus(w, http.StatusOK, resp)
+}
+
+// admittedCall carries one admitted request through a provider path.
+type admittedCall struct {
+	w           http.ResponseWriter
+	r           *http.Request
+	req         oai.ChatRequest
+	adm         Admission
+	breaker     *provider.Breaker
+	observe     func(string)
+	promptBytes int
+}
+
+// readBody reads the request body within the read timeout and the size cap.
+// A complete read clears the deadline so it cannot outlive the body. After a
+// failed read the deadline stays: the server drains an unread body before
+// answering, and without the deadline a stalled sender holds that drain, and
+// the connection, open indefinitely.
+func (h *PublicHandler) readBody(w http.ResponseWriter, r *http.Request) ([]byte, string) {
+	rc := http.NewResponseController(w)
+	deadlineSet := rc.SetReadDeadline(time.Now().Add(h.bodyReadTimeout)) == nil
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes))
+	var tooLarge *http.MaxBytesError
+	switch {
+	case err == nil:
+		if deadlineSet {
+			_ = rc.SetReadDeadline(time.Time{})
+		}
+		return body, ""
+	case errors.As(err, &tooLarge):
+		return nil, CodeRequestTooLarge
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return nil, CodeRequestTimeout
+	default:
+		return nil, CodeInvalidRequest
+	}
+}
+
+func messageForBodyCode(code string) string {
+	if code == CodeInvalidRequest {
+		return "failed to read request body"
+	}
+	return messageForCode(code)
+}
+
+func (h *PublicHandler) callerGone(r *http.Request, observe func(string)) bool {
+	if r.Context().Err() == nil {
+		return false
+	}
+	observe("client_aborted")
+	return true
 }
 
 // chatOpenAI forwards the request nearly verbatim: the public wire format
 // is already OpenAI's, so only the model name, the usage capture, and the
 // error surface need modelgate's treatment.
-func (h *PublicHandler) chatOpenAI(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string)) {
+func (h *PublicHandler) chatOpenAI(ctx context.Context, call admittedCall) {
+	w, r, req, adm := call.w, call.r, call.req, call.adm
 	up := req
 	up.Model = adm.Model.ProviderModel
 	if up.MaxTokens == nil && up.MaxCompletionTokens == nil {
@@ -237,42 +333,48 @@ func (h *PublicHandler) chatOpenAI(ctx context.Context, w http.ResponseWriter, r
 	}
 
 	if req.Stream {
-		h.streamOpenAI(ctx, w, r, req, up, adm, breaker, observe)
+		h.streamOpenAI(ctx, call, up)
 		return
 	}
 
 	var resp oai.ChatResponse
-	if !h.callUpstream(breaker, observe, writeProviderError(w), func() (err error) {
+	if !h.callUpstream(call.breaker, call.observe, writeProviderError(w), func() (err error) {
 		resp, err = h.up.OpenAI.Chat(ctx, up)
 		return err
 	}) {
 		return
 	}
 
-	resp.Model = req.Model
 	h.recordUsage(r.Context(), adm, req.Model, storeUsageFromOAI(resp.Usage))
-	observe("success")
+	if h.callerGone(r, call.observe) {
+		return
+	}
+	resp.Model = req.Model
+	call.observe("success")
 	writeJSONStatus(w, http.StatusOK, resp)
 }
 
-func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter, r *http.Request, req, up oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string)) {
-	sw := newSSEWriter(w)
+func (h *PublicHandler) streamOpenAI(ctx context.Context, call admittedCall, up oai.ChatRequest) {
+	req := call.req
+	sw := newSSEWriter(call.w)
 	// Usage is always requested upstream so aborted streams can be billed;
 	// the usage-only chunk reaches the client only when it asked for it.
 	up.StreamOptions = &oai.StreamOptions{IncludeUsage: true}
 	clientWantsUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 
 	var usage oai.Usage
-	var contentChars int
-	ok := h.callUpstream(breaker, observe, sw.fail, func() error {
+	meter := streamMeter{promptBytes: call.promptBytes}
+	ok := h.callUpstream(call.breaker, call.observe, sw.fail, func() error {
 		return h.up.OpenAI.ChatStream(ctx, up, func(chunk oai.ChatChunk) error {
+			meter.started = true
 			if chunk.Usage != nil {
 				usage = *chunk.Usage
+				meter.finalUsage = true
 				if len(chunk.Choices) == 0 && !clientWantsUsage {
 					return nil
 				}
 			}
-			contentChars += chunkContentChars(chunk)
+			meter.count(chunk)
 			chunk.Model = req.Model
 			if err := sw.chunk(chunk); err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
@@ -281,30 +383,13 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, w http.ResponseWriter,
 		})
 	})
 	defer func() {
-		h.bookStreamUsage(r.Context(), adm, req.Model, storeUsageFromOAI(usage), contentChars)
+		h.bookStreamUsage(call.r.Context(), call.adm, req.Model, meter, storeUsageFromOAI(usage))
 	}()
 	if !ok {
 		return
 	}
 	sw.done()
-	observe("success")
-}
-
-// bookStreamUsage books what a stream billed, on every exit path. A provider
-// reports usage only in its final event, so an aborted stream would otherwise
-// bill nothing while the provider bills everything generated; the
-// character-count estimate keeps the quota and the budget honest, and the log
-// marks it as an estimate.
-func (h *PublicHandler) bookStreamUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage, contentChars int) {
-	if !usage.HasTokens() && contentChars > 0 {
-		usage = store.Usage{OutputTokens: int64((contentChars + 3) / 4)}
-		slog.Warn("stream ended before usage arrived; booking estimated output tokens",
-			"key_id", adm.Key.ID, "model", publicModel, "estimated_output_tokens", usage.OutputTokens)
-	}
-	if !usage.HasTokens() {
-		return
-	}
-	h.recordUsage(ctx, adm, publicModel, usage)
+	call.observe("success")
 }
 
 // storeUsageFromOAI clamps the cached count into [0, PromptTokens]: a
@@ -322,20 +407,25 @@ func storeUsageFromOAI(u oai.Usage) store.Usage {
 	}
 }
 
-func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, areq anthro.MessagesRequest, adm Admission, breaker *provider.Breaker, observe func(string)) {
+func (h *PublicHandler) streamChat(ctx context.Context, call admittedCall, areq anthro.MessagesRequest) {
+	req := call.req
 	id := "chatcmpl-" + randomHex16()
 	st := translate.NewStreamTranslator(req.Model, h.now().Unix(), id)
-	sw := newSSEWriter(w)
+	sw := newSSEWriter(call.w)
 
-	var contentChars int
-	ok := h.callUpstream(breaker, observe, sw.fail, func() error {
+	meter := streamMeter{promptBytes: call.promptBytes}
+	ok := h.callUpstream(call.breaker, call.observe, sw.fail, func() error {
 		return h.up.Anthropic.MessagesStream(ctx, areq, func(ev anthro.StreamEvent) error {
+			meter.started = true
+			if ev.Type == "message_delta" && ev.Usage != nil {
+				meter.finalUsage = true
+			}
 			chunks, err := st.Next(ev)
 			if err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 			}
 			for _, chunk := range chunks {
-				contentChars += chunkContentChars(chunk)
+				meter.count(chunk)
 				if err := sw.chunk(chunk); err != nil {
 					return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
 				}
@@ -344,7 +434,7 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 		})
 	})
 	defer func() {
-		h.bookStreamUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(st.Usage()), contentChars)
+		h.bookStreamUsage(call.r.Context(), call.adm, req.Model, meter, translate.ToStoreUsage(st.Usage()))
 	}()
 	if !ok {
 		return
@@ -352,18 +442,19 @@ func (h *PublicHandler) streamChat(ctx context.Context, w http.ResponseWriter, r
 
 	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
 		u := translate.OAIUsage(st.Usage())
-		if !h.streamUsageChunk(sw, id, req.Model, u, observe) {
+		if !h.streamUsageChunk(sw, id, req.Model, u, call.observe) {
 			return
 		}
 	}
 	sw.done()
-	observe("success")
+	call.observe("success")
 }
 
 // chatResponses serves a model the table routes through the Responses API,
 // translating in both directions around the same guards the other upstreams
 // run under.
-func (h *PublicHandler) chatResponses(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, adm Admission, breaker *provider.Breaker, observe func(string), fail func(code, message string)) {
+func (h *PublicHandler) chatResponses(ctx context.Context, call admittedCall, fail func(code, message string)) {
+	w, r, req, adm := call.w, call.r, call.req, call.adm
 	rreq, err := translate.ToResponses(req, adm.Model.ProviderModel, h.defaultMaxTokens)
 	if err != nil {
 		fail(CodeInvalidRequest, err.Error())
@@ -371,12 +462,12 @@ func (h *PublicHandler) chatResponses(ctx context.Context, w http.ResponseWriter
 	}
 
 	if req.Stream {
-		h.streamResponses(ctx, w, r, req, rreq, adm, breaker, observe)
+		h.streamResponses(ctx, call, rreq)
 		return
 	}
 
 	var resp oairesp.Response
-	if !h.callUpstream(breaker, observe, writeProviderError(w), func() (err error) {
+	if !h.callUpstream(call.breaker, call.observe, writeProviderError(w), func() (err error) {
 		resp, err = h.up.OpenAI.Responses(ctx, rreq)
 		return err
 	}) {
@@ -384,6 +475,9 @@ func (h *PublicHandler) chatResponses(ctx context.Context, w http.ResponseWriter
 	}
 
 	h.recordUsage(r.Context(), adm, req.Model, translate.ResponsesStoreUsage(resp.Usage))
+	if h.callerGone(r, call.observe) {
+		return
+	}
 
 	// A 200 reporting a failed run would otherwise translate to an empty but
 	// successful answer, sending the agent back to retry work the provider
@@ -394,24 +488,29 @@ func (h *PublicHandler) chatResponses(ctx context.Context, w http.ResponseWriter
 	}
 
 	id := "chatcmpl-" + randomHex16()
-	observe("success")
+	call.observe("success")
 	writeJSONStatus(w, http.StatusOK, translate.FromResponses(resp, req.Model, h.now().Unix(), id))
 }
 
-func (h *PublicHandler) streamResponses(ctx context.Context, w http.ResponseWriter, r *http.Request, req oai.ChatRequest, rreq oairesp.Request, adm Admission, breaker *provider.Breaker, observe func(string)) {
+func (h *PublicHandler) streamResponses(ctx context.Context, call admittedCall, rreq oairesp.Request) {
+	req := call.req
 	id := "chatcmpl-" + randomHex16()
 	st := translate.NewResponsesStreamTranslator(req.Model, h.now().Unix(), id)
-	sw := newSSEWriter(w)
+	sw := newSSEWriter(call.w)
 
-	var contentChars int
-	ok := h.callUpstream(breaker, observe, sw.fail, func() error {
+	meter := streamMeter{promptBytes: call.promptBytes}
+	ok := h.callUpstream(call.breaker, call.observe, sw.fail, func() error {
 		return h.up.OpenAI.ResponsesStream(ctx, rreq, func(ev oairesp.StreamEvent) error {
+			meter.started = true
+			if isTerminalResponsesEvent(ev) && ev.Response != nil && ev.Response.Usage != nil {
+				meter.finalUsage = true
+			}
 			chunks, err := st.Next(ev)
 			if err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 			}
 			for _, chunk := range chunks {
-				contentChars += chunkContentChars(chunk)
+				meter.count(chunk)
 				if err := sw.chunk(chunk); err != nil {
 					return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
 				}
@@ -420,7 +519,7 @@ func (h *PublicHandler) streamResponses(ctx context.Context, w http.ResponseWrit
 		})
 	})
 	defer func() {
-		h.bookStreamUsage(r.Context(), adm, req.Model, translate.ResponsesStoreUsage(st.Usage()), contentChars)
+		h.bookStreamUsage(call.r.Context(), call.adm, req.Model, meter, translate.ResponsesStoreUsage(st.Usage()))
 	}()
 	if !ok {
 		return
@@ -429,12 +528,20 @@ func (h *PublicHandler) streamResponses(ctx context.Context, w http.ResponseWrit
 	// The Responses stream carries no usage chunk of its own; the client that
 	// asked for one gets it synthesized from the terminal event.
 	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
-		if !h.streamUsageChunk(sw, id, req.Model, translate.ResponsesOAIUsage(st.Usage()), observe) {
+		if !h.streamUsageChunk(sw, id, req.Model, translate.ResponsesOAIUsage(st.Usage()), call.observe) {
 			return
 		}
 	}
 	sw.done()
-	observe("success")
+	call.observe("success")
+}
+
+func isTerminalResponsesEvent(ev oairesp.StreamEvent) bool {
+	switch ev.Type {
+	case "response.completed", "response.incomplete", "response.failed":
+		return true
+	}
+	return false
 }
 
 func (h *PublicHandler) streamUsageChunk(sw *sseWriter, id, publicModel string, usage oai.Usage, observe func(string)) bool {
@@ -448,14 +555,6 @@ func (h *PublicHandler) streamUsageChunk(sw *sseWriter, id, publicModel string, 
 		return false
 	}
 	return true
-}
-
-func chunkContentChars(chunk oai.ChatChunk) int {
-	total := 0
-	for _, choice := range chunk.Choices {
-		total += len(choice.Delta.Content)
-	}
-	return total
 }
 
 // sseWriter frames chat chunks as server-sent events, deferring the
@@ -503,7 +602,7 @@ func (sw *sseWriter) fail(code string) {
 		writeError(sw.w, code, messageForProviderCode(code))
 		return
 	}
-	payload, _ := json.Marshal(errorBody(errorTypeForStatus(statusForCode(code)), code, messageForProviderCode(code)))
+	payload, _ := json.Marshal(wireError(code, messageForProviderCode(code)))
 	_ = sw.raw(payload)
 }
 
@@ -538,21 +637,6 @@ func (h *PublicHandler) recordProviderError(err error) string {
 	}
 }
 
-// recordUsage runs on a context detached from the request: spend the
-// provider billed must be booked even when the caller is already gone.
-func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer cancel()
-	now := h.now()
-	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.Pricing); err != nil {
-		slog.Error("usage record failed", "key_id", adm.Key.ID, "model", publicModel, "err", err)
-	} else if spend, err := h.store.MonthSpend(ctx, accounting.Month(now)); err == nil {
-		h.metrics.SetMonthSpend(spend)
-	}
-	_ = h.store.TouchLastUsed(ctx, adm.Key.ID, now)
-	h.metrics.AddTokens(publicModel, usage)
-}
-
 func messageForCode(code string) string {
 	switch code {
 	case CodeInvalidAPIKey:
@@ -567,6 +651,9 @@ func messageForCode(code string) string {
 		return "monthly budget exhausted"
 	case CodeRequestTooLarge:
 		return "request body too large"
+	case CodeRequestTimeout:
+		return "request body not received in time"
+
 	default:
 		return "request rejected"
 	}

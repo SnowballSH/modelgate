@@ -14,16 +14,17 @@ import (
 	"github.com/SnowballSH/modelgate/internal/store"
 )
 
+const slotRetryAfter = time.Second
+
 type Guards struct {
-	store        *store.Store
-	acct         *accounting.Accountant
-	table        *models.Table
-	rpm          int
-	maxBodyBytes int64
-	now          func() time.Time
-	slots        chan struct{}
-	mu           sync.Mutex
-	buckets      map[string]*bucket
+	store   *store.Store
+	acct    *accounting.Accountant
+	table   *models.Table
+	rpm     int
+	now     func() time.Time
+	slots   chan struct{}
+	mu      sync.Mutex
+	buckets map[string]*bucket
 }
 
 type bucket struct {
@@ -31,23 +32,31 @@ type bucket struct {
 	last   time.Time
 }
 
-func NewGuards(s *store.Store, acct *accounting.Accountant, table *models.Table, rpm, maxConcurrent int, maxBodyBytes int64, now func() time.Time) *Guards {
+func NewGuards(s *store.Store, acct *accounting.Accountant, table *models.Table, rpm, maxConcurrent int, now func() time.Time) *Guards {
 	return &Guards{
-		store:        s,
-		acct:         acct,
-		table:        table,
-		rpm:          rpm,
-		maxBodyBytes: maxBodyBytes,
-		now:          now,
-		slots:        make(chan struct{}, maxConcurrent),
-		buckets:      make(map[string]*bucket),
+		store:   s,
+		acct:    acct,
+		table:   table,
+		rpm:     rpm,
+		now:     now,
+		slots:   make(chan struct{}, maxConcurrent),
+		buckets: make(map[string]*bucket),
 	}
 }
 
 type Admission struct {
-	Key     store.KeyRecord
-	Model   models.Model
+	Key   store.KeyRecord
+	Model models.Model
+	// Release frees the concurrency slot and the cost reservation. Book the
+	// request's usage before calling it, or the spend goes briefly uncounted.
 	Release func()
+}
+
+// Refusal is a guard's answer to a request it will not admit. RetryAfter is
+// set when waiting is enough for the same request to succeed.
+type Refusal struct {
+	Code       string
+	RetryAfter time.Duration
 }
 
 func (g *Guards) Authenticate(ctx context.Context, authorization string) (store.KeyRecord, bool, error) {
@@ -65,49 +74,43 @@ func (g *Guards) Authenticate(ctx context.Context, authorization string) (store.
 	return key, true, nil
 }
 
-func (g *Guards) Admit(ctx context.Context, authorization string, bodyLen int64, requestedModel string) (Admission, string, bool) {
-	if bodyLen > g.maxBodyBytes {
-		return Admission{}, CodeRequestTooLarge, false
-	}
-	key, ok, err := g.Authenticate(ctx, authorization)
-	if err != nil {
-		return Admission{}, CodeInternal, false
-	}
-	if !ok {
-		return Admission{}, CodeInvalidAPIKey, false
-	}
+// Admit runs the guards an authenticated request passes in order: the key's
+// rate limit, the model allowlist, a concurrency slot, then a reservation of
+// the request's worst-case cost against the key quota and the budget.
+func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, requestedModel string, demand accounting.Demand) (Admission, *Refusal) {
 	now := g.now()
-	if !g.takeToken(key.ID, now) {
-		return Admission{}, CodeRateLimited, false
+	if wait, ok := g.takeToken(key.ID, now); !ok {
+		return Admission{}, &Refusal{Code: CodeRateLimited, RetryAfter: wait}
 	}
 	model, resolved := g.table.Resolve(requestedModel)
 	if !resolved || (key.Models != nil && !slices.Contains(key.Models, requestedModel)) {
-		return Admission{}, CodeModelNotFound, false
+		return Admission{}, &Refusal{Code: CodeModelNotFound}
 	}
 	select {
 	case g.slots <- struct{}{}:
 	default:
-		return Admission{}, CodeRateLimited, false
+		return Admission{}, &Refusal{Code: CodeRateLimited, RetryAfter: slotRetryAfter}
+	}
+	reservation, err := g.acct.Reserve(ctx, now, key, accounting.WorstCaseCost(demand, model.Pricing))
+	if err != nil {
+		<-g.slots
+		switch {
+		case errors.Is(err, accounting.ErrQuotaExhausted):
+			return Admission{}, &Refusal{Code: CodeQuotaExhausted}
+		case errors.Is(err, accounting.ErrBudgetExhausted):
+			return Admission{}, &Refusal{Code: CodeBudgetExhausted}
+		default:
+			return Admission{}, &Refusal{Code: CodeInternal}
+		}
 	}
 	var once sync.Once
 	release := func() {
-		once.Do(func() { <-g.slots })
+		once.Do(func() {
+			reservation.Release()
+			<-g.slots
+		})
 	}
-	if err := g.acct.CheckKeyQuota(ctx, now, key); err != nil {
-		release()
-		if errors.Is(err, accounting.ErrQuotaExhausted) {
-			return Admission{}, CodeQuotaExhausted, false
-		}
-		return Admission{}, CodeInternal, false
-	}
-	if err := g.acct.CheckGlobalBudget(ctx, now); err != nil {
-		release()
-		if errors.Is(err, accounting.ErrBudgetExhausted) {
-			return Admission{}, CodeBudgetExhausted, false
-		}
-		return Admission{}, CodeInternal, false
-	}
-	return Admission{Key: key, Model: model, Release: release}, "", true
+	return Admission{Key: key, Model: model, Release: release}, nil
 }
 
 func (g *Guards) keyUsable(key store.KeyRecord, found bool, secret string, now time.Time) bool {
@@ -126,7 +129,9 @@ func (g *Guards) keyUsable(key store.KeyRecord, found bool, secret string, now t
 	return true
 }
 
-func (g *Guards) takeToken(id string, now time.Time) bool {
+// takeToken spends one token from the key's bucket, or reports how long
+// until the bucket refills to one.
+func (g *Guards) takeToken(id string, now time.Time) (time.Duration, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	b, ok := g.buckets[id]
@@ -139,8 +144,8 @@ func (g *Guards) takeToken(id string, now time.Time) bool {
 		b.last = now
 	}
 	if b.tokens < 1 {
-		return false
+		return time.Duration((1 - b.tokens) / float64(g.rpm) * float64(time.Minute)), false
 	}
 	b.tokens--
-	return true
+	return 0, true
 }
