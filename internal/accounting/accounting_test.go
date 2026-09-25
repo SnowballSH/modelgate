@@ -29,6 +29,16 @@ func quotaKey(id string, quota *float64) store.KeyRecord {
 
 func ptr(v float64) *float64 { return &v }
 
+func admit(ctx context.Context, a *Accountant, now time.Time, key store.KeyRecord) error {
+	r, err := a.Reserve(ctx, now, key, 0)
+	if r != nil {
+		r.Release()
+	}
+	return err
+}
+
+var noQuota = quotaKey("unlimited", nil)
+
 func TestMonth(t *testing.T) {
 	cases := []struct {
 		name string
@@ -78,13 +88,13 @@ func TestGlobalBudgetTripsAtCap(t *testing.T) {
 	if err := a.Record(ctx, now, "k1", "m", store.Usage{InputTokens: 9_990_000}, p); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if err := a.CheckGlobalBudget(ctx, now); err != nil {
+	if err := admit(ctx, a, now, noQuota); err != nil {
 		t.Fatalf("budget under cap: got %v, want nil", err)
 	}
 	if err := a.Record(ctx, now, "k1", "m", store.Usage{InputTokens: 10_000}, p); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if err := a.CheckGlobalBudget(ctx, now); !errors.Is(err, ErrBudgetExhausted) {
+	if err := admit(ctx, a, now, noQuota); !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("budget at cap: got %v, want ErrBudgetExhausted", err)
 	}
 }
@@ -100,13 +110,13 @@ func TestQuotaIndependentOfBudget(t *testing.T) {
 		t.Fatalf("record: %v", err)
 	}
 
-	if err := a.CheckKeyQuota(ctx, now, quotaKey("keyA", ptr(1.0))); !errors.Is(err, ErrQuotaExhausted) {
+	if err := admit(ctx, a, now, quotaKey("keyA", ptr(1.0))); !errors.Is(err, ErrQuotaExhausted) {
 		t.Fatalf("keyA quota: got %v, want ErrQuotaExhausted", err)
 	}
-	if err := a.CheckGlobalBudget(ctx, now); err != nil {
+	if err := admit(ctx, a, now, noQuota); err != nil {
 		t.Fatalf("global budget: got %v, want nil", err)
 	}
-	if err := a.CheckKeyQuota(ctx, now, quotaKey("keyB", ptr(5.0))); err != nil {
+	if err := admit(ctx, a, now, quotaKey("keyB", ptr(5.0))); err != nil {
 		t.Fatalf("keyB quota: got %v, want nil", err)
 	}
 }
@@ -121,7 +131,7 @@ func TestNoQuotaKeyNeverTrips(t *testing.T) {
 	if err := a.Record(ctx, now, "keyC", "m", store.Usage{InputTokens: 1_000_000_000}, p); err != nil {
 		t.Fatalf("record: %v", err)
 	}
-	if err := a.CheckKeyQuota(ctx, now, quotaKey("keyC", nil)); err != nil {
+	if err := admit(ctx, a, now, quotaKey("keyC", nil)); err != nil {
 		t.Fatalf("nil quota: got %v, want nil", err)
 	}
 }
@@ -138,13 +148,13 @@ func TestMonthIsolation(t *testing.T) {
 		t.Fatalf("record: %v", err)
 	}
 
-	if err := a.CheckGlobalBudget(ctx, january); !errors.Is(err, ErrBudgetExhausted) {
+	if err := admit(ctx, a, january, noQuota); !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("january budget: got %v, want ErrBudgetExhausted", err)
 	}
-	if err := a.CheckGlobalBudget(ctx, february); err != nil {
+	if err := admit(ctx, a, february, noQuota); err != nil {
 		t.Fatalf("february budget: got %v, want nil", err)
 	}
-	if err := a.CheckKeyQuota(ctx, february, quotaKey("keyA", ptr(1.0))); err != nil {
+	if err := admit(ctx, a, february, quotaKey("keyA", ptr(1.0))); err != nil {
 		t.Fatalf("february quota: got %v, want nil", err)
 	}
 }
@@ -186,5 +196,91 @@ func TestRecordSetsCostAndAccumulates(t *testing.T) {
 	}
 	if got := usage["keyA"].Requests; got != 2 {
 		t.Errorf("Requests = %d, want 2 (each Record defaults to 1)", got)
+	}
+}
+
+func TestReservationsHoldTheCapUntilReleased(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	a := New(s, 1.0)
+	now := time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
+	key := quotaKey("keyA", ptr(0.5))
+
+	first, err := a.Reserve(ctx, now, key, 0.3)
+	if err != nil {
+		t.Fatalf("first reservation: %v", err)
+	}
+	second, err := a.Reserve(ctx, now, key, 0.3)
+	if err != nil {
+		t.Fatalf("second reservation while 0.3 of 0.5 is held: %v", err)
+	}
+	if _, err := a.Reserve(ctx, now, key, 0.3); !errors.Is(err, ErrCapReserved) {
+		t.Fatalf("third reservation with 0.6 held against 0.5 and nothing spent: got %v, want ErrCapReserved", err)
+	}
+	other := quotaKey("keyB", nil)
+	otherRes, err := a.Reserve(ctx, now, other, 0.5)
+	if err != nil {
+		t.Fatalf("other key under the budget: %v", err)
+	}
+	if _, err := a.Reserve(ctx, now, other, 0.1); !errors.Is(err, ErrCapReserved) {
+		t.Fatalf("budget with 1.1 held against 1.0 and nothing spent: got %v, want ErrCapReserved", err)
+	}
+
+	first.Release()
+	first.Release()
+	if got := a.Reserved(); math.Abs(got-0.8) > epsilon {
+		t.Fatalf("Reserved after one release (twice) = %v, want 0.8", got)
+	}
+	second.Release()
+	otherRes.Release()
+	if got := a.Reserved(); got != 0 {
+		t.Fatalf("Reserved after every release = %v, want exactly 0", got)
+	}
+	if err := admit(ctx, a, now, key); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}
+
+func TestRecordedSpendAtACapIsExhaustionEvenWhileReservationsAreHeld(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 3, 15, 12, 0, 0, 0, time.UTC)
+	p := models.Pricing{InputUSDPerMTok: 1}
+
+	for name, tc := range map[string]struct {
+		budget float64
+		quota  *float64
+		hold   bool
+		spent  int64
+		want   error
+	}{
+		"key quota spent":                {budget: 100, quota: ptr(1.0), spent: 1_000_000, want: ErrQuotaExhausted},
+		"key quota spent while held":     {budget: 100, quota: ptr(1.0), hold: true, spent: 1_000_000, want: ErrQuotaExhausted},
+		"budget spent while held":        {budget: 1.0, hold: true, spent: 1_000_000, want: ErrBudgetExhausted},
+		"budget spent, key quota held":   {budget: 1.0, quota: ptr(1.2), hold: true, spent: 1_000_000, want: ErrBudgetExhausted},
+		"key quota held, nothing spent":  {budget: 100, quota: ptr(0.5), hold: true, want: ErrCapReserved},
+		"budget held, part spent":        {budget: 0.6, hold: true, spent: 100_000, want: ErrCapReserved},
+		"under both caps with room left": {budget: 2.0, quota: ptr(2.0), hold: true, spent: 100_000, want: nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := New(newStore(t), tc.budget)
+			key := quotaKey("keyA", tc.quota)
+			if tc.hold {
+				held, err := a.Reserve(ctx, now, key, 0.5)
+				if err != nil {
+					t.Fatalf("reservation before any spend: %v", err)
+				}
+				defer held.Release()
+			}
+			if err := a.Record(ctx, now, key.ID, "m", store.Usage{InputTokens: tc.spent}, p); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+			r, err := a.Reserve(ctx, now, key, 0.5)
+			if r != nil {
+				r.Release()
+			}
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+		})
 	}
 }

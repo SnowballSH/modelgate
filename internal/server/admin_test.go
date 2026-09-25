@@ -22,6 +22,17 @@ import (
 
 const identityHeader = "Remote-User"
 
+var testProxySecret = strings.Repeat("proxy-", 6)
+
+func testBoundary(t *testing.T) *AdminBoundary {
+	t.Helper()
+	b, err := NewAdminBoundary(identityHeader, []string{"alice", "bob"}, []byte(testProxySecret))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 type adminEnv struct {
 	handler http.Handler
 	store   *store.Store
@@ -36,12 +47,13 @@ func newAdminEnv(t *testing.T) *adminEnv {
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	acct := accounting.New(s, 100)
 	m := NewMetrics(100)
-	handler := NewAdminHandler(s, acct, table, m, identityHeader, 100, func() time.Time { return now }, rand.Reader, nil)
+	handler := NewAdminHandler(s, acct, table, m, testBoundary(t), 100, func() time.Time { return now }, rand.Reader, nil)
 	return &adminEnv{handler: handler, store: s, acct: acct, now: now}
 }
 
 func doAdmin(env *adminEnv, method, path, identity, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set(ProxySecretHeader, testProxySecret)
 	if identity != "" {
 		req.Header.Set(identityHeader, identity)
 	}
@@ -91,7 +103,7 @@ func TestAdminMissingIdentity(t *testing.T) {
 		{http.MethodGet, "/"},
 	} {
 		rec := doAdmin(env, route.method, route.path, "", "{}")
-		if rec.Code != http.StatusUnauthorized {
+		if rec.Code != http.StatusForbidden {
 			t.Errorf("%s %s without identity: status %d", route.method, route.path, rec.Code)
 		}
 	}
@@ -233,11 +245,11 @@ func TestAdminPublicFullFlow(t *testing.T) {
 	nowFn := func() time.Time { return now }
 	acct := accounting.New(s, 100)
 	m := NewMetrics(100)
-	admin := NewAdminHandler(s, acct, table, m, identityHeader, 100, nowFn, rand.Reader, nil)
-	guards := NewGuards(s, acct, table, 1000, 8, 1<<20, nowFn)
+	admin := NewAdminHandler(s, acct, table, m, testBoundary(t), 100, nowFn, rand.Reader, nil)
+	guards := NewGuards(s, acct, table, 1000, 8, nowFn)
 	client := provider.NewClient(upstream.URL, "k", upstream.Client())
 	breaker := provider.NewBreaker(100, time.Minute, nowFn)
-	public := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second}, nowFn)
+	public := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second}, nowFn)
 	adminE := &adminEnv{handler: admin, store: s, acct: acct, now: now}
 	publicE := &publicEnv{handler: public, store: s, acct: acct, now: now}
 
@@ -269,20 +281,22 @@ func TestAdminRejectsCrossSiteMutations(t *testing.T) {
 	}
 	for _, tc := range cases {
 		req := httptest.NewRequest(http.MethodPost, "/api/keys/abc/revoke", nil)
-		req.Header.Set("Remote-User", "admin")
+		req.Header.Set(ProxySecretHeader, testProxySecret)
+		req.Header.Set("Remote-User", "alice")
 		req.Header.Set("Content-Type", tc.contentType)
 		if tc.secFetchSite != "" {
 			req.Header.Set("Sec-Fetch-Site", tc.secFetchSite)
 		}
 		rec := httptest.NewRecorder()
 		env.handler.ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("%s: status = %d, want 403", tc.name, rec.Code)
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "cross_site_request") {
+			t.Errorf("%s: status = %d body %s, want 403 cross_site_request", tc.name, rec.Code, rec.Body.String())
 		}
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/keys", strings.NewReader(`{"label":"ok"}`))
-	req.Header.Set("Remote-User", "admin")
+	req.Header.Set(ProxySecretHeader, testProxySecret)
+	req.Header.Set("Remote-User", "alice")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	rec := httptest.NewRecorder()
@@ -304,7 +318,7 @@ func TestAdminListModels(t *testing.T) {
 	}
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	acct := accounting.New(s, 100)
-	handler := NewAdminHandler(s, acct, table, NewMetrics(100), identityHeader, 100, func() time.Time { return now }, rand.Reader, nil)
+	handler := NewAdminHandler(s, acct, table, NewMetrics(100), testBoundary(t), 100, func() time.Time { return now }, rand.Reader, nil)
 	env := &adminEnv{handler: handler, store: s, acct: acct, now: now}
 
 	rec := doAdmin(env, http.MethodGet, "/api/models", "alice", "")

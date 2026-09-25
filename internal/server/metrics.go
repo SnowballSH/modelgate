@@ -1,25 +1,31 @@
 package server
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/SnowballSH/modelgate/internal/accounting"
+	"github.com/SnowballSH/modelgate/internal/provider"
 	"github.com/SnowballSH/modelgate/internal/store"
 )
+
+const scrapeQueryTimeout = 5 * time.Second
 
 type Metrics struct {
 	registry        *prometheus.Registry
 	requests        *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
 	tokens          *prometheus.CounterVec
-	monthSpend      prometheus.Gauge
 	budget          prometheus.Gauge
 	providerErrors  *prometheus.CounterVec
-	breakerOpen     *prometheus.GaugeVec
+	bookingFailures prometheus.Counter
 	inFlight        prometheus.Gauge
 	keyCount        prometheus.Gauge
 }
@@ -40,10 +46,6 @@ func NewMetrics(budgetUSD float64) *Metrics {
 			Name: "modelgate_tokens_total",
 			Help: "Tokens processed by direction and model.",
 		}, []string{"direction", "model"}),
-		monthSpend: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "modelgate_month_spend_usd",
-			Help: "Spend recorded for the current month in USD.",
-		}),
 		budget: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "modelgate_budget_usd",
 			Help: "Configured monthly budget in USD.",
@@ -52,10 +54,10 @@ func NewMetrics(budgetUSD float64) *Metrics {
 			Name: "modelgate_provider_errors_total",
 			Help: "Upstream provider errors by kind.",
 		}, []string{"kind"}),
-		breakerOpen: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "modelgate_breaker_open",
-			Help: "Whether the provider circuit breaker is open.",
-		}, []string{"provider"}),
+		bookingFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "modelgate_usage_booking_failures_total",
+			Help: "Usage bookings the store refused; the provider billed spend the quota and budget do not count.",
+		}),
 		inFlight: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "modelgate_in_flight",
 			Help: "Provider calls currently in flight.",
@@ -66,11 +68,44 @@ func NewMetrics(budgetUSD float64) *Metrics {
 		}),
 	}
 	m.registry.MustRegister(
-		m.requests, m.requestDuration, m.tokens, m.monthSpend, m.budget,
-		m.providerErrors, m.breakerOpen, m.inFlight, m.keyCount,
+		m.requests, m.requestDuration, m.tokens, m.budget,
+		m.providerErrors, m.bookingFailures, m.inFlight, m.keyCount,
 	)
 	m.budget.Set(budgetUSD)
 	return m
+}
+
+// TrackMonthSpend exports the current month's recorded spend, read from the
+// store at scrape time so the gauge follows the calendar across a month
+// rollover. A failed read exports NaN rather than a stale value.
+func (m *Metrics) TrackMonthSpend(s *store.Store, now func() time.Time) {
+	m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "modelgate_month_spend_usd",
+		Help: "Spend recorded for the current month in USD.",
+	}, func() float64 {
+		ctx, cancel := context.WithTimeout(context.Background(), scrapeQueryTimeout)
+		defer cancel()
+		spend, err := s.MonthSpend(ctx, accounting.Month(now()))
+		if err != nil {
+			return math.NaN()
+		}
+		return spend
+	}))
+}
+
+// TrackBreaker exports whether the provider's circuit is refusing calls,
+// evaluated at scrape time so the gauge closes when the cooldown ends.
+func (m *Metrics) TrackBreaker(providerName string, b *provider.Breaker) {
+	m.registry.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "modelgate_breaker_open",
+		Help:        "Whether the provider circuit breaker is open.",
+		ConstLabels: prometheus.Labels{"provider": providerName},
+	}, func() float64 {
+		if b.Allow() {
+			return 0
+		}
+		return 1
+	}))
 }
 
 func (m *Metrics) Handler() http.Handler {
@@ -89,21 +124,11 @@ func (m *Metrics) AddTokens(model string, u store.Usage) {
 	m.tokens.WithLabelValues("cache_write", model).Add(float64(u.CacheWriteTokens))
 }
 
-func (m *Metrics) SetMonthSpend(v float64) {
-	m.monthSpend.Set(v)
-}
-
 func (m *Metrics) ProviderError(kind string) {
 	m.providerErrors.WithLabelValues(kind).Inc()
 }
 
-func (m *Metrics) SetBreakerOpen(providerName string, open bool) {
-	v := 0.0
-	if open {
-		v = 1
-	}
-	m.breakerOpen.WithLabelValues(providerName).Set(v)
-}
+func (m *Metrics) BookingFailed() { m.bookingFailures.Inc() }
 
 func (m *Metrics) IncInFlight() { m.inFlight.Inc() }
 func (m *Metrics) DecInFlight() { m.inFlight.Dec() }
@@ -112,10 +137,19 @@ func (m *Metrics) SetKeyCount(n float64) {
 	m.keyCount.Set(n)
 }
 
-func NewReadyHandler(s *store.Store, keyFiles ...string) http.Handler {
+type readinessStore interface {
+	Ping(ctx context.Context) error
+	ProbeWrite(ctx context.Context, at time.Time) error
+}
+
+func NewReadyHandler(s readinessStore, now func() time.Time, keyFiles ...string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := s.Ping(r.Context()); err != nil {
 			http.Error(w, "store unreachable", http.StatusServiceUnavailable)
+			return
+		}
+		if err := s.ProbeWrite(r.Context(), now()); err != nil {
+			http.Error(w, "store not writable", http.StatusServiceUnavailable)
 			return
 		}
 		for _, keyFile := range keyFiles {

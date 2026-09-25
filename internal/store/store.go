@@ -15,35 +15,6 @@ type Store struct {
 	db *sql.DB
 }
 
-const schema = `
-CREATE TABLE IF NOT EXISTS keys (
-	id TEXT PRIMARY KEY,
-	prefix TEXT NOT NULL,
-	secret_sha256 BLOB NOT NULL,
-	label TEXT NOT NULL,
-	models TEXT,
-	quota_usd REAL,
-	expires_at TEXT,
-	revoked_at TEXT,
-	revoked_by TEXT,
-	last_used_at TEXT,
-	created_at TEXT NOT NULL,
-	created_by TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS usage (
-	month TEXT NOT NULL,
-	key_id TEXT NOT NULL,
-	model TEXT NOT NULL,
-	requests INTEGER NOT NULL DEFAULT 0,
-	input_tokens INTEGER NOT NULL DEFAULT 0,
-	output_tokens INTEGER NOT NULL DEFAULT 0,
-	cache_read_tokens INTEGER NOT NULL DEFAULT 0,
-	cache_write_tokens INTEGER NOT NULL DEFAULT 0,
-	cost_usd REAL NOT NULL DEFAULT 0,
-	PRIMARY KEY (month, key_id, model)
-);
-`
-
 func Open(dir string) (*Store, error) {
 	path := filepath.Join(dir, "modelgate.db")
 	dsn := fmt.Sprintf(
@@ -54,9 +25,9 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(context.Background(), db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("create schema: %w", err)
+		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}
 	return &Store{db: db}, nil
 }
@@ -67,6 +38,18 @@ func (s *Store) Close() error {
 
 func (s *Store) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
+}
+
+// ProbeWrite commits one real write, so a read-only mount, a revoked
+// permission or a full disk fails readiness instead of the next booking.
+func (s *Store) ProbeWrite(ctx context.Context, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO readiness (id, probed_at) VALUES (1, ?)
+ON CONFLICT (id) DO UPDATE SET probed_at = excluded.probed_at`, encodeTime(at))
+	if err != nil {
+		return fmt.Errorf("probe write: %w", err)
+	}
+	return nil
 }
 
 func encodeTime(t time.Time) string {

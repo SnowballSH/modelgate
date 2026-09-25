@@ -16,6 +16,8 @@ func TestStatusForCode(t *testing.T) {
 		CodeRateLimited:         http.StatusTooManyRequests,
 		CodeQuotaExhausted:      http.StatusTooManyRequests,
 		CodeBudgetExhausted:     http.StatusTooManyRequests,
+		CodeCapReserved:         http.StatusTooManyRequests,
+		CodeRequestTimeout:      http.StatusRequestTimeout,
 		CodeRequestTooLarge:     http.StatusRequestEntityTooLarge,
 		CodeInvalidRequest:      http.StatusBadRequest,
 		CodeProviderAuthError:   http.StatusBadGateway,
@@ -36,18 +38,21 @@ func TestWriteError(t *testing.T) {
 		code       string
 		wantStatus int
 		wantType   string
+		wantCode   string
 	}{
-		{CodeInvalidAPIKey, 401, "authentication_error"},
-		{CodeModelNotFound, 404, "invalid_request_error"},
-		{CodeRateLimited, 429, "rate_limit_error"},
-		{CodeQuotaExhausted, 429, "rate_limit_error"},
-		{CodeBudgetExhausted, 429, "rate_limit_error"},
-		{CodeRequestTooLarge, 413, "invalid_request_error"},
-		{CodeInvalidRequest, 400, "invalid_request_error"},
-		{CodeProviderAuthError, 502, "api_error"},
-		{CodeProviderUnavailable, 503, "api_error"},
-		{CodeTimeout, 504, "api_error"},
-		{CodeInternal, 500, "api_error"},
+		{CodeInvalidAPIKey, 401, "authentication_error", CodeInvalidAPIKey},
+		{CodeModelNotFound, 404, "invalid_request_error", CodeModelNotFound},
+		{CodeRateLimited, 429, "rate_limit_error", CodeRateLimited},
+		{CodeQuotaExhausted, 429, "insufficient_quota", "insufficient_quota"},
+		{CodeBudgetExhausted, 429, "insufficient_quota", "insufficient_quota"},
+		{CodeCapReserved, 429, "rate_limit_error", CodeCapReserved},
+		{CodeRequestTimeout, 408, "invalid_request_error", CodeRequestTimeout},
+		{CodeRequestTooLarge, 413, "invalid_request_error", CodeRequestTooLarge},
+		{CodeInvalidRequest, 400, "invalid_request_error", CodeInvalidRequest},
+		{CodeProviderAuthError, 502, "api_error", CodeProviderAuthError},
+		{CodeProviderUnavailable, 503, "api_error", CodeProviderUnavailable},
+		{CodeTimeout, 504, "api_error", CodeTimeout},
+		{CodeInternal, 500, "api_error", CodeInternal},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()
@@ -62,7 +67,7 @@ func TestWriteError(t *testing.T) {
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 			t.Fatalf("writeError(%q) body: %v", tc.code, err)
 		}
-		if body.Error.Code != tc.code {
+		if body.Error.Code != tc.wantCode {
 			t.Errorf("writeError(%q) code = %q", tc.code, body.Error.Code)
 		}
 		if body.Error.Type != tc.wantType {

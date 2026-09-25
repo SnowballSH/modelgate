@@ -28,6 +28,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "modelgate:", err)
 		os.Exit(1)
 	}
+	cfg.Version = version
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

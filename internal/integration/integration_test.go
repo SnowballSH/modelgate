@@ -110,7 +110,7 @@ func TestAdminLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	listReq.Header.Set("Remote-User", "tester")
+	asAdmin(listReq)
 	listRes, err := http.DefaultClient.Do(listReq)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestAdminLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revokeReq.Header.Set("Remote-User", "tester")
+	asAdmin(revokeReq)
 	revokeRes, err := http.DefaultClient.Do(revokeReq)
 	if err != nil {
 		t.Fatal(err)
@@ -187,8 +187,8 @@ func TestBudgetHardStop(t *testing.T) {
 		res.Body.Close()
 		t.Fatalf("second request over budget: got %d, want 429", res.StatusCode)
 	}
-	if code := decodeErrorCode(t, res); code != "budget_exhausted" {
-		t.Errorf("over-budget error code: got %q, want %q", code, "budget_exhausted")
+	if code := decodeErrorCode(t, res); code != "insufficient_quota" {
+		t.Errorf("over-budget error code: got %q, want %q", code, "insufficient_quota")
 	}
 }
 

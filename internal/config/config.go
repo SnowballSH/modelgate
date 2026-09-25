@@ -3,7 +3,9 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -17,11 +19,15 @@ type Config struct {
 	ModelsConfigFile                   string
 	BudgetMonthlyUSD                   float64
 	AdminIdentityHeader                string
+	AdminAllowedUsers                  []string
+	AdminProxySecretFile               string
 	DefaultMaxTokens                   int
+	MaxOutputTokens                    int
 	MaxBodyBytes                       int64
 	RateLimitPerKeyRPM                 int
 	MaxConcurrentRequests              int
 	RequestDeadline                    time.Duration
+	Version                            string
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -36,7 +42,10 @@ func Load(getenv func(string) string) (Config, error) {
 		OpenAIBaseURL:         withDefault(getenv("OPENAI_BASE_URL"), "https://api.openai.com"),
 		ModelsConfigFile:      getenv("MODELS_CONFIG_FILE"),
 		AdminIdentityHeader:   withDefault(getenv("ADMIN_IDENTITY_HEADER"), "Remote-User"),
+		AdminAllowedUsers:     splitList(getenv("ADMIN_ALLOWED_USERS")),
+		AdminProxySecretFile:  getenv("ADMIN_PROXY_SECRET_FILE"),
 		DefaultMaxTokens:      4096,
+		MaxOutputTokens:       128_000,
 		MaxBodyBytes:          1 << 20,
 		RateLimitPerKeyRPM:    60,
 		MaxConcurrentRequests: 8,
@@ -52,6 +61,8 @@ func Load(getenv func(string) string) (Config, error) {
 		{"DATA_DIR", cfg.DataDir},
 		{"MODELS_CONFIG_FILE", cfg.ModelsConfigFile},
 		{"BUDGET_MONTHLY_USD", getenv("BUDGET_MONTHLY_USD")},
+		{"ADMIN_ALLOWED_USERS", strings.Join(cfg.AdminAllowedUsers, ",")},
+		{"ADMIN_PROXY_SECRET_FILE", cfg.AdminProxySecretFile},
 	}
 	for _, r := range required {
 		if r.value == "" {
@@ -60,13 +71,19 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	budget, err := strconv.ParseFloat(getenv("BUDGET_MONTHLY_USD"), 64)
-	if err != nil || budget <= 0 {
-		return Config{}, errors.New("config: BUDGET_MONTHLY_USD: must be a positive number")
+	if err != nil || math.IsNaN(budget) || math.IsInf(budget, 0) || budget <= 0 {
+		return Config{}, errors.New("config: BUDGET_MONTHLY_USD: must be a positive finite number")
 	}
 	cfg.BudgetMonthlyUSD = budget
 
 	if err := parsePositive(getenv, "DEFAULT_MAX_TOKENS", &cfg.DefaultMaxTokens); err != nil {
 		return Config{}, err
+	}
+	if err := parsePositive(getenv, "MAX_OUTPUT_TOKENS", &cfg.MaxOutputTokens); err != nil {
+		return Config{}, err
+	}
+	if cfg.DefaultMaxTokens > cfg.MaxOutputTokens {
+		return Config{}, fmt.Errorf("config: DEFAULT_MAX_TOKENS: %d exceeds MAX_OUTPUT_TOKENS %d", cfg.DefaultMaxTokens, cfg.MaxOutputTokens)
 	}
 	if err := parsePositive(getenv, "MAX_BODY_BYTES", &cfg.MaxBodyBytes); err != nil {
 		return Config{}, err
@@ -87,6 +104,18 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// splitList reads a comma-separated list, dropping blank entries so a
+// trailing comma cannot allow the empty identity.
+func splitList(raw string) []string {
+	var out []string
+	for item := range strings.SplitSeq(raw, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func withDefault(value, fallback string) string {

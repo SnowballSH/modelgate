@@ -28,6 +28,10 @@ func assemblyConfig(t *testing.T) config.Config {
 	if err := os.WriteFile(modelsFile, []byte(table), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	proxySecretFile := filepath.Join(dir, "admin-proxy-secret")
+	if err := os.WriteFile(proxySecretFile, []byte(strings.Repeat("proxy-", 6)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return config.Config{
 		PublicAddr:            "127.0.0.1:0",
 		AdminAddr:             "127.0.0.1:0",
@@ -38,7 +42,10 @@ func assemblyConfig(t *testing.T) config.Config {
 		ModelsConfigFile:      modelsFile,
 		BudgetMonthlyUSD:      20,
 		AdminIdentityHeader:   "Remote-User",
+		AdminAllowedUsers:     []string{"alice"},
+		AdminProxySecretFile:  proxySecretFile,
 		DefaultMaxTokens:      4096,
+		MaxOutputTokens:       128_000,
 		MaxBodyBytes:          1 << 20,
 		RateLimitPerKeyRPM:    60,
 		MaxConcurrentRequests: 8,
@@ -97,14 +104,39 @@ func TestServeReadyAndShutdown(t *testing.T) {
 		t.Fatalf("unknown public route: got %d, want 404", res.StatusCode)
 	}
 
-	res, err = http.Get(fmt.Sprintf("http://%s/api/keys", s.AdminAddr()))
-	if err != nil {
-		t.Fatal(err)
+	adminGet := func(secret, identity string) int {
+		req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("http://%s/api/keys", s.AdminAddr()), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if secret != "" {
+			req.Header.Set(ProxySecretHeader, secret)
+		}
+		if identity != "" {
+			req.Header.Set("Remote-User", identity)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		return res.StatusCode
 	}
-	_, _ = io.Copy(io.Discard, res.Body)
-	res.Body.Close()
-	if res.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("admin without identity: got %d, want 401", res.StatusCode)
+	secret := strings.Repeat("proxy-", 6)
+	for _, tc := range []struct {
+		name, secret, identity string
+		want                   int
+	}{
+		{"identity without the proxy secret", "", "alice", http.StatusForbidden},
+		{"the proxy secret without an identity", secret, "", http.StatusForbidden},
+		{"an identity off the allowlist", secret, "mallory", http.StatusForbidden},
+		{"a truncated proxy secret", secret[:len(secret)-1], "alice", http.StatusForbidden},
+		{"the proxy secret and an allowlisted identity", secret, "alice", http.StatusOK},
+	} {
+		if got := adminGet(tc.secret, tc.identity); got != tc.want {
+			t.Errorf("admin with %s: got %d, want %d", tc.name, got, tc.want)
+		}
 	}
 
 	cancel()
@@ -136,6 +168,30 @@ func waitFor200(t *testing.T, url string) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestNewRefusesAnUnusableAdminBoundary(t *testing.T) {
+	for name, mutate := range map[string]func(*config.Config){
+		"missing secret file": func(c *config.Config) { c.AdminProxySecretFile = filepath.Join(t.TempDir(), "absent") },
+		"short secret": func(c *config.Config) {
+			path := filepath.Join(t.TempDir(), "short")
+			if err := os.WriteFile(path, []byte(strings.Repeat("s", MinProxySecretBytes-1)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			c.AdminProxySecretFile = path
+		},
+		"empty allowlist": func(c *config.Config) { c.AdminAllowedUsers = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := assemblyConfig(t)
+			mutate(&cfg)
+			s, err := New(cfg, nil)
+			if err == nil {
+				s.closeAll()
+				t.Fatal("New accepted an unusable admin boundary")
+			}
+		})
+	}
+}
 
 func TestNewRefusesOpenAIModelWithoutKey(t *testing.T) {
 	cfg := assemblyConfig(t)

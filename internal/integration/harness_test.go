@@ -299,6 +299,10 @@ func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 	if err := os.WriteFile(modelsFile, []byte(table), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	proxySecretFile := filepath.Join(dir, "admin-proxy-secret")
+	if err := os.WriteFile(proxySecretFile, []byte(adminProxySecret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := config.Config{
 		PublicAddr:            "127.0.0.1:0",
@@ -310,7 +314,10 @@ func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 		ModelsConfigFile:      modelsFile,
 		BudgetMonthlyUSD:      budgetUSD,
 		AdminIdentityHeader:   "Remote-User",
+		AdminAllowedUsers:     []string{"tester"},
+		AdminProxySecretFile:  proxySecretFile,
 		DefaultMaxTokens:      4096,
+		MaxOutputTokens:       128_000,
 		MaxBodyBytes:          1 << 20,
 		RateLimitPerKeyRPM:    600,
 		MaxConcurrentRequests: 8,
@@ -355,6 +362,14 @@ func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 	return gw
 }
 
+var adminProxySecret = strings.Repeat("proxy-", 6)
+
+// asAdmin adds what the trusted proxy in front of the admin listener adds.
+func asAdmin(req *http.Request) {
+	req.Header.Set(server.ProxySecretHeader, adminProxySecret)
+	req.Header.Set("Remote-User", "tester")
+}
+
 func waitForReady(t *testing.T, url string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -383,7 +398,7 @@ func adminCreateKey(t *testing.T, adminAddr, label string) string {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Remote-User", "tester")
+	asAdmin(req)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -411,7 +426,7 @@ func adminGetJSON(t *testing.T, adminAddr, path string, dst any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Remote-User", "tester")
+	asAdmin(req)
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
