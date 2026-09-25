@@ -26,7 +26,7 @@ jobs:
         with:
           version: v2.13.1
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: test
         run: go test -race ./...
       - name: integration
@@ -34,9 +34,32 @@ jobs:
       - name: build
         run: go build ./...
 
+  webui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: install
+        run: npm ci
+      - name: typecheck
+        run: npm run check
+      - name: build
+        run: npm run build
+      - name: committed dist matches the build
+        run: |
+          git add --intent-to-add dist
+          git diff --exit-code --stat -- dist
+
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: verify
+    needs: [verify, webui]
     runs-on: ubuntu-latest
     permissions:
       contents: read
