@@ -14,8 +14,15 @@ type StreamTranslator struct {
 	id          string
 	usage       anthro.Usage
 	stopReason  string
-	toolBlocks  map[int]int
+	toolBlocks  map[int]*streamedCall
 	toolCount   int
+}
+
+// streamedCall is one open tool_use block: its position among the response's
+// tool calls, and whether any argument text has been sent for it yet.
+type streamedCall struct {
+	position     int
+	hasArguments bool
 }
 
 func NewStreamTranslator(publicModel string, created int64, id string) *StreamTranslator {
@@ -23,7 +30,7 @@ func NewStreamTranslator(publicModel string, created int64, id string) *StreamTr
 		publicModel: publicModel,
 		created:     created,
 		id:          id,
-		toolBlocks:  map[int]int{},
+		toolBlocks:  map[int]*streamedCall{},
 	}
 }
 
@@ -40,7 +47,7 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		}
 		pos := st.toolCount
 		st.toolCount++
-		st.toolBlocks[ev.Index] = pos
+		st.toolBlocks[ev.Index] = &streamedCall{position: pos}
 		delta := oai.Delta{ToolCalls: []oai.ChunkToolCall{{
 			Index:    pos,
 			ID:       ev.ContentBlock.ID,
@@ -56,17 +63,24 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		case "text_delta":
 			return []oai.ChatChunk{st.chunk(oai.Delta{Content: ev.Delta.Text}, nil)}, nil
 		case "input_json_delta":
-			pos, ok := st.toolBlocks[ev.Index]
+			call, ok := st.toolBlocks[ev.Index]
 			if !ok {
 				return nil, fmt.Errorf("input_json_delta for unknown block index %d", ev.Index)
 			}
-			delta := oai.Delta{ToolCalls: []oai.ChunkToolCall{{
-				Index:    pos,
-				Function: &oai.ChunkFunctionCall{Arguments: ev.Delta.PartialJSON},
-			}}}
-			return []oai.ChatChunk{st.chunk(delta, nil)}, nil
+			if ev.Delta.PartialJSON == "" {
+				return nil, nil
+			}
+			call.hasArguments = true
+			return []oai.ChatChunk{st.arguments(call.position, ev.Delta.PartialJSON)}, nil
 		}
 		return nil, nil
+	case "content_block_stop":
+		call, ok := st.toolBlocks[ev.Index]
+		if !ok || call.hasArguments {
+			return nil, nil
+		}
+		call.hasArguments = true
+		return []oai.ChatChunk{st.arguments(call.position, emptyArguments)}, nil
 	case "message_delta":
 		if ev.Delta != nil && ev.Delta.StopReason != "" {
 			st.stopReason = ev.Delta.StopReason
@@ -103,6 +117,16 @@ func (st *StreamTranslator) Usage() anthro.Usage {
 
 func (st *StreamTranslator) FinishReason() string {
 	return FinishReason(st.stopReason)
+}
+
+// arguments carries argument text for the call at position. A call that took
+// no arguments streams none upstream, so its block's stop sends "{}": the
+// client must see arguments it can parse and echo back.
+func (st *StreamTranslator) arguments(position int, text string) oai.ChatChunk {
+	return st.chunk(oai.Delta{ToolCalls: []oai.ChunkToolCall{{
+		Index:    position,
+		Function: &oai.ChunkFunctionCall{Arguments: text},
+	}}}, nil)
 }
 
 func (st *StreamTranslator) chunk(delta oai.Delta, finishReason *string) oai.ChatChunk {

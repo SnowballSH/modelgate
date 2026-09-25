@@ -14,40 +14,27 @@ import (
 // temperature and top_p are normalised away rather than refused: this upstream
 // serves reasoning models, which accept only the default value of either.
 func ToResponses(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (oairesp.Request, error) {
-	if req.N != nil && *req.N != 1 {
-		return oairesp.Request{}, errors.New("n other than 1 is not supported on the responses upstream")
-	}
-	if req.Logprobs != nil && *req.Logprobs {
-		return oairesp.Request{}, errors.New("logprobs is not supported on the responses upstream")
-	}
 	stops, err := parseStop(req.Stop)
 	if err != nil {
 		return oairesp.Request{}, err
 	}
-	for name, set := range map[string]bool{
+	if err := refuseUnsupported(req, "on the responses upstream", map[string]bool{
 		"stop":              len(stops) > 0,
 		"frequency_penalty": req.FrequencyPenalty != nil,
 		"presence_penalty":  req.PresencePenalty != nil,
 		"seed":              req.Seed != nil,
-	} {
-		if set {
-			return oairesp.Request{}, fmt.Errorf("%s is not supported on the responses upstream", name)
-		}
+	}); err != nil {
+		return oairesp.Request{}, err
 	}
 
-	maxOutputTokens := defaultMaxTokens
-	switch {
-	case req.MaxCompletionTokens != nil:
-		maxOutputTokens = *req.MaxCompletionTokens
-	case req.MaxTokens != nil:
-		maxOutputTokens = *req.MaxTokens
-	}
+	outputCap := maxOutputTokens(req, defaultMaxTokens)
 	out := oairesp.Request{
 		Model:             providerModel,
 		ParallelToolCalls: req.ParallelToolCalls,
-		MaxOutputTokens:   &maxOutputTokens,
+		MaxOutputTokens:   &outputCap,
 		Store:             false,
 		Stream:            req.Stream,
+		User:              req.User,
 	}
 
 	if req.ReasoningEffort != "" {

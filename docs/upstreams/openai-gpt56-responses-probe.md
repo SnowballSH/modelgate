@@ -1,7 +1,28 @@
 # The stateless Responses reconstruction GPT-5.6 tool traffic is rebuilt as
 
 Recorded 2026-09-07 from vendor documentation.
-**Live run: PENDING — operator ceremony** (see below).
+**Live run: superseded by the M2b gateway check of 2026-09-11** (see Status).
+
+## Status (2026-09-25)
+
+The direct probe below was never run. It is superseded by the M2b check
+of 2026-09-11, run on the SnowSys host against modelgate `v0.5.0`'s
+loopback public listener with `upstream_api: responses` on `gpt-5.6-luna`
+and short-lived, since-revoked keys (recorded in the SnowSys agent-farm
+integration runbook, verification matrix row M2b):
+
+- A streamed `xhigh` turn with two tools answered 200 with
+  `finish_reason: tool_calls`, both tools called, and reasoning tokens
+  reported — `xhigh` is a valid effort for `gpt-5.6-luna` (verdict 3).
+- The streamed round trip carrying both tool results — the `call_id`-only,
+  reasoning-less, `store: false` reconstruction this record describes —
+  answered 200 with `finish_reason: stop` and an answer built from both
+  results (verdict 1).
+- A non-streamed one-tool round trip answered 200 `stop`; a request with no
+  tools at `medium` answered 200.
+
+The shape with a user `message` appended after the tool result (verdict 2)
+was not exercised separately.
 
 `translate.ToResponses` (B5) rebuilds a Chat Completions conversation as a
 `POST /v1/responses` request that is stateless (`store: false`) and carries
@@ -74,7 +95,7 @@ that contract — if OpenAI demands an item `id`, a `reasoning` item or
 `store: true` — in which case B5's input shape is corrected before the
 tag.
 
-## Live run: PENDING — operator ceremony
+## Direct probe (never run; see Status) — operator ceremony
 
 Cannot run here: no OpenAI key on this machine, and each run is a billed
 call. From the Mac, with the probe key in a file (mode 0600):

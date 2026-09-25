@@ -4,10 +4,13 @@ package anthro
 
 import "encoding/json"
 
+// MessagesRequest.CacheControl is the request-level automatic breakpoint: the
+// API places it on the last cacheable block and moves it forward as the
+// conversation grows.
 type MessagesRequest struct {
 	Model         string        `json:"model"`
 	MaxTokens     int           `json:"max_tokens"`
-	System        string        `json:"system,omitempty"`
+	System        []TextBlock   `json:"system,omitempty"`
 	Messages      []Message     `json:"messages"`
 	Temperature   *float64      `json:"temperature,omitempty"`
 	TopP          *float64      `json:"top_p,omitempty"`
@@ -16,6 +19,27 @@ type MessagesRequest struct {
 	Tools         []Tool        `json:"tools,omitempty"`
 	ToolChoice    *ToolChoice   `json:"tool_choice,omitempty"`
 	OutputConfig  *OutputConfig `json:"output_config,omitempty"`
+	Metadata      *Metadata     `json:"metadata,omitempty"`
+	CacheControl  *CacheControl `json:"cache_control,omitempty"`
+}
+
+// CacheControl.Type is always "ephemeral", the five-minute prompt cache.
+type CacheControl struct {
+	Type string `json:"type"`
+}
+
+func Ephemeral() *CacheControl {
+	return &CacheControl{Type: "ephemeral"}
+}
+
+type TextBlock struct {
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
+}
+
+type Metadata struct {
+	UserID string `json:"user_id,omitempty"`
 }
 
 type OutputConfig struct {
@@ -41,15 +65,18 @@ type ContentBlock struct {
 }
 
 type Tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	CacheControl *CacheControl   `json:"cache_control,omitempty"`
 }
 
-// ToolChoice type is one of "auto", "any", "tool" (with Name), or "none".
+// ToolChoice type is one of "auto", "any", "tool" (with Name), or "none";
+// DisableParallelToolUse applies to every type but "none".
 type ToolChoice struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
+	Type                   string `json:"type"`
+	Name                   string `json:"name,omitempty"`
+	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
 }
 
 type MessagesResponse struct {
@@ -72,7 +99,8 @@ type Usage struct {
 // StreamEvent is one SSE event from a streamed Messages call. Which
 // fields are set depends on Type: message_start carries Message;
 // content_block_start carries Index and ContentBlock;
-// content_block_delta carries Index and Delta; message_delta carries
+// content_block_delta carries Index and Delta; content_block_stop carries
+// Index; message_delta carries
 // Delta (stop_reason) and Usage; error carries Error.
 type StreamEvent struct {
 	Type         string            `json:"type"`

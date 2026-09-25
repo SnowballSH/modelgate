@@ -5,9 +5,12 @@
 package translate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -16,6 +19,17 @@ import (
 )
 
 var defaultInputSchema = json.RawMessage(`{"type":"object"}`)
+
+const emptyArguments = "{}"
+
+// opaqueUserID satisfies Anthropic's metadata.user_id contract (an opaque
+// identifier of at most 512 characters, never a name or email address)
+// whatever the client put in the OpenAI user field, while keeping one
+// stable id per end user for abuse attribution.
+func opaqueUserID(user string) string {
+	sum := sha256.Sum256([]byte(user))
+	return hex.EncodeToString(sum[:])
+}
 
 // effortLevels is the reasoning_effort vocabulary both upstreams accept.
 var effortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -56,30 +70,35 @@ func EffortForAnthropic(level string) (string, error) {
 	return anthropicEfforts[canonical], nil
 }
 
+// AnthropicOptions is what the model table decides about a Messages request
+// rather than the caller. The zero DisablePromptCaching keeps caching on.
+type AnthropicOptions struct {
+	ProviderModel        string
+	DefaultMaxTokens     int
+	DisablePromptCaching bool
+}
+
+// ToAnthropic translates with prompt caching on, the default for every model.
 func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (anthro.MessagesRequest, error) {
-	if req.ResponseFormat != nil {
-		return anthro.MessagesRequest{}, errors.New("response_format is not supported for anthropic models")
-	}
-	if req.N != nil && *req.N != 1 {
-		return anthro.MessagesRequest{}, errors.New("n other than 1 is not supported for anthropic models")
-	}
-	for name, set := range map[string]bool{
+	return ToAnthropicWith(req, AnthropicOptions{ProviderModel: providerModel, DefaultMaxTokens: defaultMaxTokens})
+}
+
+func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.MessagesRequest, error) {
+	if err := refuseUnsupported(req, "for anthropic models", map[string]bool{
+		"response_format":   req.ResponseFormat != nil,
 		"frequency_penalty": req.FrequencyPenalty != nil,
 		"presence_penalty":  req.PresencePenalty != nil,
 		"seed":              req.Seed != nil,
-		"logprobs":          req.Logprobs != nil && *req.Logprobs,
-	} {
-		if set {
-			return anthro.MessagesRequest{}, fmt.Errorf("%s is not supported for anthropic models", name)
-		}
+	}); err != nil {
+		return anthro.MessagesRequest{}, err
 	}
 	effort, err := EffortForAnthropic(req.ReasoningEffort)
 	if err != nil {
 		return anthro.MessagesRequest{}, err
 	}
 	out := anthro.MessagesRequest{
-		Model:     providerModel,
-		MaxTokens: defaultMaxTokens,
+		Model:     opts.ProviderModel,
+		MaxTokens: maxOutputTokens(req, opts.DefaultMaxTokens),
 		Stream:    req.Stream,
 	}
 	// Models that accept output_config.effort reject any temperature other
@@ -90,8 +109,8 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 		out.Temperature = req.Temperature
 		out.TopP = req.TopP
 	}
-	if req.MaxTokens != nil {
-		out.MaxTokens = *req.MaxTokens
+	if req.User != "" {
+		out.Metadata = &anthro.Metadata{UserID: opaqueUserID(req.User)}
 	}
 
 	stops, err := parseStop(req.Stop)
@@ -110,7 +129,7 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 	if err != nil {
 		return anthro.MessagesRequest{}, err
 	}
-	out.ToolChoice = choice
+	out.ToolChoice = withParallelToolCalls(choice, req.ParallelToolCalls, len(tools) > 0)
 
 	system, messages, err := convertMessages(req.Messages)
 	if err != nil {
@@ -119,9 +138,77 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 	if len(messages) == 0 {
 		return anthro.MessagesRequest{}, errors.New("no messages after system extraction")
 	}
-	out.System = system
+	if system != "" {
+		out.System = []anthro.TextBlock{{Type: "text", Text: system}}
+	}
 	out.Messages = messages
+	if !opts.DisablePromptCaching {
+		markCacheBreakpoints(&out)
+	}
 	return out, nil
+}
+
+// refuseUnsupported names the first field, in a fixed order, that the
+// upstream cannot honour, together with the fields both translated upstreams
+// refuse: more than one choice and token log probabilities.
+func refuseUnsupported(req oai.ChatRequest, where string, specific map[string]bool) error {
+	common := map[string]bool{
+		"n other than 1": req.N != nil && *req.N != 1,
+		"logprobs":       req.Logprobs != nil && *req.Logprobs,
+		"top_logprobs":   req.TopLogprobs != nil && *req.TopLogprobs > 0,
+	}
+	for _, fields := range []map[string]bool{common, specific} {
+		for _, name := range slices.Sorted(maps.Keys(fields)) {
+			if fields[name] {
+				return fmt.Errorf("%s is not supported %s", name, where)
+			}
+		}
+	}
+	return nil
+}
+
+// maxOutputTokens prefers max_completion_tokens, the field OpenAI deprecated
+// max_tokens in favour of, and falls back to the gateway default.
+func maxOutputTokens(req oai.ChatRequest, defaultMaxTokens int) int {
+	switch {
+	case req.MaxCompletionTokens != nil:
+		return *req.MaxCompletionTokens
+	case req.MaxTokens != nil:
+		return *req.MaxTokens
+	default:
+		return defaultMaxTokens
+	}
+}
+
+// withParallelToolCalls carries parallel_tool_calls: false as
+// disable_parallel_tool_use, which rides on tool_choice and means nothing
+// without tools or under "none".
+func withParallelToolCalls(choice *anthro.ToolChoice, parallel *bool, hasTools bool) *anthro.ToolChoice {
+	if parallel == nil || *parallel || !hasTools {
+		return choice
+	}
+	if choice == nil {
+		choice = &anthro.ToolChoice{Type: "auto"}
+	}
+	if choice.Type != "none" {
+		choice.DisableParallelToolUse = true
+	}
+	return choice
+}
+
+// markCacheBreakpoints puts one explicit breakpoint at the end of the static
+// prefix (tools render before system, so the last system block covers both)
+// and turns on the request-level automatic breakpoint, which follows the end
+// of the conversation turn by turn. Prefixes under the model's minimum are
+// not cached and cost nothing extra.
+func markCacheBreakpoints(req *anthro.MessagesRequest) {
+	switch {
+	case len(req.System) > 0:
+		req.System[len(req.System)-1].CacheControl = anthro.Ephemeral()
+	case len(req.Tools) > 0:
+		req.Tools[len(req.Tools)-1].CacheControl = anthro.Ephemeral()
+	}
+	req.CacheControl = anthro.Ephemeral()
 }
 
 func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
@@ -202,15 +289,27 @@ func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
 		}
 		text = content
 	}
-	for _, call := range msg.ToolCalls {
+	calls := make([]oai.ToolCall, len(msg.ToolCalls))
+	for i, call := range msg.ToolCalls {
+		call.Function.Arguments = normalizedArguments(call.Function.Arguments)
 		if !json.Valid([]byte(call.Function.Arguments)) {
 			return "", nil, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
 		}
+		calls[i] = call
 	}
-	if text == "" && len(msg.ToolCalls) == 0 {
+	if text == "" && len(calls) == 0 {
 		return "", nil, errors.New("assistant message has neither content nor tool calls")
 	}
-	return text, msg.ToolCalls, nil
+	return text, calls, nil
+}
+
+// normalizedArguments reads the empty arguments string a client echoes for a
+// call that took no arguments as the empty object it stands for.
+func normalizedArguments(arguments string) string {
+	if strings.TrimSpace(arguments) == "" {
+		return emptyArguments
+	}
+	return arguments
 }
 
 func contentBlocks(content json.RawMessage) ([]anthro.ContentBlock, error) {

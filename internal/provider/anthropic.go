@@ -3,13 +3,12 @@
 package provider
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -33,10 +32,11 @@ const (
 )
 
 type Client struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
-	sleep   func(time.Duration)
+	baseURL     string
+	apiKey      string
+	http        *http.Client
+	sleep       func(time.Duration)
+	idleTimeout time.Duration
 }
 
 func NewClient(baseURL, apiKey string, httpClient *http.Client) *Client {
@@ -44,11 +44,18 @@ func NewClient(baseURL, apiKey string, httpClient *http.Client) *Client {
 		httpClient = http.DefaultClient
 	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		http:    httpClient,
-		sleep:   time.Sleep,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		apiKey:      apiKey,
+		http:        httpClient,
+		sleep:       time.Sleep,
+		idleTimeout: DefaultStreamIdleTimeout,
 	}
+}
+
+// SetStreamIdleTimeout replaces DefaultStreamIdleTimeout for this client's
+// streamed calls; zero or less turns the idle abort off.
+func (c *Client) SetStreamIdleTimeout(timeout time.Duration) {
+	c.idleTimeout = timeout
 }
 
 func (c *Client) Messages(ctx context.Context, req anthro.MessagesRequest) (anthro.MessagesResponse, error) {
@@ -107,14 +114,15 @@ func (c *Client) MessagesStream(ctx context.Context, req anthro.MessagesRequest,
 }
 
 func (c *Client) streamOnce(ctx context.Context, body []byte, each func(anthro.StreamEvent) error) (delivered bool, status int, err error) {
+	ctx, guard := guardIdle(ctx, c.idleTimeout)
+	defer guard.stop()
 	res, status, err := c.do(ctx, body)
 	if err != nil {
 		return false, status, err
 	}
 	defer res.Body.Close()
 
-	scanner := bufio.NewScanner(res.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	scanner := newSSEScanner(guard.reader(res.Body))
 	for scanner.Scan() {
 		payload, ok := dataPayload(scanner.Text())
 		if !ok || payload == "" {
@@ -125,6 +133,9 @@ func (c *Client) streamOnce(ctx context.Context, body []byte, each func(anthro.S
 			return delivered, status, fmt.Errorf("%w: malformed stream event", ErrUnavailable)
 		}
 		delivered = true
+		if ev.Type == "error" && ev.Error != nil {
+			logStreamError(ev.Error)
+		}
 		if eachErr := each(ev); eachErr != nil {
 			return delivered, status, eachErr
 		}
@@ -160,11 +171,28 @@ func (c *Client) do(ctx context.Context, body []byte) (*http.Response, int, erro
 		return nil, 0, mapTransportError(ctx, err)
 	}
 	if res.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64*1024))
+		upstream := readUpstreamError(res.Body)
 		res.Body.Close()
-		return nil, res.StatusCode, mapStatus(res.StatusCode)
+		logRejection(res.StatusCode, upstream)
+		return nil, res.StatusCode, upstream.classify(res.StatusCode)
 	}
 	return res, res.StatusCode, nil
+}
+
+// logRejection records why Anthropic refused a call. The error type and
+// request id are always safe to log; the message is left out of credential
+// rejections, which have nothing to say that the status does not.
+func logRejection(status int, upstream upstreamError) {
+	attrs := []any{"status", status, "error_type", upstream.Type, "request_id", upstream.RequestID}
+	if logsUpstreamMessage(status) {
+		attrs = append(attrs, "message", upstream.Message)
+	}
+	slog.Warn("anthropic upstream rejected the request", attrs...)
+}
+
+func logStreamError(apiErr *anthro.APIError) {
+	slog.Warn("anthropic upstream stream carried an error event",
+		"error_type", sanitize(apiErr.Type), "message", sanitize(apiErr.Message))
 }
 
 func mapStatus(status int) error {
@@ -183,6 +211,9 @@ func mapStatus(status int) error {
 }
 
 func mapTransportError(ctx context.Context, err error) error {
+	if errors.Is(context.Cause(ctx), errStreamIdle) {
+		return fmt.Errorf("%w: %w", ErrTimeout, errStreamIdle)
+	}
 	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 		return fmt.Errorf("%w: connection closed", ErrClientAborted)
 	}

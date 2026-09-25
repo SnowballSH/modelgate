@@ -9,10 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/SnowballSH/modelgate/internal/oai"
 	"github.com/SnowballSH/modelgate/internal/oairesp"
@@ -21,15 +19,14 @@ import (
 const (
 	chatCompletionsPath = "/v1/chat/completions"
 	responsesPath       = "/v1/responses"
-	maxErrorBody        = 64 * 1024
-	maxErrorMessage     = 512
 )
 
 type OpenAIClient struct {
-	baseURL string
-	apiKey  string
-	http    *http.Client
-	sleep   func(time.Duration)
+	baseURL     string
+	apiKey      string
+	http        *http.Client
+	sleep       func(time.Duration)
+	idleTimeout time.Duration
 }
 
 func NewOpenAIClient(baseURL, apiKey string, httpClient *http.Client) *OpenAIClient {
@@ -37,11 +34,18 @@ func NewOpenAIClient(baseURL, apiKey string, httpClient *http.Client) *OpenAICli
 		httpClient = http.DefaultClient
 	}
 	return &OpenAIClient{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		apiKey:  apiKey,
-		http:    httpClient,
-		sleep:   time.Sleep,
+		baseURL:     strings.TrimRight(baseURL, "/"),
+		apiKey:      apiKey,
+		http:        httpClient,
+		sleep:       time.Sleep,
+		idleTimeout: DefaultStreamIdleTimeout,
 	}
+}
+
+// SetStreamIdleTimeout replaces DefaultStreamIdleTimeout for this client's
+// streamed calls; zero or less turns the idle abort off.
+func (c *OpenAIClient) SetStreamIdleTimeout(timeout time.Duration) {
+	c.idleTimeout = timeout
 }
 
 func (c *OpenAIClient) Chat(ctx context.Context, req oai.ChatRequest) (oai.ChatResponse, error) {
@@ -129,13 +133,15 @@ func (c *OpenAIClient) stream(once func() (bool, int, error)) error {
 }
 
 func (c *OpenAIClient) chatStreamOnce(ctx context.Context, body []byte, each func(oai.ChatChunk) error) (delivered bool, status int, err error) {
+	ctx, guard := guardIdle(ctx, c.idleTimeout)
+	defer guard.stop()
 	res, status, err := c.do(ctx, chatCompletionsPath, body)
 	if err != nil {
 		return false, status, err
 	}
 	defer res.Body.Close()
 
-	scanner := newSSEScanner(res.Body)
+	scanner := newSSEScanner(guard.reader(res.Body))
 	for scanner.Scan() {
 		payload, ok := dataPayload(scanner.Text())
 		if !ok || payload == "" {
@@ -160,13 +166,15 @@ func (c *OpenAIClient) chatStreamOnce(ctx context.Context, body []byte, each fun
 }
 
 func (c *OpenAIClient) responsesStreamOnce(ctx context.Context, body []byte, each func(oairesp.StreamEvent) error) (delivered bool, status int, err error) {
+	ctx, guard := guardIdle(ctx, c.idleTimeout)
+	defer guard.stop()
 	res, status, err := c.do(ctx, responsesPath, body)
 	if err != nil {
 		return false, status, err
 	}
 	defer res.Body.Close()
 
-	scanner := newSSEScanner(res.Body)
+	scanner := newSSEScanner(guard.reader(res.Body))
 	var name string
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -236,55 +244,13 @@ func (c *OpenAIClient) do(ctx context.Context, path string, body []byte) (*http.
 		return nil, 0, mapTransportError(ctx, err)
 	}
 	if res.StatusCode != http.StatusOK {
-		message := upstreamErrorMessage(res.Body)
+		upstream := readUpstreamError(res.Body)
 		res.Body.Close()
-		if message != "" && logsUpstreamMessage(res.StatusCode) {
-			slog.Warn("openai upstream rejected the request", "path", path, "status", res.StatusCode, "message", message)
+		if upstream.Message != "" && logsUpstreamMessage(res.StatusCode) {
+			slog.Warn("openai upstream rejected the request", "path", path, "status", res.StatusCode,
+				"code", upstream.Code, "message", upstream.Message)
 		}
-		return nil, res.StatusCode, mapStatus(res.StatusCode)
+		return nil, res.StatusCode, upstream.classify(res.StatusCode)
 	}
 	return res, res.StatusCode, nil
-}
-
-// logsUpstreamMessage reports whether a status carries detail worth logging.
-// A credential rejection does not: OpenAI's 401 body quotes part of the key it
-// refused, and the status code already says everything it diagnoses.
-func logsUpstreamMessage(status int) bool {
-	return status != http.StatusUnauthorized && status != http.StatusForbidden
-}
-
-// upstreamErrorMessage returns what the upstream said went wrong, for the log
-// only: the returned error text stays free of upstream bodies so a provider
-// can never dictate what modelgate reports to its own callers.
-func upstreamErrorMessage(body io.Reader) string {
-	raw, err := io.ReadAll(io.LimitReader(body, maxErrorBody))
-	if err != nil {
-		return ""
-	}
-	var parsed struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(raw, &parsed) == nil && parsed.Error.Message != "" {
-		return truncate(redactCredentials(parsed.Error.Message))
-	}
-	return truncate(redactCredentials(strings.TrimSpace(string(raw))))
-}
-
-var credentialShaped = regexp.MustCompile(`(?i)(?:\bbearer\s+\S+|\bsk-[A-Za-z0-9._-]+)`)
-
-func redactCredentials(s string) string {
-	return credentialShaped.ReplaceAllString(s, "[redacted]")
-}
-
-func truncate(s string) string {
-	if len(s) <= maxErrorMessage {
-		return s
-	}
-	cut := maxErrorMessage
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "…"
 }

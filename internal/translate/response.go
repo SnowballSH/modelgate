@@ -23,7 +23,7 @@ func FromAnthropic(resp anthro.MessagesResponse, publicModel string, created int
 				Type: "function",
 				Function: oai.FunctionCall{
 					Name:      block.Name,
-					Arguments: string(block.Input),
+					Arguments: normalizedArguments(string(block.Input)),
 				},
 			})
 		}
@@ -55,10 +55,12 @@ func FromAnthropic(resp anthro.MessagesResponse, publicModel string, created int
 
 func FinishReason(stopReason string) string {
 	switch stopReason {
-	case "max_tokens":
+	case "max_tokens", "model_context_window_exceeded":
 		return "length"
 	case "tool_use":
 		return "tool_calls"
+	case "refusal":
+		return "content_filter"
 	default:
 		return "stop"
 	}

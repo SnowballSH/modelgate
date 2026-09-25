@@ -18,6 +18,7 @@ type Request struct {
 	Text              *TextConfig     `json:"text,omitempty"`
 	Store             bool            `json:"store"`
 	Stream            bool            `json:"stream,omitempty"`
+	User              string          `json:"user,omitempty"`
 }
 
 type Reasoning struct {
