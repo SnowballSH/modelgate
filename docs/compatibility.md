@@ -60,15 +60,22 @@ included**. The matrix below covers the subset.
 | `tool_choice` | Translated: `auto`→`auto`, `none`→`none`, `required`→`any`, a named function→`tool`. Anything else rejected. | Supported. | Translated: `auto`, `none`, `required`, a named function. Anything else rejected. |
 | `parallel_tool_calls` | `false` is translated to `tool_choice.disable_parallel_tool_use: true` (with `tool_choice: auto` when none was given). Ignored under `tool_choice: none` and without tools, where it has nothing to limit. `true` is the upstream default. | Supported. | Supported. |
 | `reasoning_effort` | Translated: `output_config.effort`; `none` and `minimal` become `low`, and `low` through `max` map to themselves. An unknown level is rejected. | Supported (not validated). | Translated: `reasoning.effort`; an unknown level is rejected. |
+| `reasoning_effort` outside a model's declared `reasoning_efforts` | Rejected. | Rejected. | Rejected. |
+| forced `tool_choice` on a model declared `forced_tool_choice: false` | Rejected. | Rejected. | Rejected. |
 | `response_format` | Rejected. | Supported. | Translated: `text.format` (`text`, `json_object`, and `json_schema` with a name and a schema). |
 | `user` | Translated: the hex SHA-256 of the value becomes `metadata.user_id` (since `v0.6.0`). Anthropic wants an opaque id of at most 512 characters with no name, email address or phone number in it; the digest is always 64 characters and stays stable per end user. | Supported. | Translated: `user` (since `v0.6.0`). |
 
-Some Claude models refuse part of what modelgate translates: Claude Fable
-5.1 and Claude Opus 5.5 refuse a forced tool choice (`required` or a named
-function), and Claude Haiku 4.5 refuses `output_config.effort`. modelgate
-does not keep a per-model capability list; the upstream answers 400, the
-client gets `400 invalid_request_error`, and the upstream's reason is in
-the log.
+Some models refuse part of what modelgate translates: Claude Fable 5.1 and
+Claude Opus 5.5 refuse a forced tool choice (`required` or a named
+function), GPT-6 Sol and Luna refuse `minimal` effort, and Claude Haiku
+4.5 refuses `output_config.effort`. The model table can declare the first
+two (`forced_tool_choice: false`, `reasoning_efforts: [...]`), and then
+modelgate refuses such a request itself, before any upstream call, with a
+`400 invalid_request_error` whose message names the model and the rule —
+on every upstream, the passthrough included. Anything undeclared reaches
+the upstream, which answers 400; the client gets `400
+invalid_request_error` with modelgate's fixed message, and the upstream's
+reason is in the log.
 
 ## Response fields
 
@@ -149,7 +156,7 @@ the gateway says.
 
 | Upstream answer | Provider error | Client sees |
 |---|---|---|
-| 400 whose message says the prompt exceeds the context window, or an OpenAI error with code `context_length_exceeded` | `provider.ErrContextLengthExceeded` (also an `ErrInvalidRequest`) | `400 invalid_request_error` today; the server can single it out as `context_length_exceeded` by testing for the new error first. |
+| 400 whose message says the prompt exceeds the context window, or an OpenAI error with code `context_length_exceeded` | `provider.ErrContextLengthExceeded` (also an `ErrInvalidRequest`) | `400 invalid_request_error` with code `context_length_exceeded` and `param: messages` |
 | any other 4xx except 401, 403, 408 and 429 | `ErrInvalidRequest` | `400 invalid_request_error` |
 | 401, 403 | `ErrAuth` | `502 provider_auth_error` |
 | 408 | `ErrTimeout` | `504 timeout` |
