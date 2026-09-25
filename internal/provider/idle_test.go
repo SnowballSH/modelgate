@@ -14,7 +14,9 @@ import (
 	"github.com/SnowballSH/modelgate/internal/oairesp"
 )
 
-const testIdleTimeout = 80 * time.Millisecond
+// testIdleTimeout is armed before the request is sent, so it must also cover
+// connecting and the first event under -race on a loaded machine.
+const testIdleTimeout = 500 * time.Millisecond
 
 // stallingServer sends head, flushes, then goes silent until the test ends.
 func stallingServer(t *testing.T, head string) *httptest.Server {
@@ -91,7 +93,7 @@ func TestAnthropicStreamSlowButAliveCompletes(t *testing.T) {
 		for _, ev := range events {
 			fmt.Fprintf(w, "data: %s\n\n", ev)
 			w.(http.Flusher).Flush()
-			time.Sleep(testIdleTimeout / 2)
+			time.Sleep(testIdleTimeout / 4)
 		}
 	}))
 	defer srv.Close()

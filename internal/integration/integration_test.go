@@ -96,16 +96,19 @@ func TestAdminLifecycle(t *testing.T) {
 		} `json:"keys"`
 	}
 	adminGetJSON(t, gw.AdminAddr, "/api/keys", &keyList)
-	keyID := ""
+	keyID, prefix := "", ""
 	for _, k := range keyList.Keys {
 		if k.Label == "lifecycle" {
-			keyID = k.ID
+			keyID, prefix = k.ID, k.Prefix
 		}
 	}
 	if keyID == "" {
 		t.Fatal("created key not listed")
 	}
-	secret := fullKey[strings.LastIndex(fullKey, "_")+1:]
+	secret, found := strings.CutPrefix(fullKey, prefix+"_")
+	if !found || len(secret) < 32 {
+		t.Fatalf("listed prefix %q does not lead the full key", prefix)
+	}
 	listReq, err := http.NewRequest(http.MethodGet, "http://"+gw.AdminAddr+"/api/keys", nil)
 	if err != nil {
 		t.Fatal(err)

@@ -80,18 +80,24 @@ func (g *Guards) Authenticate(ctx context.Context, authorization string) (store.
 	return key, true, nil
 }
 
-// Admit runs the guards an authenticated request passes in order: the key's
-// rate limit, the model allowlist, a concurrency slot, then a reservation of
-// the request's worst-case cost against the key quota and the budget.
-func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, requestedModel string, demand accounting.Demand) (Admission, *Refusal) {
-	now := g.now()
-	if wait, ok := g.takeToken(key.ID, now); !ok {
-		return Admission{}, &Refusal{Code: CodeRateLimited, RetryAfter: wait}
+// ResolveModel runs the guards that need only the key and the model name:
+// the key's rate limit, then the model table and the key's allowlist.
+func (g *Guards) ResolveModel(key store.KeyRecord, requestedModel string) (models.Model, *Refusal) {
+	if wait, ok := g.takeToken(key.ID, g.now()); !ok {
+		return models.Model{}, &Refusal{Code: CodeRateLimited, RetryAfter: wait}
 	}
 	model, resolved := g.table.Resolve(requestedModel)
 	if !resolved || (key.Models != nil && !slices.Contains(key.Models, requestedModel)) {
-		return Admission{}, &Refusal{Code: CodeModelNotFound}
+		return models.Model{}, &Refusal{Code: CodeModelNotFound}
 	}
+	return model, nil
+}
+
+// Admit takes the shared capacity a resolved request needs: a concurrency
+// slot, then a reservation of its worst-case cost against the key quota and
+// the budget.
+func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, model models.Model, demand accounting.Demand) (Admission, *Refusal) {
+	now := g.now()
 	select {
 	case g.slots <- struct{}{}:
 	default:

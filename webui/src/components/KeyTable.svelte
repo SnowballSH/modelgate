@@ -56,8 +56,15 @@
             </td>
             <td class="px-4 py-3 text-ink">{key.label}</td>
             <td class="px-4 py-3">
-              {#if key.models === null || key.models.length === 0}
+              {#if key.models === null}
                 <span class="text-ink-secondary">all</span>
+              {:else if key.models.length === 0}
+                <Badge
+                  tone="accent"
+                  title="This key's allowlist is empty, so every request it makes is refused."
+                >
+                  none
+                </Badge>
               {:else}
                 <span class="flex flex-wrap gap-1">
                   {#each key.models as model (model)}

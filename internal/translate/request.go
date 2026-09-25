@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
+	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
 )
 
@@ -31,9 +32,6 @@ func opaqueUserID(user string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// effortLevels is the reasoning_effort vocabulary both upstreams accept.
-var effortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
-
 var anthropicEfforts = map[string]string{
 	"none":    "low",
 	"minimal": "low",
@@ -49,14 +47,14 @@ var anthropicEfforts = map[string]string{
 // an arbitrary request string into an upstream call, a metric or a log line.
 func KnownEffort(level string) (string, bool) {
 	canonical := strings.ToLower(level)
-	if !slices.Contains(effortLevels, canonical) {
+	if !slices.Contains(models.EffortLevels, canonical) {
 		return "", false
 	}
 	return canonical, true
 }
 
 func errUnknownEffort(level string) error {
-	return fmt.Errorf("reasoning_effort %q is not one of %s", level, strings.Join(effortLevels, ", "))
+	return fmt.Errorf("reasoning_effort %q is not one of %s", level, strings.Join(models.EffortLevels, ", "))
 }
 
 func EffortForAnthropic(level string) (string, error) {

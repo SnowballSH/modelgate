@@ -3,6 +3,7 @@ package models
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -51,7 +52,7 @@ func TestLoadTableValid(t *testing.T) {
 		if !ok {
 			t.Fatalf("Resolve(%q): ok=false", tc.publicID)
 		}
-		if got != tc.want {
+		if !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("Resolve(%q) = %+v, want %+v", tc.publicID, got, tc.want)
 		}
 	}
@@ -196,5 +197,89 @@ func TestLoadTableRejectsUnknownUpstreamAPI(t *testing.T) {
 	path := writeTable(t, `{"models":{"gpt-x":{"provider":"openai","upstream_api":"grpc","provider_model":"gpt-x","input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1}}}`)
 	if _, err := LoadTable(path); err == nil {
 		t.Fatal("expected an error for an unknown upstream_api")
+	}
+}
+
+const pricedFields = `"input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1`
+
+func TestLoadTableLimits(t *testing.T) {
+	path := writeTable(t, `{"models":{
+		"claude-opus-5-5":{"provider_model":"claude-opus-5-5","forced_tool_choice":false,`+pricedFields+`},
+		"gpt-6-luna":{"provider":"openai","upstream_api":"responses","provider_model":"gpt-6-luna","reasoning_efforts":["none","low","medium","high","xhigh","max"],`+pricedFields+`},
+		"claude-sonnet-5":{"provider_model":"claude-sonnet-5","forced_tool_choice":true,`+pricedFields+`},
+		"gpt-5.6-terra":{"provider":"openai","provider_model":"gpt-5.6-terra","reasoning_efforts":null,`+pricedFields+`}}}`)
+	table, err := LoadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		publicID string
+		want     Limits
+	}{
+		{"claude-opus-5-5", Limits{NoForcedToolChoice: true}},
+		{"gpt-6-luna", Limits{ReasoningEfforts: []string{"none", "low", "medium", "high", "xhigh", "max"}}},
+		{"claude-sonnet-5", Limits{}},
+		{"gpt-5.6-terra", Limits{}},
+	}
+	for _, tc := range tests {
+		got, ok := table.Resolve(tc.publicID)
+		if !ok {
+			t.Fatalf("Resolve(%q): ok=false", tc.publicID)
+		}
+		if !reflect.DeepEqual(got.Limits, tc.want) {
+			t.Errorf("Resolve(%q).Limits = %+v, want %+v", tc.publicID, got.Limits, tc.want)
+		}
+	}
+}
+
+func TestLoadTableRejectsUnusableLimits(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields string
+	}{
+		{"empty reasoning_efforts", `"reasoning_efforts":[]`},
+		{"unknown effort", `"reasoning_efforts":["low","extreme"]`},
+		{"effort not in canonical case", `"reasoning_efforts":["Low"]`},
+		{"forced_tool_choice not a boolean", `"forced_tool_choice":"no"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTable(t, `{"models":{"m":{"provider_model":"m",`+tc.fields+`,`+pricedFields+`}}}`)
+			if table, err := LoadTable(path); err == nil || table != nil {
+				t.Fatalf("LoadTable = %v, %v; want no table and an error", table, err)
+			}
+		})
+	}
+}
+
+func TestLoadTableIgnoresUnknownFields(t *testing.T) {
+	path := writeTable(t, `{"schema":9,"models":{"m":{"provider_model":"m","a_future_limit":{"x":1},`+pricedFields+`}}}`)
+	table, err := LoadTable(path)
+	if err != nil {
+		t.Fatalf("a table carrying fields this build does not know must still load: %v", err)
+	}
+	if m, ok := table.Resolve("m"); !ok || !reflect.DeepEqual(m.Limits, Limits{}) {
+		t.Fatalf("Resolve(m) = %+v, %v; want a model with no limits", m, ok)
+	}
+}
+
+func TestLimitsAllowEffort(t *testing.T) {
+	unrestricted := Limits{}
+	listed := Limits{ReasoningEfforts: []string{"low", "high"}}
+	tests := []struct {
+		limits Limits
+		level  string
+		want   bool
+	}{
+		{unrestricted, "minimal", true},
+		{unrestricted, "", true},
+		{listed, "high", true},
+		{listed, "minimal", false},
+		{listed, "", false},
+	}
+	for _, tc := range tests {
+		if got := tc.limits.AllowsEffort(tc.level); got != tc.want {
+			t.Errorf("%+v.AllowsEffort(%q) = %v, want %v", tc.limits, tc.level, got, tc.want)
+		}
 	}
 }

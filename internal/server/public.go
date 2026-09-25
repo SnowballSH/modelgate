@@ -200,21 +200,35 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		fail(CodeInvalidRequest, err.Error())
 		return
 	}
-	adm, refusal := h.guards.Admit(r.Context(), key, req.Model, demand)
-	if refusal != nil {
+	refuse := func(refusal Refusal) {
 		observe(refusal.Code)
-		writeRefusal(w, *refusal, messageForCode(refusal.Code))
+		writeRefusal(w, refusal, messageForCode(refusal.Code))
+	}
+	model, refusal := h.guards.ResolveModel(key, req.Model)
+	if refusal != nil {
+		refuse(*refusal)
 		return
 	}
-	defer adm.Release()
 	effort, _ := translate.KnownEffort(req.ReasoningEffort)
-	record = requestRecord{
-		KeyID:           adm.Key.ID,
+	resolved := requestRecord{
+		KeyID:           key.ID,
 		Model:           req.Model,
-		Upstream:        adm.Model.UpstreamAPI,
+		Upstream:        model.UpstreamAPI,
 		ReasoningEffort: effort,
 		Stream:          req.Stream,
 	}
+	if violation := limitViolation(req.Model, model.Limits, req, effort); violation != "" {
+		record = resolved
+		fail(CodeInvalidRequest, violation)
+		return
+	}
+	adm, refusal := h.guards.Admit(r.Context(), key, model, demand)
+	if refusal != nil {
+		refuse(*refusal)
+		return
+	}
+	defer adm.Release()
+	record = resolved
 
 	breaker := h.up.breakerFor(adm.Model.Provider)
 	if !breaker.Allow() {
@@ -650,10 +664,14 @@ func (sw *sseWriter) done() {
 }
 
 func messageForProviderCode(code string) string {
-	if code == CodeInvalidRequest {
+	switch code {
+	case CodeInvalidRequest:
 		return "the provider rejected the translated request"
+	case CodeContextLengthExceeded:
+		return "the conversation does not fit the model's context window; shorten the messages"
+	default:
+		return "upstream provider error"
 	}
-	return "upstream provider error"
 }
 
 func (h *PublicHandler) recordProviderError(err error) string {
@@ -667,6 +685,9 @@ func (h *PublicHandler) recordProviderError(err error) string {
 	case errors.Is(err, provider.ErrTimeout):
 		h.metrics.ProviderError("timeout")
 		return CodeTimeout
+	case errors.Is(err, provider.ErrContextLengthExceeded):
+		h.metrics.ProviderError("rejected")
+		return CodeContextLengthExceeded
 	case errors.Is(err, provider.ErrInvalidRequest):
 		h.metrics.ProviderError("rejected")
 		return CodeInvalidRequest
