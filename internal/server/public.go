@@ -654,10 +654,14 @@ func (sw *sseWriter) done() {
 }
 
 func messageForProviderCode(code string) string {
-	if code == CodeInvalidRequest {
+	switch code {
+	case CodeInvalidRequest:
 		return "the provider rejected the translated request"
+	case CodeContextLengthExceeded:
+		return "the conversation does not fit the model's context window; shorten the messages"
+	default:
+		return "upstream provider error"
 	}
-	return "upstream provider error"
 }
 
 func (h *PublicHandler) recordProviderError(err error) string {
@@ -671,6 +675,9 @@ func (h *PublicHandler) recordProviderError(err error) string {
 	case errors.Is(err, provider.ErrTimeout):
 		h.metrics.ProviderError("timeout")
 		return CodeTimeout
+	case errors.Is(err, provider.ErrContextLengthExceeded):
+		h.metrics.ProviderError("rejected")
+		return CodeContextLengthExceeded
 	case errors.Is(err, provider.ErrInvalidRequest):
 		h.metrics.ProviderError("rejected")
 		return CodeInvalidRequest

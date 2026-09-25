@@ -14,37 +14,42 @@ import (
 // as the error code; the two cap codes stay distinct in metrics and logs but
 // answer with OpenAI's insufficient_quota shape.
 const (
-	CodeInvalidAPIKey       = "invalid_api_key"       // 401
-	CodeModelNotFound       = "model_not_found"       // 404
-	CodeRateLimited         = "rate_limited"          // 429
-	CodeQuotaExhausted      = "quota_exhausted"       // 429 insufficient_quota
-	CodeBudgetExhausted     = "budget_exhausted"      // 429 insufficient_quota
-	CodeCapReserved         = "cap_reserved"          // 429, retryable
-	CodeRequestTimeout      = "request_timeout"       // 408
-	CodeRequestTooLarge     = "request_too_large"     // 413
-	CodeInvalidRequest      = "invalid_request_error" // 400
-	CodeProviderAuthError   = "provider_auth_error"   // 502
-	CodeProviderUnavailable = "provider_unavailable"  // 503
-	CodeTimeout             = "timeout"               // 504
-	CodeInternal            = "api_error"             // 500, internal store/accounting failures
+	CodeInvalidAPIKey         = "invalid_api_key"         // 401
+	CodeModelNotFound         = "model_not_found"         // 404
+	CodeRateLimited           = "rate_limited"            // 429
+	CodeQuotaExhausted        = "quota_exhausted"         // 429 insufficient_quota
+	CodeBudgetExhausted       = "budget_exhausted"        // 429 insufficient_quota
+	CodeCapReserved           = "cap_reserved"            // 429, retryable
+	CodeRequestTimeout        = "request_timeout"         // 408
+	CodeRequestTooLarge       = "request_too_large"       // 413
+	CodeInvalidRequest        = "invalid_request_error"   // 400
+	CodeContextLengthExceeded = "context_length_exceeded" // 400, param messages
+	CodeProviderAuthError     = "provider_auth_error"     // 502
+	CodeProviderUnavailable   = "provider_unavailable"    // 503
+	CodeTimeout               = "timeout"                 // 504
+	CodeInternal              = "api_error"               // 500, internal store/accounting failures
 )
 
-const insufficientQuota = "insufficient_quota"
+const (
+	insufficientQuota = "insufficient_quota"
+	messagesParam     = "messages"
+)
 
 var statusByCode = map[string]int{
-	CodeInvalidAPIKey:       http.StatusUnauthorized,
-	CodeModelNotFound:       http.StatusNotFound,
-	CodeRateLimited:         http.StatusTooManyRequests,
-	CodeQuotaExhausted:      http.StatusTooManyRequests,
-	CodeBudgetExhausted:     http.StatusTooManyRequests,
-	CodeCapReserved:         http.StatusTooManyRequests,
-	CodeRequestTimeout:      http.StatusRequestTimeout,
-	CodeRequestTooLarge:     http.StatusRequestEntityTooLarge,
-	CodeInvalidRequest:      http.StatusBadRequest,
-	CodeProviderAuthError:   http.StatusBadGateway,
-	CodeProviderUnavailable: http.StatusServiceUnavailable,
-	CodeTimeout:             http.StatusGatewayTimeout,
-	CodeInternal:            http.StatusInternalServerError,
+	CodeInvalidAPIKey:         http.StatusUnauthorized,
+	CodeModelNotFound:         http.StatusNotFound,
+	CodeRateLimited:           http.StatusTooManyRequests,
+	CodeQuotaExhausted:        http.StatusTooManyRequests,
+	CodeBudgetExhausted:       http.StatusTooManyRequests,
+	CodeCapReserved:           http.StatusTooManyRequests,
+	CodeRequestTimeout:        http.StatusRequestTimeout,
+	CodeRequestTooLarge:       http.StatusRequestEntityTooLarge,
+	CodeInvalidRequest:        http.StatusBadRequest,
+	CodeContextLengthExceeded: http.StatusBadRequest,
+	CodeProviderAuthError:     http.StatusBadGateway,
+	CodeProviderUnavailable:   http.StatusServiceUnavailable,
+	CodeTimeout:               http.StatusGatewayTimeout,
+	CodeInternal:              http.StatusInternalServerError,
 }
 
 func statusForCode(code string) int {
@@ -76,7 +81,12 @@ func wireError(code, message string) oai.ErrorBody {
 	if isCapCode(code) {
 		return errorBody(insufficientQuota, insufficientQuota, message)
 	}
-	return errorBody(errorTypeForStatus(statusForCode(code)), code, message)
+	body := errorBody(errorTypeForStatus(statusForCode(code)), code, message)
+	if code == CodeContextLengthExceeded {
+		param := messagesParam
+		body.Error.Param = &param
+	}
+	return body
 }
 
 func errorBody(errType, code, message string) oai.ErrorBody {

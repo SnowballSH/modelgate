@@ -999,3 +999,33 @@ func TestRequestLogRecordsOnlyKnownReasoningEfforts(t *testing.T) {
 		t.Error("the request log echoes the client's reasoning_effort")
 	}
 }
+
+func TestContextWindowRefusalIsContextLengthExceeded(t *testing.T) {
+	upstream := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1000512 tokens > 1000000 maximum"}}`)
+	}
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			env := newPublicEnv(t, upstream, 1<<20)
+			auth, _ := insertTestKey(t, env.store, nil)
+
+			rec := doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(stream))
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+			}
+			var body oai.ErrorBody
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatal(err)
+			}
+			got := body.Error
+			if got.Type != "invalid_request_error" || got.Code != CodeContextLengthExceeded || got.Param == nil || *got.Param != "messages" {
+				t.Errorf("error = %+v, want invalid_request_error / context_length_exceeded / param messages", got)
+			}
+			if strings.Contains(got.Message, "1000512") {
+				t.Errorf("message %q quotes the upstream body", got.Message)
+			}
+		})
+	}
+}

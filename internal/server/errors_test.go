@@ -11,20 +11,21 @@ import (
 
 func TestStatusForCode(t *testing.T) {
 	cases := map[string]int{
-		CodeInvalidAPIKey:       http.StatusUnauthorized,
-		CodeModelNotFound:       http.StatusNotFound,
-		CodeRateLimited:         http.StatusTooManyRequests,
-		CodeQuotaExhausted:      http.StatusTooManyRequests,
-		CodeBudgetExhausted:     http.StatusTooManyRequests,
-		CodeCapReserved:         http.StatusTooManyRequests,
-		CodeRequestTimeout:      http.StatusRequestTimeout,
-		CodeRequestTooLarge:     http.StatusRequestEntityTooLarge,
-		CodeInvalidRequest:      http.StatusBadRequest,
-		CodeProviderAuthError:   http.StatusBadGateway,
-		CodeProviderUnavailable: http.StatusServiceUnavailable,
-		CodeTimeout:             http.StatusGatewayTimeout,
-		CodeInternal:            http.StatusInternalServerError,
-		"never_heard_of_it":     http.StatusInternalServerError,
+		CodeInvalidAPIKey:         http.StatusUnauthorized,
+		CodeModelNotFound:         http.StatusNotFound,
+		CodeRateLimited:           http.StatusTooManyRequests,
+		CodeQuotaExhausted:        http.StatusTooManyRequests,
+		CodeBudgetExhausted:       http.StatusTooManyRequests,
+		CodeCapReserved:           http.StatusTooManyRequests,
+		CodeRequestTimeout:        http.StatusRequestTimeout,
+		CodeRequestTooLarge:       http.StatusRequestEntityTooLarge,
+		CodeInvalidRequest:        http.StatusBadRequest,
+		CodeContextLengthExceeded: http.StatusBadRequest,
+		CodeProviderAuthError:     http.StatusBadGateway,
+		CodeProviderUnavailable:   http.StatusServiceUnavailable,
+		CodeTimeout:               http.StatusGatewayTimeout,
+		CodeInternal:              http.StatusInternalServerError,
+		"never_heard_of_it":       http.StatusInternalServerError,
 	}
 	for code, want := range cases {
 		if got := statusForCode(code); got != want {
@@ -49,6 +50,7 @@ func TestWriteError(t *testing.T) {
 		{CodeRequestTimeout, 408, "invalid_request_error", CodeRequestTimeout},
 		{CodeRequestTooLarge, 413, "invalid_request_error", CodeRequestTooLarge},
 		{CodeInvalidRequest, 400, "invalid_request_error", CodeInvalidRequest},
+		{CodeContextLengthExceeded, 400, "invalid_request_error", CodeContextLengthExceeded},
 		{CodeProviderAuthError, 502, "api_error", CodeProviderAuthError},
 		{CodeProviderUnavailable, 503, "api_error", CodeProviderUnavailable},
 		{CodeTimeout, 504, "api_error", CodeTimeout},
