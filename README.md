@@ -89,7 +89,7 @@ partial startup — and it refuses before any port opens.
 | `MODELS_CONFIG_FILE` | The [model table](#model-table) | Required, must load |
 | `BUDGET_MONTHLY_USD` | Global hard spend ceiling per UTC calendar month | Required; a positive finite number (`0`, negatives, `NaN` and `Inf` are refused) |
 | `ADMIN_ALLOWED_USERS` | Comma-separated identities allowed on the admin listener, matched exactly; blanks are dropped | Required, at least one identity |
-| `ADMIN_PROXY_SECRET_FILE` | File holding the secret the reverse proxy sends as `X-Modelgate-Proxy-Secret`; one trailing line ending is trimmed | Required; the secret must be at least 32 bytes |
+| `ADMIN_PROXY_SECRET_FILE` | File holding the secret the reverse proxy sends as `X-Modelgate-Proxy-Secret`; trailing CR/LF characters are trimmed | Required; the secret must be at least 32 bytes |
 | `ADMIN_IDENTITY_HEADER` | Header carrying the authenticated identity | `Remote-User` |
 | `ANTHROPIC_API_KEY_FILE` | Anthropic credential file | Required when the table has an Anthropic model; must be non-empty |
 | `ANTHROPIC_BASE_URL` | Anthropic origin | `https://api.anthropic.com` |
@@ -123,10 +123,11 @@ request can never run.
 | `provider_model` | The model name sent upstream. Required. |
 | `input_usd_per_mtok`, `output_usd_per_mtok`, `cache_read_usd_per_mtok`, `cache_write_usd_per_mtok` | All four required, all positive. |
 | `forced_tool_choice` | Optional boolean, default `true`. `false` declares that the model refuses forced tool use, and modelgate answers a request whose `tool_choice` is `"required"`, a named function or custom tool, or an `allowed_tools` set in `required` mode with a 400 of its own. |
-| `reasoning_efforts` | Optional list of the `reasoning_effort` levels the model accepts, drawn from `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (exact, lowercase). A request naming any other level gets a 400 of its own. Omitted or `null` accepts every level; an empty list or an unknown level refuses the table. |
+| `reasoning_efforts` | Optional list of the `reasoning_effort` levels the model accepts, compared against the request's `reasoning_effort` before translation and drawn from `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (exact, lowercase). A request naming any other level gets a 400 of its own. Omitted or `null` accepts every level; an empty list or an unknown level refuses the table. |
 
-The limits are checked after the key's model allowlist and before any
-upstream call, so a refused request books nothing and never reaches the
+The limits are checked after the key's model allowlist and before the
+request takes a concurrency slot or reserves any cost, so a refused
+request holds no shared capacity, books nothing and never reaches the
 provider. The 400 names the model and the rule:
 
 ```json
@@ -256,9 +257,10 @@ the table's models the key may use.
 
 A request is admitted in this order: the key, the body (size and read
 deadline), the JSON and its output bounds, the key's rate limit, the
-model and the key's allowlist, a concurrency slot, a reservation of the
-request's worst-case cost against the key quota and the monthly budget,
-the model's declared limits, then the provider's circuit breaker.
+model and the key's allowlist, the model's declared limits, a
+concurrency slot, a reservation of the request's worst-case cost against
+the key quota and the monthly budget, then the provider's circuit
+breaker.
 
 Every response carries `X-Request-ID`: the caller's own value when it is
 1–128 characters of `A-Z a-z 0-9 - _ . :`, otherwise a minted
@@ -346,10 +348,11 @@ Every refusal is the same
 a missing, wrong or duplicated secret; a missing, duplicated or
 unlisted identity. The WARN log line `admin request refused` records only
 `reason` (`proxy_secret` or `identity`) and `remote_addr`, never a
-presented value. A `POST` whose `Sec-Fetch-Site` is not `same-origin` or
-`none`, or that carries a `Content-Type` other than JSON, is refused as
-`403 cross_site_request`, because the proxy may authenticate with a
-cookie a hostile page could ride.
+presented value. A `POST` carrying a `Sec-Fetch-Site` other than
+`same-origin` or `none` (a missing header is allowed, as from curl), or a
+`Content-Type` other than JSON, is refused as `403 cross_site_request`,
+because the proxy may authenticate with a cookie a hostile page could
+ride.
 
 Startup fails if either variable is unset, the secret file is unreadable,
 or the secret is shorter than 32 bytes. Keep `METRICS_ADDR` on loopback:
@@ -467,7 +470,7 @@ go test -race -tags integration ./internal/integration/...
 Integration tests run the built server against fake upstreams and the
 official `openai-go` client. After changing `webui/src`, rebuild the UI
 with `npm ci && npm run build` in `webui/` and commit `webui/dist`; CI
-rebuilds it and fails if the committed tree differs.
+rebuilds it and fails if any file differs, appears or disappears.
 
 ## License
 

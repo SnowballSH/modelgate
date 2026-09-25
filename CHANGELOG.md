@@ -24,7 +24,8 @@
 - Model-table limits: `forced_tool_choice: false` and
   `reasoning_efforts: [...]` declare what a model refuses, and modelgate
   answers such a request with a `400 invalid_request_error` naming the
-  model and the rule, before any upstream call and without booking spend.
+  model and the rule, before it takes a concurrency slot or reserves cost,
+  and without booking spend.
   Both fields are optional; absent, behaviour is unchanged.
 - `400 invalid_request_error` with code `context_length_exceeded` and
   `param: messages` when the upstream says the conversation does not fit

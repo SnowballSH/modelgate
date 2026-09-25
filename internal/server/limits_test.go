@@ -8,6 +8,7 @@ import (
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/store"
 )
 
 const limitedModelJSON = `{"models":{
@@ -112,5 +113,40 @@ func dispatchOpenAI() http.HandlerFunc {
 			return
 		}
 		chat(w, r)
+	}
+}
+
+func TestLimitRefusalFollowsTheAllowlistAndPrecedesTheCaps(t *testing.T) {
+	exhausted := 0.0
+	tests := []struct {
+		name     string
+		mutate   func(*store.KeyRecord)
+		extra    string
+		wantCode string
+	}{
+		{"unsatisfiable request on an exhausted key", func(k *store.KeyRecord) { k.QuotaUSD = &exhausted },
+			`"tool_choice":"required"`, CodeInvalidRequest},
+		{"satisfiable request on an exhausted key", func(k *store.KeyRecord) { k.QuotaUSD = &exhausted },
+			`"tool_choice":"auto"`, insufficientQuota},
+		{"unsatisfiable request for a model outside the allowlist", func(k *store.KeyRecord) { k.Models = []string{"gpt-chat"} },
+			`"tool_choice":"required"`, CodeModelNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newDualEnvWithTable(t, limitedModelJSON, openaiChatResponse(), fullResponseHandler(), 100)
+			gen := insertKey(t, env.store, env.now, tc.mutate)
+
+			rec := doDual(env, bearer(gen.Full), limitedRequest("claude-opus-5-5", false, tc.extra))
+			var body oai.ErrorBody
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %q: %v", rec.Body.String(), err)
+			}
+			if body.Error.Code != tc.wantCode {
+				t.Errorf("status/code = %d/%q, want code %q", rec.Code, body.Error.Code, tc.wantCode)
+			}
+			if *env.anthropicHits != 0 {
+				t.Errorf("anthropic upstream calls = %d, want none", *env.anthropicHits)
+			}
+		})
 	}
 }

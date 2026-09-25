@@ -200,25 +200,35 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		fail(CodeInvalidRequest, err.Error())
 		return
 	}
-	adm, refusal := h.guards.Admit(r.Context(), key, req.Model, demand)
-	if refusal != nil {
+	refuse := func(refusal Refusal) {
 		observe(refusal.Code)
-		writeRefusal(w, *refusal, messageForCode(refusal.Code))
+		writeRefusal(w, refusal, messageForCode(refusal.Code))
+	}
+	model, refusal := h.guards.ResolveModel(key, req.Model)
+	if refusal != nil {
+		refuse(*refusal)
 		return
 	}
-	defer adm.Release()
 	effort, _ := translate.KnownEffort(req.ReasoningEffort)
-	record = requestRecord{
-		KeyID:           adm.Key.ID,
+	resolved := requestRecord{
+		KeyID:           key.ID,
 		Model:           req.Model,
-		Upstream:        adm.Model.UpstreamAPI,
+		Upstream:        model.UpstreamAPI,
 		ReasoningEffort: effort,
 		Stream:          req.Stream,
 	}
-	if violation := limitViolation(req.Model, adm.Model.Limits, req, effort); violation != "" {
+	if violation := limitViolation(req.Model, model.Limits, req, effort); violation != "" {
+		record = resolved
 		fail(CodeInvalidRequest, violation)
 		return
 	}
+	adm, refusal := h.guards.Admit(r.Context(), key, model, demand)
+	if refusal != nil {
+		refuse(*refusal)
+		return
+	}
+	defer adm.Release()
+	record = resolved
 
 	breaker := h.up.breakerFor(adm.Model.Provider)
 	if !breaker.Allow() {
