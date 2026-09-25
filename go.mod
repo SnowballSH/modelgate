@@ -3,7 +3,7 @@ module github.com/SnowballSH/modelgate
 go 1.26.6
 
 require (
-	github.com/openai/openai-go/v3 v3.52.0
+	github.com/openai/openai-go/v3 v3.64.3
 	github.com/prometheus/client_golang v1.24.1
 	modernc.org/sqlite v1.57.0
 )
@@ -11,6 +11,7 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
