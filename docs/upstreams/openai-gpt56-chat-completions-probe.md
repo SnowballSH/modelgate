@@ -1,7 +1,20 @@
 # GPT-5.6 on Chat Completions: tools with a non-`none` `reasoning_effort`
 
 Recorded 2026-09-07 from vendor documentation.
-**Live run: PENDING — operator ceremony** (see below).
+**Live run: not performed; the question is moot for the shipped routing** (see Status).
+
+## Status (2026-09-25)
+
+The probe below was never run, and the M1/M2b gateway checks of
+2026-09-11 do not answer it: M2b sent `gpt-5.6-luna` through the
+Responses API (`upstream_api: responses`), not Chat Completions. What the
+Chat Completions upstream does with tools plus a non-`none` effort on
+GPT-5.6 therefore remains documented-only. It no longer decides anything
+shipped: a model that needs tools with reasoning is routed through the
+Responses path, which M2b confirmed live (see
+[`openai-gpt56-responses-probe.md`](openai-gpt56-responses-probe.md)).
+The credential-rejection body shapes at the end of this record are also
+still documented-only.
 
 This is the premise the Responses path is built on. If GPT-5.6 accepts a
 Chat Completions request that carries both a function tool and a
@@ -49,7 +62,7 @@ wording, which gates B4 on the Responses probe and B2 on the Anthropic
 one. A run that contradicts its documented contract is corrected in the
 translator before the tag.
 
-## Live run: PENDING — operator ceremony
+## Direct probe (never run; see Status) — operator ceremony
 
 Cannot run here: this machine holds no OpenAI key, and each run is a
 billed call. Run it from the Mac with the supervisor's probe key in a
@@ -87,7 +100,7 @@ PENDING — paste the four summary lines and their JSON objects here.
 PENDING — one of the three rows of the table above, naming the run that
 shows it.
 
-## Credential-rejection body shapes: documented, not probed — PENDING
+## Credential-rejection body shapes: documented, not probed
 
 `provider.logsUpstreamMessage` suppresses the upstream `error.message` log
 for 401 and 403 because OpenAI's rejection bodies quote the key they

@@ -1,7 +1,29 @@
 # Anthropic `output_config.effort`, and the sampling parameters it displaces
 
 Recorded 2026-09-07 from vendor documentation.
-**Live run: PENDING — operator ceremony** (see below).
+**Live run: superseded in part by the M1 gateway check of 2026-09-11** (see Status).
+
+## Status (2026-09-25)
+
+The direct four-request probe below was never run. It is superseded, as
+far as it goes, by the M1 check of 2026-09-11, run on the SnowSys host against modelgate
+`v0.5.0`'s loopback public listener with a short-lived, since-revoked
+key (recorded in the SnowSys agent-farm integration runbook, verification
+matrix row M1):
+
+- `reasoning_effort: low` on `claude-opus-5`, streamed with one tool,
+  reached the upstream as `output_config.effort: "low"` and answered 200
+  with `finish_reason: tool_calls` — the field name and the `low` level
+  are confirmed live.
+- `minimal` and `none`, which the translator maps to `low`, answered 200.
+- `low` with `temperature: 0.7` answered 200: the sampling parameter was
+  dropped, as this record's resolution requires, and drew no upstream 400.
+- `adaptive` was refused with a 400 by modelgate itself, before any
+  upstream call; the upstream's own answer to an out-of-enum level is
+  still documented only.
+
+`xhigh` and `max` on `claude-opus-5` were not exercised by M1 and remain
+documented-only; the table below keeps them as the unperformed probe.
 
 B2 translates the OpenAI `reasoning_effort` into the Anthropic Messages
 API's effort control and builds a golden suite on the field name and the
@@ -89,7 +111,7 @@ only if it contradicts that contract — a different field name, or a level
 `claude-opus-5` refuses — in which case B2's goldens are corrected before
 the tag.
 
-## Live run: PENDING — operator ceremony
+## Direct probe (never run; see Status) — operator ceremony
 
 Cannot run here: no Anthropic key on this machine, and each run is a
 billed call. From the Mac, with the operator's key in a file (mode 0600);

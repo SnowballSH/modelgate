@@ -1,7 +1,20 @@
 # What Hermes actually puts on the wire
 
 Recorded 2026-09-07.
-**Live capture: PENDING — operator ceremony** (see below).
+**Live capture: not performed; parked with the agent farm** (see Status).
+
+## Status (2026-09-25)
+
+The capture below was never made, and the M1/M2b gateway checks of
+2026-09-11 do not stand in for it: they sent hand-built requests, not a
+Hermes turn. Nothing shipped waits on it. The agent farm this record
+serves is deferred indefinitely by operator decision (September 2026), and
+both translators already tolerate the values it asks about: `ToAnthropic`
+drops `temperature` and `top_p` whenever a reasoning effort is set (M1
+confirmed that live), and `ToResponses` normalises them away. Since
+`v0.6.0` both translators also prefer `max_completion_tokens` over
+`max_tokens`. See [`../compatibility.md`](../compatibility.md) for the
+full per-field matrix.
 
 Every other record under `docs/upstreams/` describes modelgate talking to
 a provider. This one describes the other side: the Chat Completions body
@@ -48,7 +61,7 @@ a gate on B4/B5. It becomes load-bearing only if it shows a value neither
 translator anticipated — a `temperature` Hermes will not let the operator
 change, say — in which case the normalisation is what has to move.
 
-## Live capture: PENDING — operator ceremony
+## Live capture (never made; see Status) — operator ceremony
 
 Cannot run here: this machine has no Hermes install, and the capture
 needs one real agent turn from a worker profile. On a host that has one:
