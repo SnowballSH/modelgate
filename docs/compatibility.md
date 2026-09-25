@@ -36,7 +36,7 @@ included**. The matrix below covers the subset.
 | Field | Anthropic Messages | OpenAI Chat Completions | OpenAI Responses |
 |---|---|---|---|
 | `model` | Translated: the table's `provider_model`. | Translated: the table's `provider_model`. | Translated: the table's `provider_model`. |
-| `system` / `developer` messages | Translated: joined with a blank line into one `system` text block, which carries the prefix cache breakpoint. | Supported. | Translated: joined into `instructions`. |
+| `system` / `developer` messages | Translated: messages from any position in the history are joined, in order, with a blank line into one `system` text block, which carries the prefix cache breakpoint. | Supported. | Translated: joined into `instructions`. |
 | `user` text content (string or `text` parts) | Translated: one text block per non-empty part; content with no text at all is rejected. | Supported. | Translated: `input_text` parts; content with no text is rejected. |
 | `image_url`, `input_audio`, `file` parts | Rejected (`unsupported content part`). | Supported. | Rejected. |
 | `assistant` text and `tool_calls` | Translated: a text block and `tool_use` blocks. | Supported. | Translated: a message item and `function_call` items correlated by `call_id` alone. |
@@ -61,7 +61,7 @@ included**. The matrix below covers the subset.
 | `parallel_tool_calls` | `false` is translated to `tool_choice.disable_parallel_tool_use: true` (with `tool_choice: auto` when none was given). Ignored under `tool_choice: none` and without tools, where it has nothing to limit. `true` is the upstream default. | Supported. | Supported. |
 | `reasoning_effort` | Translated: `output_config.effort`; `none` and `minimal` become `low`, and `low` through `max` map to themselves. An unknown level is rejected. | Supported (not validated). | Translated: `reasoning.effort`; an unknown level is rejected. |
 | `response_format` | Rejected. | Supported. | Translated: `text.format` (`text`, `json_object`, and `json_schema` with a name and a schema). |
-| `user` | Translated: `metadata.user_id` (since `v0.6.0`). | Supported. | Translated: `user` (since `v0.6.0`). |
+| `user` | Translated: the hex SHA-256 of the value becomes `metadata.user_id` (since `v0.6.0`). Anthropic wants an opaque id of at most 512 characters with no name, email address or phone number in it; the digest is always 64 characters and stays stable per end user. | Supported. | Translated: `user` (since `v0.6.0`). |
 
 Some Claude models refuse part of what modelgate translates: Claude Fable
 5.1 and Claude Opus 5.5 refuse a forced tool choice (`required` or a named
@@ -123,6 +123,14 @@ extra. A cached write costs 1.25× the input price and a read about 0.1×;
 two requests sharing a prefix within five minutes already break even. A
 workload of one-off prompts pays the write premium with nothing to read
 back.
+
+System and developer messages are lifted into that cached system block
+from wherever they sit in the history. A client that adds or rewrites a
+system or developer message partway through a conversation therefore
+changes the front of the prefix, and every turn writes the whole
+conversation to the cache at 1.25× and reads nothing back, which costs
+more than sending it uncached. Models serving such clients should have
+caching turned off once the server carries the switch below.
 
 The switch is `translate.AnthropicOptions.DisablePromptCaching`, set per
 model through `translate.ToAnthropicWith`. `translate.ToAnthropic` — the
@@ -190,6 +198,11 @@ Documented, not built:
   blocks. The Anthropic documentation asks for thinking blocks to be
   passed back unchanged on the same model; a Claude tool-result round trip
   through modelgate has not yet been probed live, so what the upstream
-  does with the omission on current models is unrecorded.
+  does with the omission on current models is unrecorded. Before Claude
+  agent loops rely on `v0.6.0`, a short-lived-key probe owes the answer: a
+  streamed `claude-opus-5-5` tool call through the gateway, then the same
+  history echoed back with the tool result. A 400 there means the request
+  path needs a way to keep thinking blocks, which is a separate design
+  decision.
 - Anthropic server tools (web search, code execution), citations, PDFs,
   batches, token counting, and the public Responses API endpoint.

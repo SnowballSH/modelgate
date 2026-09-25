@@ -5,6 +5,8 @@
 package translate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,15 @@ import (
 var defaultInputSchema = json.RawMessage(`{"type":"object"}`)
 
 const emptyArguments = "{}"
+
+// opaqueUserID satisfies Anthropic's metadata.user_id contract (an opaque
+// identifier of at most 512 characters, never a name or email address)
+// whatever the client put in the OpenAI user field, while keeping one
+// stable id per end user for abuse attribution.
+func opaqueUserID(user string) string {
+	sum := sha256.Sum256([]byte(user))
+	return hex.EncodeToString(sum[:])
+}
 
 // effortLevels is the reasoning_effort vocabulary both upstreams accept.
 var effortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -99,7 +110,7 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 		out.TopP = req.TopP
 	}
 	if req.User != "" {
-		out.Metadata = &anthro.Metadata{UserID: req.User}
+		out.Metadata = &anthro.Metadata{UserID: opaqueUserID(req.User)}
 	}
 
 	stops, err := parseStop(req.Stop)

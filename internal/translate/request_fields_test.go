@@ -1,6 +1,8 @@
 package translate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -92,24 +94,46 @@ func TestToAnthropicWireCarriesDisableParallelToolUse(t *testing.T) {
 	}
 }
 
-func TestToAnthropicUserBecomesMetadata(t *testing.T) {
-	req := chatRequest(t, `{"user":"worker-7","messages":[{"role":"user","content":"hi"}]}`)
-	got, err := ToAnthropic(req, "claude-real", 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Metadata == nil || got.Metadata.UserID != "worker-7" {
-		t.Errorf("metadata = %+v, want user_id worker-7", got.Metadata)
+func TestToAnthropicUserBecomesOpaqueMetadata(t *testing.T) {
+	longUser := strings.Repeat("u", 600)
+	for name, tc := range map[string]struct {
+		user string
+		want string
+	}{
+		"short id":       {user: "worker-7", want: "8aca0dd300d2436b96f9d412b7b1b00d8e2454988fc9ada5607c2436a5bfbfa1"},
+		"email address":  {user: "someone@example.com", want: digestOf("someone@example.com")},
+		"over the limit": {user: longUser, want: digestOf(longUser)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(map[string]any{
+				"user":     tc.user,
+				"messages": []map[string]string{{"role": "user", "content": "hi"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := ToAnthropic(chatRequest(t, string(body)), "claude-real", 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Metadata == nil || got.Metadata.UserID != tc.want {
+				t.Errorf("metadata = %+v, want user_id %s", got.Metadata, tc.want)
+			}
+		})
 	}
 
-	req = chatRequest(t, `{"messages":[{"role":"user","content":"hi"}]}`)
-	got, err = ToAnthropic(req, "claude-real", 1024)
+	got, err := ToAnthropic(chatRequest(t, `{"messages":[{"role":"user","content":"hi"}]}`), "claude-real", 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, present := asMap(t, got)["metadata"]; present {
 		t.Error("metadata must be omitted without a user")
 	}
+}
+
+func digestOf(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func TestToAnthropicRefusesUnsupportedFields(t *testing.T) {

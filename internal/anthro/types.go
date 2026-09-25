@@ -123,10 +123,3 @@ type APIError struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 }
-
-// ErrorResponse is the body of a non-200 Messages API response.
-type ErrorResponse struct {
-	Type      string   `json:"type"`
-	Error     APIError `json:"error"`
-	RequestID string   `json:"request_id,omitempty"`
-}
