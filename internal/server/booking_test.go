@@ -2,17 +2,20 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
+	"github.com/SnowballSH/modelgate/internal/oai"
 )
 
 func monthSpend(t *testing.T, env *publicEnv) float64 {
@@ -162,5 +165,39 @@ func TestParallelRequestsCannotOvershootMonthlyBudget(t *testing.T) {
 
 	if got := arrivals.Load(); got != 1 {
 		t.Fatalf("%d of 8 keys reached the provider against a budget one request exhausts, want 1 (statuses %v)", got, codes)
+	}
+}
+
+func TestCapHeldOnlyByInFlightRequestsIsARetryable429(t *testing.T) {
+	upstream, arrivals, release := holdingUpstream()
+	env := newPublicEnvWith(t, upstream, publicEnvOptions{maxBodyBytes: 1 << 20, budgetUSD: 0.0001, rpm: 1000})
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	first := make(chan int, 1)
+	go func() { first <- doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(false)).Code }()
+	eventually(t, func() bool { return arrivals.Load() == 1 }, func() string { return "the first request never reached the provider" })
+
+	rec := doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(false))
+	close(release)
+	if code := <-first; code != http.StatusOK {
+		t.Fatalf("first request: status %d, want 200", code)
+	}
+
+	var body oai.ErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusTooManyRequests || body.Error.Type != "rate_limit_error" || body.Error.Code != CodeCapReserved {
+		t.Fatalf("with nothing spent and the budget held by one request in flight: status %d error %+v, want 429 rate_limit_error %s", rec.Code, body.Error, CodeCapReserved)
+	}
+	if got := rec.Header().Get("x-should-retry"); got == "false" {
+		t.Error("x-should-retry: false on a refusal that clears when the request in flight finishes")
+	}
+	seconds, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	if err != nil || seconds < 1 || seconds > 60 {
+		t.Errorf("Retry-After = %q, want whole seconds in [1, 60]", rec.Header().Get("Retry-After"))
+	}
+	if got := scrape(t, env.metrics, `modelgate_requests_total{model="unknown",outcome="`+CodeCapReserved+`"}`); got != 1 {
+		t.Errorf("requests_total{outcome=%q} = %v, want 1", CodeCapReserved, got)
 	}
 }

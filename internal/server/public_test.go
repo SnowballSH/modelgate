@@ -836,24 +836,53 @@ func TestResponsesStreamUsageChunkSuppressedUnlessRequested(t *testing.T) {
 	}
 }
 
-func TestResponsesStreamAbortBooksEstimatedUsage(t *testing.T) {
+func TestResponsesStreamAbortBooksTheOutputBound(t *testing.T) {
 	truncated := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"twelve chars\"}\n\n")
 	}
+	for name, tc := range map[string]struct {
+		body       string
+		wantOutput int
+	}{
+		"gateway default cap": {`{"model":"gpt-responses","stream":true,"messages":[{"role":"user","content":"hi"}]}`, 4096},
+		"client cap":          {`{"model":"gpt-responses","stream":true,"max_completion_tokens":300,"messages":[{"role":"user","content":"hi"}]}`, 300},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newDualEnv(t, truncated, fullResponseHandler(), 100)
+			auth, _ := insertTestKey(t, env.store, nil)
+			doDual(env, auth, tc.body)
+
+			spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := float64((len(tc.body)+3)/4)*1.25/1e6 + float64(tc.wantOutput)*10.0/1e6
+			if math.Abs(spend-want) > 1e-12 {
+				t.Fatalf("aborted responses stream spend = %v, want %v (prompt bytes / 4 input, and the %d-token output cap: the reasoning billed before the cut never streams)", spend, want, tc.wantOutput)
+			}
+		})
+	}
+}
+
+func TestStreamCutWithAReasoningEffortBooksTheOutputBound(t *testing.T) {
+	truncated := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5-2026-01-01\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"twelve chars\"},\"finish_reason\":null}]}\n\n")
+	}
 	env := newDualEnv(t, truncated, fullResponseHandler(), 100)
 	auth, _ := insertTestKey(t, env.store, nil)
 
-	body := `{"model":"gpt-responses","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	body := `{"model":"gpt-5","stream":true,"reasoning_effort":"high","max_completion_tokens":500,"messages":[{"role":"user","content":"hi"}]}`
 	doDual(env, auth, body)
 
 	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := float64((len(body)+3)/4)*1.25/1e6 + 3*10.0/1e6
+	want := float64((len(body)+3)/4)*1.25/1e6 + 500*10.0/1e6
 	if math.Abs(spend-want) > 1e-12 {
-		t.Fatalf("aborted responses stream spend = %v, want estimate %v (prompt bytes / 4 input, 12 chars -> 3 output tokens)", spend, want)
+		t.Fatalf("spend after a reasoning stream was cut = %v, want %v (the 500-token output cap)", spend, want)
 	}
 }
 

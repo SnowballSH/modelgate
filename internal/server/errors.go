@@ -19,6 +19,7 @@ const (
 	CodeRateLimited         = "rate_limited"          // 429
 	CodeQuotaExhausted      = "quota_exhausted"       // 429 insufficient_quota
 	CodeBudgetExhausted     = "budget_exhausted"      // 429 insufficient_quota
+	CodeCapReserved         = "cap_reserved"          // 429, retryable
 	CodeRequestTimeout      = "request_timeout"       // 408
 	CodeRequestTooLarge     = "request_too_large"     // 413
 	CodeInvalidRequest      = "invalid_request_error" // 400
@@ -36,6 +37,7 @@ var statusByCode = map[string]int{
 	CodeRateLimited:         http.StatusTooManyRequests,
 	CodeQuotaExhausted:      http.StatusTooManyRequests,
 	CodeBudgetExhausted:     http.StatusTooManyRequests,
+	CodeCapReserved:         http.StatusTooManyRequests,
 	CodeRequestTimeout:      http.StatusRequestTimeout,
 	CodeRequestTooLarge:     http.StatusRequestEntityTooLarge,
 	CodeInvalidRequest:      http.StatusBadRequest,

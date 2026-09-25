@@ -14,7 +14,13 @@ import (
 	"github.com/SnowballSH/modelgate/internal/store"
 )
 
-const slotRetryAfter = time.Second
+const (
+	slotRetryAfter = time.Second
+	// capReservedRetryAfter is long enough that a retry is not spinning and
+	// short enough that the OpenAI SDKs, which ignore waits over a minute,
+	// honour it.
+	capReservedRetryAfter = 5 * time.Second
+)
 
 type Guards struct {
 	store   *store.Store
@@ -99,6 +105,8 @@ func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, requestedModel 
 			return Admission{}, &Refusal{Code: CodeQuotaExhausted}
 		case errors.Is(err, accounting.ErrBudgetExhausted):
 			return Admission{}, &Refusal{Code: CodeBudgetExhausted}
+		case errors.Is(err, accounting.ErrCapReserved):
+			return Admission{}, &Refusal{Code: CodeCapReserved, RetryAfter: capReservedRetryAfter}
 		default:
 			return Admission{}, &Refusal{Code: CodeInternal}
 		}

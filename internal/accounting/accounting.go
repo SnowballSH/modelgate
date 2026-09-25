@@ -14,6 +14,9 @@ import (
 var (
 	ErrQuotaExhausted  = errors.New("per-key quota exhausted")
 	ErrBudgetExhausted = errors.New("global budget exhausted")
+	// ErrCapReserved refuses a request whose quota or budget is not yet spent
+	// but is fully held by in-flight reservations; it clears as they finish.
+	ErrCapReserved = errors.New("remaining quota or budget held by in-flight requests")
 )
 
 func Month(t time.Time) string {
@@ -86,16 +89,21 @@ func (r *Reservation) Release() { r.release() }
 // most one request's bound. The check reads the store under the same lock
 // that releases reservations, and callers book usage before releasing, so a
 // request's cost is always counted either as a reservation or as spend.
+//
+// Recorded spend at a cap is exhaustion, which only the next month or an
+// operator clears; a cap reached only by adding reservations is
+// ErrCapReserved, which clears as the requests holding them finish.
 func (a *Accountant) Reserve(ctx context.Context, now time.Time, key store.KeyRecord, bound float64) (*Reservation, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	month := Month(now)
+	var keySpend float64
 	if key.QuotaUSD != nil {
-		spend, err := a.store.MonthSpendByKey(ctx, month, key.ID)
-		if err != nil {
+		var err error
+		if keySpend, err = a.store.MonthSpendByKey(ctx, month, key.ID); err != nil {
 			return nil, fmt.Errorf("check quota for key %s: %w", key.ID, err)
 		}
-		if spend+a.reservedFor(key.ID) >= *key.QuotaUSD {
+		if keySpend >= *key.QuotaUSD {
 			return nil, ErrQuotaExhausted
 		}
 	}
@@ -103,8 +111,13 @@ func (a *Accountant) Reserve(ctx context.Context, now time.Time, key store.KeyRe
 	if err != nil {
 		return nil, fmt.Errorf("check global budget: %w", err)
 	}
-	if spend+a.inFlight.amount >= a.budget {
+	if spend >= a.budget {
 		return nil, ErrBudgetExhausted
+	}
+	quotaHeld := key.QuotaUSD != nil && keySpend+a.reservedFor(key.ID) >= *key.QuotaUSD
+	budgetHeld := spend+a.inFlight.amount >= a.budget
+	if quotaHeld || budgetHeld {
+		return nil, ErrCapReserved
 	}
 
 	perKey, ok := a.byKey[key.ID]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
 	"github.com/SnowballSH/modelgate/internal/store"
 )
@@ -16,6 +17,16 @@ type streamMeter struct {
 	finalUsage  bool
 	outputChars int
 	promptBytes int
+	// hiddenOutputCap is the output cap of a call that can bill output its
+	// stream never shows, which a cut stream books in full.
+	hiddenOutputCap int64
+}
+
+// mayHideOutput reports whether a call can bill output its stream never
+// shows: the Responses API streams no reasoning tokens, and a call given a
+// reasoning_effort may think before it answers.
+func mayHideOutput(m models.Model, effort string) bool {
+	return m.UpstreamAPI == models.UpstreamResponses || effort != ""
 }
 
 func (m *streamMeter) count(chunk oai.ChatChunk) {
@@ -34,14 +45,15 @@ func (m *streamMeter) count(chunk oai.ChatChunk) {
 
 // bookable is the usage to book: the reported usage once the final event
 // arrived, otherwise the reported usage with output raised to a
-// four-characters-per-token estimate of what streamed, and input estimated
-// from the prompt when the provider had reported none.
+// four-characters-per-token estimate of what streamed, or to the whole
+// output cap when the call can hide output, and input estimated from the
+// prompt when the provider had reported none.
 func (m streamMeter) bookable(reported store.Usage) (store.Usage, bool) {
 	if m.finalUsage || !m.started {
 		return reported, false
 	}
 	estimate := reported
-	estimate.OutputTokens = max(reported.OutputTokens, int64((m.outputChars+3)/4))
+	estimate.OutputTokens = max(reported.OutputTokens, int64((m.outputChars+3)/4), m.hiddenOutputCap)
 	if reported.InputTokens+reported.CacheReadTokens+reported.CacheWriteTokens == 0 {
 		estimate.InputTokens = int64((m.promptBytes + 3) / 4)
 	}

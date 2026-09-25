@@ -93,11 +93,12 @@ func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountan
 
 func (h *PublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r = withRequestID(w, r)
+	liftBodyDeadline := h.armBodyDeadline(w)
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 		h.handleModels(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions":
-		h.handleChat(w, r)
+		h.handleChat(w, r, liftBodyDeadline)
 	default:
 		writeNotFound(w, "unknown route")
 	}
@@ -157,7 +158,7 @@ func writeProviderError(w http.ResponseWriter) func(code string) {
 	}
 }
 
-func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
+func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftBodyDeadline func()) {
 	start := time.Now()
 	record := requestRecord{Model: "unknown"}
 	observe := func(outcome string) {
@@ -184,7 +185,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	record.KeyID = key.ID
 
-	body, code := h.readBody(w, r)
+	body, code := h.readBody(w, r, liftBodyDeadline)
 	if code != "" {
 		fail(code, messageForBodyCode(code))
 		return
@@ -229,7 +230,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(upstreamCtx, h.requestDeadline)
 	defer cancel()
-	call := admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, promptBytes: len(body)}
+	call := admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, promptBytes: len(body), hidesOutput: mayHideOutput(adm.Model, effort)}
 
 	if adm.Model.Provider == models.ProviderOpenAI {
 		if adm.Model.UpstreamAPI == models.UpstreamResponses {
@@ -278,23 +279,42 @@ type admittedCall struct {
 	breaker     *provider.Breaker
 	observe     func(string)
 	promptBytes int
+	hidesOutput bool
 }
 
-// readBody reads the request body within the read timeout and the size cap.
-// A complete read clears the deadline so it cannot outlive the body. After a
-// failed read the deadline stays: the server drains an unread body before
-// answering, and without the deadline a stalled sender holds that drain, and
-// the connection, open indefinitely.
-func (h *PublicHandler) readBody(w http.ResponseWriter, r *http.Request) ([]byte, string) {
+// meter starts the tally for a stream whose upstream request caps output
+// at outputCap tokens.
+func (c admittedCall) meter(outputCap int) streamMeter {
+	m := streamMeter{promptBytes: c.promptBytes}
+	if c.hidesOutput {
+		m.hiddenOutputCap = int64(outputCap)
+	}
+	return m
+}
+
+// armBodyDeadline bounds how long the request body may take to arrive,
+// from before authentication: net/http drains an unread body before
+// answering, so without a deadline a stalled sender holds even a refusal,
+// and the connection, open indefinitely. It returns the function that lifts
+// the deadline once the body has been read in full, so the deadline cannot
+// cut short the response that follows.
+func (h *PublicHandler) armBodyDeadline(w http.ResponseWriter) (lift func()) {
 	rc := http.NewResponseController(w)
-	deadlineSet := rc.SetReadDeadline(time.Now().Add(h.bodyReadTimeout)) == nil
+	if rc.SetReadDeadline(time.Now().Add(h.bodyReadTimeout)) != nil {
+		return func() {}
+	}
+	return func() { _ = rc.SetReadDeadline(time.Time{}) }
+}
+
+// readBody reads the request body within the armed deadline and the size
+// cap. Only a complete read lifts the deadline; after a failed one it stays
+// to bound the drain.
+func (h *PublicHandler) readBody(w http.ResponseWriter, r *http.Request, liftDeadline func()) ([]byte, string) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, h.maxBodyBytes))
 	var tooLarge *http.MaxBytesError
 	switch {
 	case err == nil:
-		if deadlineSet {
-			_ = rc.SetReadDeadline(time.Time{})
-		}
+		liftDeadline()
 		return body, ""
 	case errors.As(err, &tooLarge):
 		return nil, CodeRequestTooLarge
@@ -363,7 +383,7 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, call admittedCall, up 
 	clientWantsUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 
 	var usage oai.Usage
-	meter := streamMeter{promptBytes: call.promptBytes}
+	meter := call.meter(openAIOutputCap(up))
 	ok := h.callUpstream(call.breaker, call.observe, sw.fail, func() error {
 		return h.up.OpenAI.ChatStream(ctx, up, func(chunk oai.ChatChunk) error {
 			meter.started = true
@@ -392,6 +412,21 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, call admittedCall, up 
 	call.observe("success")
 }
 
+// openAIOutputCap is the most output a Chat Completions request can bill:
+// its larger cap, once per choice.
+func openAIOutputCap(req oai.ChatRequest) int {
+	var perChoice int
+	for _, limit := range []*int{req.MaxCompletionTokens, req.MaxTokens} {
+		if limit != nil {
+			perChoice = max(perChoice, *limit)
+		}
+	}
+	if req.N != nil {
+		return perChoice * *req.N
+	}
+	return perChoice
+}
+
 // storeUsageFromOAI clamps the cached count into [0, PromptTokens]: a
 // nonconforming upstream must never produce negative input tokens, which
 // would corrupt spend accounting and panic the token counters.
@@ -413,7 +448,7 @@ func (h *PublicHandler) streamChat(ctx context.Context, call admittedCall, areq 
 	st := translate.NewStreamTranslator(req.Model, h.now().Unix(), id)
 	sw := newSSEWriter(call.w)
 
-	meter := streamMeter{promptBytes: call.promptBytes}
+	meter := call.meter(areq.MaxTokens)
 	ok := h.callUpstream(call.breaker, call.observe, sw.fail, func() error {
 		return h.up.Anthropic.MessagesStream(ctx, areq, func(ev anthro.StreamEvent) error {
 			meter.started = true
@@ -498,7 +533,11 @@ func (h *PublicHandler) streamResponses(ctx context.Context, call admittedCall, 
 	st := translate.NewResponsesStreamTranslator(req.Model, h.now().Unix(), id)
 	sw := newSSEWriter(call.w)
 
-	meter := streamMeter{promptBytes: call.promptBytes}
+	outputCap := h.maxOutputTokens
+	if rreq.MaxOutputTokens != nil {
+		outputCap = *rreq.MaxOutputTokens
+	}
+	meter := call.meter(outputCap)
 	ok := h.callUpstream(call.breaker, call.observe, sw.fail, func() error {
 		return h.up.OpenAI.ResponsesStream(ctx, rreq, func(ev oairesp.StreamEvent) error {
 			meter.started = true
@@ -649,6 +688,8 @@ func messageForCode(code string) string {
 		return "monthly quota exhausted for this key"
 	case CodeBudgetExhausted:
 		return "monthly budget exhausted"
+	case CodeCapReserved:
+		return "the remaining monthly quota or budget is held by requests in flight; retry shortly"
 	case CodeRequestTooLarge:
 		return "request body too large"
 	case CodeRequestTimeout:

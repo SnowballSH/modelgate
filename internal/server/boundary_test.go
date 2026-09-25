@@ -209,3 +209,31 @@ func TestStalledBodyIsAnsweredAndACompleteBodyIsNotTimed(t *testing.T) {
 		t.Fatal("the upstream was never called")
 	}
 }
+
+func TestUnauthenticatedStalledBodyIsAnsweredWithinTheReadTimeout(t *testing.T) {
+	env := newPublicEnvWith(t, fullResponseHandler(), publicEnvOptions{maxBodyBytes: 1 << 20, budgetUSD: 100, rpm: 1000, bodyReadTimeout: 150 * time.Millisecond})
+	srv := httptest.NewServer(env.handler)
+	t.Cleanup(srv.Close)
+
+	for _, route := range []string{"POST /v1/chat/completions", "GET /v1/models", "POST /v1/unknown"} {
+		t.Run(route, func(t *testing.T) {
+			conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = conn.Close() }()
+			if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(conn, "%s HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer mg_aaaaaaaa_wrong\r\nContent-Length: 1000\r\n\r\nstal", route)
+			res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			if err != nil {
+				t.Fatalf("no answer to an unauthenticated request whose body stalls: %v", err)
+			}
+			res.Body.Close()
+			if res.StatusCode != http.StatusUnauthorized && res.StatusCode != http.StatusNotFound {
+				t.Fatalf("status %d, want the route's refusal", res.StatusCode)
+			}
+		})
+	}
+}
