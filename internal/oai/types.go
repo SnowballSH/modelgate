@@ -79,9 +79,13 @@ type ChatResponse struct {
 	Usage             Usage    `json:"usage"`
 }
 
+// Choice.Logprobs and ChunkChoice.Logprobs carry an upstream's token log
+// probabilities through the passthrough path unread; the translated paths
+// refuse logprobs and leave them empty.
 type Choice struct {
 	Index        int             `json:"index"`
 	Message      ResponseMessage `json:"message"`
+	Logprobs     json.RawMessage `json:"logprobs,omitempty"`
 	FinishReason string          `json:"finish_reason"`
 }
 
@@ -121,9 +125,10 @@ type ChatChunk struct {
 }
 
 type ChunkChoice struct {
-	Index        int     `json:"index"`
-	Delta        Delta   `json:"delta"`
-	FinishReason *string `json:"finish_reason"`
+	Index        int             `json:"index"`
+	Delta        Delta           `json:"delta"`
+	Logprobs     json.RawMessage `json:"logprobs,omitempty"`
+	FinishReason *string         `json:"finish_reason"`
 }
 
 type Delta struct {

@@ -40,26 +40,63 @@ const farmTable = `{"models":{
 		"input_usd_per_mtok":1.25,"output_usd_per_mtok":10,
 		"cache_read_usd_per_mtok":0.125,"cache_write_usd_per_mtok":1.25}}}`
 
-func fakeAnthropic(t *testing.T) *httptest.Server {
+func fakeAnthropic(t *testing.T) (*httptest.Server, *upstreamRecorder) {
 	t.Helper()
+	rec := &upstreamRecorder{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages" {
 			http.NotFound(w, r)
 			return
 		}
-		var req anthro.MessagesRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.Stream {
-			serveFakeStream(w, req.Model)
+		rec.record(r.URL.Path, body)
+		var req anthro.MessagesRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		serveFakeMessage(w, req.Model)
+		switch {
+		case req.Stream && awaitsToolCall(req):
+			serveFakeNoArgumentToolStream(w, req.Model)
+		case req.Stream:
+			serveFakeStream(w, req.Model)
+		default:
+			serveFakeMessage(w, req.Model)
+		}
 	}))
 	t.Cleanup(upstream.Close)
-	return upstream
+	return upstream, rec
+}
+
+// awaitsToolCall reports a request offering tools whose last turn is not a
+// tool result: the fake answers it with a call, and a tool result with text.
+func awaitsToolCall(req anthro.MessagesRequest) bool {
+	if len(req.Tools) == 0 || len(req.Messages) == 0 {
+		return false
+	}
+	last := req.Messages[len(req.Messages)-1].Content
+	return len(last) == 0 || last[0].Type != "tool_result"
+}
+
+// serveFakeNoArgumentToolStream replays the shape Anthropic streams for a call
+// to a tool that takes no arguments: the block opens with an empty input and
+// closes after one empty input_json_delta.
+func serveFakeNoArgumentToolStream(w http.ResponseWriter, model string) {
+	writeFakeEvents(w, []anthro.StreamEvent{
+		{Type: "message_start", Message: &anthro.MessagesResponse{
+			ID: "msg_tool", Type: "message", Role: "assistant", Model: model,
+			Usage: anthro.Usage{InputTokens: 100, CacheCreationInputTokens: 900},
+		}},
+		{Type: "content_block_start", Index: 0, ContentBlock: &anthro.ContentBlock{Type: "tool_use", ID: "toolu_now", Name: "get_time", Input: json.RawMessage(`{}`)}},
+		{Type: "content_block_delta", Index: 0, Delta: &anthro.StreamDelta{Type: "input_json_delta", PartialJSON: ""}},
+		{Type: "content_block_stop", Index: 0},
+		{Type: "message_delta", Delta: &anthro.StreamDelta{StopReason: "tool_use"}, Usage: &anthro.Usage{OutputTokens: 12}},
+		{Type: "message_stop"},
+	})
 }
 
 func serveFakeMessage(w http.ResponseWriter, model string) {
@@ -76,7 +113,6 @@ func serveFakeMessage(w http.ResponseWriter, model string) {
 }
 
 func serveFakeStream(w http.ResponseWriter, model string) {
-	w.Header().Set("Content-Type", "text/event-stream")
 	events := []anthro.StreamEvent{
 		{Type: "message_start", Message: &anthro.MessagesResponse{
 			ID:    "msg_fake",
@@ -94,6 +130,11 @@ func serveFakeStream(w http.ResponseWriter, model string) {
 			Usage: &anthro.Usage{OutputTokens: 50}},
 		{Type: "message_stop"},
 	}
+	writeFakeEvents(w, events)
+}
+
+func writeFakeEvents(w http.ResponseWriter, events []anthro.StreamEvent) {
+	w.Header().Set("Content-Type", "text/event-stream")
 	flusher, _ := w.(http.Flusher)
 	for _, ev := range events {
 		payload, _ := json.Marshal(ev)
@@ -241,11 +282,12 @@ type gateway struct {
 	AdminAddr   string
 	MetricsAddr string
 	OpenAI      *upstreamRecorder
+	Anthropic   *upstreamRecorder
 }
 
 func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 	t.Helper()
-	upstream := fakeAnthropic(t)
+	upstream, anthropicSeen := fakeAnthropic(t)
 	openaiUpstream, openaiSeen := fakeOpenAI(t)
 
 	dir := t.TempDir()
@@ -307,6 +349,7 @@ func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 		AdminAddr:   s.AdminAddr(),
 		MetricsAddr: s.MetricsAddr(),
 		OpenAI:      openaiSeen,
+		Anthropic:   anthropicSeen,
 	}
 	waitForReady(t, "http://"+gw.MetricsAddr+"/ready")
 	return gw

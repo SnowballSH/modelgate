@@ -1,6 +1,7 @@
 {
   "model": "claude-real",
   "max_tokens": 256,
+  "cache_control": {"type": "ephemeral"},
   "temperature": 0.7,
   "top_p": 0.9,
   "stop_sequences": ["END"],

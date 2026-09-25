@@ -1,13 +1,15 @@
 {
   "model": "claude-real",
   "max_tokens": 1024,
+  "cache_control": {"type": "ephemeral"},
   "messages": [
     {"role": "user", "content": [{"type": "text", "text": "weather?"}]}
   ],
   "tools": [
     {
       "name": "get_weather",
-      "input_schema": {"type": "object"}
+      "input_schema": {"type": "object"},
+      "cache_control": {"type": "ephemeral"}
     }
   ],
   "tool_choice": {"type": "tool", "name": "get_weather"}

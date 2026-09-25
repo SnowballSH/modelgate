@@ -1,6 +1,7 @@
 {
   "model": "claude-real",
   "max_tokens": 1024,
+  "cache_control": {"type": "ephemeral"},
   "messages": [
     {"role": "user", "content": [{"type": "text", "text": "weather?"}]}
   ],
@@ -12,7 +13,8 @@
     },
     {
       "name": "no_schema",
-      "input_schema": {"type": "object"}
+      "input_schema": {"type": "object"},
+      "cache_control": {"type": "ephemeral"}
     }
   ],
   "tool_choice": {"type": "auto"}

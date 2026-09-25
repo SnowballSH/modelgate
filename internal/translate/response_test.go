@@ -86,6 +86,9 @@ func TestFinishReason(t *testing.T) {
 		"tool_use":      "tool_calls",
 		"":              "stop",
 		"pause_turn":    "stop",
+		"refusal":       "content_filter",
+
+		"model_context_window_exceeded": "length",
 	}
 	for in, want := range cases {
 		if got := FinishReason(in); got != want {
