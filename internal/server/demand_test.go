@@ -19,7 +19,7 @@ func TestWorstCaseDemand(t *testing.T) {
 	}{
 		{"defaults", oai.ChatRequest{}, def},
 		{"max_tokens alone", oai.ChatRequest{MaxTokens: intPtr(100)}, 100},
-		{"max_completion_tokens alone keeps the default in reach", oai.ChatRequest{MaxCompletionTokens: intPtr(100)}, def},
+		{"max_completion_tokens alone", oai.ChatRequest{MaxCompletionTokens: intPtr(100)}, 100},
 		{"max_completion_tokens above the default", oai.ChatRequest{MaxCompletionTokens: intPtr(9000)}, 9000},
 		{"both, larger wins", oai.ChatRequest{MaxTokens: intPtr(100), MaxCompletionTokens: intPtr(700)}, 700},
 		{"n multiplies", oai.ChatRequest{MaxTokens: intPtr(100), N: intPtr(3)}, 300},

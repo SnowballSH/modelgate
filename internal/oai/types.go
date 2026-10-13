@@ -27,6 +27,7 @@ type ChatRequest struct {
 	Tools               []Tool          `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
 	User                string          `json:"user,omitempty"`
+	PromptCacheKey      string          `json:"prompt_cache_key,omitempty"`
 }
 
 // ForcesToolCall reports whether tool_choice obliges the model to call a

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
@@ -195,11 +196,6 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		fail(CodeInvalidRequest, "invalid JSON body")
 		return
 	}
-	demand, err := worstCaseDemand(req, len(body), h.defaultMaxTokens, h.maxOutputTokens)
-	if err != nil {
-		fail(CodeInvalidRequest, err.Error())
-		return
-	}
 	refuse := func(refusal Refusal) {
 		observe(refusal.Code)
 		writeRefusal(w, refusal, messageForCode(refusal.Code))
@@ -217,9 +213,22 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		ReasoningEffort: effort,
 		Stream:          req.Stream,
 	}
-	if violation := limitViolation(req.Model, model.Limits, req, effort); violation != "" {
+	failResolved := func(message string) {
 		record = resolved
-		fail(CodeInvalidRequest, violation)
+		fail(CodeInvalidRequest, message)
+	}
+	if violation := limitViolation(req.Model, model.Limits, req, effort); violation != "" {
+		failResolved(violation)
+		return
+	}
+	plan, err := h.prepare(req, model, key.ID)
+	if err != nil {
+		failResolved(err.Error())
+		return
+	}
+	demand, err := worstCaseDemand(req, len(body), model.OutputCapDefault(h.defaultMaxTokens), h.maxOutputTokens)
+	if err != nil {
+		failResolved(err.Error())
 		return
 	}
 	adm, refusal := h.guards.Admit(r.Context(), key, model, demand)
@@ -235,6 +244,9 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		fail(CodeProviderUnavailable, "provider circuit open")
 		return
 	}
+	if len(plan.dropped) > 0 {
+		w.Header().Set(translate.DroppedParamsHeader, strings.Join(plan.dropped, ", "))
+	}
 
 	// A non-streaming call keeps running when the caller hangs up: the
 	// provider bills it either way, and only its answer says how much.
@@ -244,30 +256,18 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 	}
 	ctx, cancel := context.WithTimeout(upstreamCtx, h.requestDeadline)
 	defer cancel()
-	call := admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, promptBytes: len(body), hidesOutput: mayHideOutput(adm.Model, effort)}
+	plan.serve(ctx, admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, promptBytes: len(body), hidesOutput: mayHideOutput(adm.Model, effort)}, fail)
+}
 
-	if adm.Model.Provider == models.ProviderOpenAI {
-		if adm.Model.UpstreamAPI == models.UpstreamResponses {
-			h.chatResponses(ctx, call, fail)
-			return
-		}
-		h.chatOpenAI(ctx, call)
-		return
-	}
-
-	areq, err := translate.ToAnthropic(req, adm.Model.ProviderModel, h.defaultMaxTokens)
-	if err != nil {
-		fail(CodeInvalidRequest, err.Error())
-		return
-	}
-
+func (h *PublicHandler) chatAnthropic(ctx context.Context, call admittedCall, areq anthro.MessagesRequest) {
+	w, r, req, adm := call.w, call.r, call.req, call.adm
 	if req.Stream {
 		h.streamChat(ctx, call, areq)
 		return
 	}
 
 	var aresp anthro.MessagesResponse
-	if !h.callUpstream(breaker, observe, writeProviderError(w), func() (err error) {
+	if !h.callUpstream(call.breaker, call.observe, writeProviderError(w), func() (err error) {
 		aresp, err = h.up.Anthropic.Messages(ctx, areq)
 		return err
 	}) {
@@ -275,12 +275,12 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 	}
 
 	h.recordUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(aresp.Usage), false)
-	if h.callerGone(r, observe) {
+	if h.callerGone(r, call.observe) {
 		return
 	}
 	id := "chatcmpl-" + randomHex16()
 	resp := translate.FromAnthropic(aresp, req.Model, h.now().Unix(), id)
-	observe("success")
+	call.observe("success")
 	writeJSONStatus(w, http.StatusOK, resp)
 }
 
@@ -354,17 +354,10 @@ func (h *PublicHandler) callerGone(r *http.Request, observe func(string)) bool {
 	return true
 }
 
-// chatOpenAI forwards the request nearly verbatim: the public wire format
-// is already OpenAI's, so only the model name, the usage capture, and the
-// error surface need modelgate's treatment.
-func (h *PublicHandler) chatOpenAI(ctx context.Context, call admittedCall) {
+// chatOpenAI serves a request already prepared for the Chat Completions
+// passthrough; the usage capture and the error surface are its own.
+func (h *PublicHandler) chatOpenAI(ctx context.Context, call admittedCall, up oai.ChatRequest) {
 	w, r, req, adm := call.w, call.r, call.req, call.adm
-	up := req
-	up.Model = adm.Model.ProviderModel
-	if up.MaxTokens == nil && up.MaxCompletionTokens == nil {
-		cap := h.defaultMaxTokens
-		up.MaxCompletionTokens = &cap
-	}
 
 	if req.Stream {
 		h.streamOpenAI(ctx, call, up)
@@ -500,15 +493,10 @@ func (h *PublicHandler) streamChat(ctx context.Context, call admittedCall, areq 
 }
 
 // chatResponses serves a model the table routes through the Responses API,
-// translating in both directions around the same guards the other upstreams
+// translating the answer back around the same guards the other upstreams
 // run under.
-func (h *PublicHandler) chatResponses(ctx context.Context, call admittedCall, fail func(code, message string)) {
+func (h *PublicHandler) chatResponses(ctx context.Context, call admittedCall, rreq oairesp.Request, fail failFunc) {
 	w, r, req, adm := call.w, call.r, call.req, call.adm
-	rreq, err := translate.ToResponses(req, adm.Model.ProviderModel, h.defaultMaxTokens)
-	if err != nil {
-		fail(CodeInvalidRequest, err.Error())
-		return
-	}
 
 	if req.Stream {
 		h.streamResponses(ctx, call, rreq)

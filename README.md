@@ -95,7 +95,7 @@ partial startup — and it refuses before any port opens.
 | `ANTHROPIC_BASE_URL` | Anthropic origin | `https://api.anthropic.com` |
 | `OPENAI_API_KEY_FILE` | OpenAI credential file | Required when the table has an OpenAI model; must be non-empty |
 | `OPENAI_BASE_URL` | OpenAI origin | `https://api.openai.com` |
-| `DEFAULT_MAX_TOKENS` | Output cap sent when a request names none | `4096`; a positive integer no larger than `MAX_OUTPUT_TOKENS` |
+| `DEFAULT_MAX_TOKENS` | Output cap sent when a request names none and the model's row sets no `default_max_tokens` | `4096`; a positive integer no larger than `MAX_OUTPUT_TOKENS` |
 | `MAX_OUTPUT_TOKENS` | Largest output (`n` × the cap) a request may ask for; larger requests get a 400 | `128000`; a positive integer |
 | `MAX_BODY_BYTES` | Public request body limit | `1048576` (1 MiB); a positive integer |
 | `RATE_LIMIT_PER_KEY_RPM` | Per-key request rate (token bucket, burst equal to the rate) | `60`; a positive integer |
@@ -263,11 +263,17 @@ and the body is not read until the key checks out. `GET /v1/models` lists
 the table's models the key may use.
 
 A request is admitted in this order: the key, the body (size and read
-deadline), the JSON and its output bounds, the key's rate limit, the
-model and the key's allowlist, the model's declared limits, a
-concurrency slot, a reservation of the request's worst-case cost against
-the key quota and the monthly budget, then the provider's circuit
-breaker.
+deadline), the JSON, the key's rate limit, the model and the key's
+allowlist, the model's declared limits, the translation for the model's
+upstream, the output bounds, a concurrency slot, a reservation of the
+request's worst-case cost against the key quota and the monthly budget,
+then the provider's circuit breaker. A request the gateway cannot
+translate is therefore refused with a 400 before it holds any shared
+capacity.
+
+A response whose request carried sampling parameters the upstream cannot
+honour names them in `X-Modelgate-Dropped-Params`; see
+[docs/compatibility.md](docs/compatibility.md).
 
 Every response carries `X-Request-ID`: the caller's own value when it is
 1–128 characters of `A-Z a-z 0-9 - _ . :`, otherwise a minted
@@ -394,6 +400,7 @@ recorded spend plus every reservation stays below the key quota and the
 budget, so concurrent requests can overshoot a cap by at most one
 request's bound. Recorded spend at a cap answers `insufficient_quota`; a
 cap held only by reservations answers the retryable `cap_reserved`.
+The output bound is the request's own cap when it names one, and otherwise the model's `default_max_tokens` (or `DEFAULT_MAX_TOKENS`).
 
 A stream cut before its final usage event is booked from an estimate:
 output of at least one token per four streamed characters, and the whole

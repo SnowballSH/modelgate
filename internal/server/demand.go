@@ -15,10 +15,11 @@ const promptOverheadTokens = 2048
 
 // worstCaseDemand bounds what a request can consume. Every prompt token is
 // at least one byte of the body. The output bound is the largest output cap
-// any upstream path could apply: each translator reads max_tokens or
-// max_completion_tokens and falls back to the default when max_tokens is
-// absent, and n multiplies the choices generated.
-func worstCaseDemand(req oai.ChatRequest, bodyBytes, defaultMaxTokens, ceiling int) (accounting.Demand, error) {
+// any upstream path could apply: the translators send max_completion_tokens
+// when it is set and max_tokens otherwise, the passthrough sends both, the
+// model's default applies only when the request names neither, and n
+// multiplies the choices generated.
+func worstCaseDemand(req oai.ChatRequest, promptBytes, defaultMaxTokens, ceiling int) (accounting.Demand, error) {
 	var caps []int
 	for _, field := range []struct {
 		name  string
@@ -32,7 +33,7 @@ func worstCaseDemand(req oai.ChatRequest, bodyBytes, defaultMaxTokens, ceiling i
 		}
 		caps = append(caps, *field.value)
 	}
-	if req.MaxTokens == nil {
+	if len(caps) == 0 {
 		caps = append(caps, defaultMaxTokens)
 	}
 	choices := 1
@@ -47,7 +48,7 @@ func worstCaseDemand(req oai.ChatRequest, bodyBytes, defaultMaxTokens, ceiling i
 		return accounting.Demand{}, fmt.Errorf("the requested output (n times the max tokens) exceeds this gateway's ceiling of %d tokens", ceiling)
 	}
 	return accounting.Demand{
-		InputTokens:  int64(bodyBytes) + promptOverheadTokens,
+		InputTokens:  int64(promptBytes) + promptOverheadTokens,
 		OutputTokens: int64(choices * perChoice),
 	}, nil
 }
