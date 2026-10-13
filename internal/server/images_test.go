@@ -403,6 +403,9 @@ func TestPassthroughImageCountCannotBeShadowedOrZeroed(t *testing.T) {
 		{"differently cased type only", `[{"Type":"image_url",` + image + `}]`, 1, false},
 		{"image_url key without type", `[{` + image + `}]`, 1, false},
 		{"two images beside text", `[{"type":"text","text":"hi"},{"type":"image_url",` + image + `},{"type":"image_url",` + image + `}]`, 2, false},
+		{"null image_url beside text", `[{"type":"text","text":"hi","image_url":null}]`, 0, false},
+		{"string image_url", `[{"type":"text","image_url":"https://example.com/a.png"}]`, 1, false},
+		{"number beyond float64 range", `[{"type":"text","text":"x","n":1e400}]`, 0, false},
 		{"non-string Type key", `[{"type":"image_url","Type":5,` + image + `}]`, 0, true},
 		{"sibling with a non-string type", `[{"type":"image_url",` + image + `},{"type":5}]`, 0, true},
 		{"bare string element", `[{"type":"image_url",` + image + `},"x"]`, 0, true},
@@ -425,9 +428,9 @@ func TestPassthroughImageCountCannotBeShadowedOrZeroed(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
 			}
-			floor := (float64(int64(len(body))+tc.images*openAIImageTokenAllowance+promptOverheadTokens) + 1000) / 1e6
-			if reserved < floor-1e-9 {
-				t.Errorf("reservation = USD %v, below %v: %d image(s) must be charged %d tokens each", reserved, floor, tc.images, openAIImageTokenAllowance)
+			want := (float64(int64(len(body))+tc.images*openAIImageTokenAllowance+promptOverheadTokens) + 1000) / 1e6
+			if math.Abs(reserved-want) > 1e-9 {
+				t.Errorf("reservation = USD %v, want exactly %v: %d image(s) at %d tokens each, bytes kept as text", reserved, want, tc.images, openAIImageTokenAllowance)
 			}
 		})
 	}
@@ -467,5 +470,51 @@ func TestMeasurePromptFloorsTheTextRemainderAtZero(t *testing.T) {
 	prompt := measurePrompt(100, translate.ImageLoad{Count: 1, InlineBytes: 5000}, anthropicImageTokenAllowance)
 	if prompt.textBytes != 0 || prompt.worstCaseTokens() != anthropicImageTokenAllowance+promptOverheadTokens {
 		t.Errorf("prompt = %+v: an inline count above the body must leave no negative text", prompt)
+	}
+}
+
+func TestStrayImageURLKeyOnATextPartIsServedAsTextOnTranslatedRows(t *testing.T) {
+	const textPart = `{"type":"text","text":"hi"`
+	rates := map[string]float64{"claude-plain": 2.5, "claude-chat": 4}
+	for _, model := range []string{"claude-plain", "claude-chat"} {
+		for name, stray := range map[string]string{
+			"null image_url":         `"image_url":null`,
+			"re-cased image_url key": `"Image_URL":{"url":"https://example.com/a.png"}`,
+		} {
+			t.Run(model+"/"+name, func(t *testing.T) {
+				var env *dualEnv
+				var reserved float64
+				capture := &upstreamCapture{}
+				answer := capture.anthropic()
+				env = newDualEnvWithTable(t, chatReadyModelJSON, dispatchOpenAI(), func(w http.ResponseWriter, r *http.Request) {
+					reserved = env.acct.Reserved()
+					answer(w, r)
+				}, 100)
+				auth, _ := insertTestKey(t, env.store, nil)
+
+				body := `{"model":"` + model + `","max_tokens":1000,"messages":[{"role":"user","content":[` + textPart + `,` + stray + `}]}]}`
+				rec := doDual(env, auth, body)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
+				}
+				blocks := lastAnthropicRequest(t, capture).Messages[0].Content
+				if len(blocks) != 1 || blocks[0].Type != "text" || blocks[0].Text != "hi" {
+					t.Errorf("anthropic blocks = %+v, want the one text block", blocks)
+				}
+				want := (float64(len(body)+promptOverheadTokens)*rates[model] + 1000*10) / 1e6
+				if math.Abs(reserved-want) > 1e-9 {
+					t.Errorf("reservation = USD %v, want %v: no image was sent, so no allowance", reserved, want)
+				}
+			})
+		}
+	}
+}
+
+func TestImageBesideAnUnusualButValidPartIsRefusedByModelName(t *testing.T) {
+	env, _, auth := chatReadyEnv(t)
+	body := `{"model":"claude-plain","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.com/a.png"}},{"type":"text","text":"x","n":1e400}]}]}`
+	rec := doDual(env, auth, body)
+	if want := "model claude-plain does not support image input"; rec.Code != http.StatusBadRequest || decodeErrorMessage(t, rec) != want {
+		t.Errorf("status %d, message %q; want 400 %q", rec.Code, decodeErrorMessage(t, rec), want)
 	}
 }

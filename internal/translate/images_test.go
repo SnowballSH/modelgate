@@ -196,10 +196,14 @@ func TestImageLoadCountsImagesAndInlineBytes(t *testing.T) {
 func TestHasImageParts(t *testing.T) {
 	cases := map[string]bool{
 		visionTurn: true,
-		`{"messages":[{"role":"user","content":"a string mentioning image_url"}]}`:                        false,
-		`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`:                          false,
-		`{"messages":[{"role":"system","content":[{"type":"image_url"}]},{"role":"user","content":"x"}]}`: true,
-		`{"messages":[{"role":"assistant"}]}`:                                                             false,
+		`{"messages":[{"role":"user","content":"a string mentioning image_url"}]}`:                             false,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`:                               false,
+		`{"messages":[{"role":"system","content":[{"type":"image_url"}]},{"role":"user","content":"x"}]}`:      true,
+		`{"messages":[{"role":"assistant"}]}`:                                                                  false,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"hi","image_url":null}]}]}`:              false,
+		`{"messages":[{"role":"user","content":[{"type":"text","text":"hi","Image_URL":{"url":"x"}}]}]}`:       false,
+		`{"messages":[{"role":"user","content":[{"type":"image_url"},{"type":"text","text":"x","n":1e400}]}]}`: true,
+		`{"messages":[{"role":"user","content":[{"Type":"image_url"}]}]}`:                                      true,
 	}
 	for body, want := range cases {
 		if got := HasImageParts(chatRequest(t, body).Messages); got != want {
@@ -290,6 +294,13 @@ func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 		{"only a differently cased type key", `[{"Type":"image_url"}]`, 1, ""},
 		{"image_url key without type", `[{"image_url":` + image + `}]`, 1, ""},
 		{"differently cased image_url key", `[{"type":"text","Image_URL":` + image + `}]`, 1, ""},
+		{"null image_url counts nothing", `[{"type":"text","text":"hi","image_url":null}]`, 0, ""},
+		{"empty object image_url", `[{"type":"text","image_url":{}}]`, 1, ""},
+		{"empty string image_url", `[{"type":"text","image_url":""}]`, 1, ""},
+		{"string image_url", `[{"type":"text","image_url":"https://example.com/a.png"}]`, 1, ""},
+		{"re-cased null image_url counts nothing", `[{"type":"text","Image_URL":null}]`, 0, ""},
+		{"number beyond float64 range", `[{"type":"text","text":"x","n":1e400}]`, 0, ""},
+		{"image beside a part with a huge number", `[{"type":"image_url"},{"type":"text","text":"x","n":1e400}]`, 1, ""},
 		{"image_url nested in another key is not a part", `[{"type":"text","meta":{"image_url":1}}]`, 0, ""},
 		{"two images", `[{"type":"image_url"},{"type":"text"},{"type":"image_url"}]`, 2, ""},
 		{"non-string type", `[{"type":"image_url","Type":5}]`, 0, "invalid message content: a content part's type must be a string"},

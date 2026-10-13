@@ -401,19 +401,21 @@ tier, plus the largest output the request allows at the dearest output
 price — and holds it until the real usage is booked. Every image part is
 also charged a fixed allowance, whether it arrives inline or as an
 `https://` URL: 4,784 tokens on an Anthropic row and 36,000 on an OpenAI
-row. On the translated upstreams an inline image's base64 is then not
-counted as text; on a `chat_completions` row, whose content parts are
-forwarded unread, the image parts are counted by type and their bytes
-stay counted. The bound assumes a provider bills an image block by its
-dimensions, never by tokenising its bytes as text, and rejects a payload
-that is not an image; on a `chat_completions` row, non-image parts such
-as `file` are forwarded unread and bounded by their bytes only. A
-request is admitted only while recorded spend plus every reservation
-stays below the key quota and the budget, so concurrent requests can
-overshoot a cap by at most one request's bound. Recorded spend at a cap
-answers `insufficient_quota`; a cap held only by reservations answers
-the retryable `cap_reserved`. The output bound is the request's own cap
-when it names one, and otherwise the model's `default_max_tokens` (or
+row. On the translated upstreams a part is an image when its `type` says
+so, and an inline image's base64 is then not counted as text; on a
+`chat_completions` row, whose content parts are forwarded unread, a part
+is counted when any `type` key of any letter case says `image_url` or an
+`image_url` key holds a non-null value, and the bytes stay counted. The
+bound assumes a provider bills an image block by its dimensions, never
+by tokenising its bytes as text, and rejects a payload that is not an
+image; on a `chat_completions` row, non-image parts such as `file` are
+forwarded unread and bounded by their bytes only. A request is admitted
+only while recorded spend plus every reservation stays below the key
+quota and the budget, so concurrent requests can overshoot a cap by at
+most one request's bound. Recorded spend at a cap answers
+`insufficient_quota`; a cap held only by reservations answers the
+retryable `cap_reserved`. The output bound is the request's own cap when
+it names one, and otherwise the model's `default_max_tokens` (or
 `DEFAULT_MAX_TOKENS`).
 
 A stream cut before its final usage event is booked from an estimate:

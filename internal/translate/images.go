@@ -157,12 +157,9 @@ var (
 	errContentJSON       = errors.New("invalid message content: content is not valid JSON")
 )
 
-// CountImageParts counts the image parts a message list forwards verbatim, so
-// a pass-through request can be charged for them. It walks the token stream
-// and sees every key as written: a part counts when any key matching `type`
-// or `image_url`, in any letter case, names an image, so no duplicate or
-// re-cased key can hide one. Content that is neither a string nor an array
-// of objects is an error.
+// CountImageParts counts the parts a provider could read as images from
+// content forwarded verbatim. It reads tokens rather than decoding into a
+// struct because a struct decode lets a duplicate or re-cased key hide a part.
 func CountImageParts(messages []oai.Message) (int, error) {
 	total := 0
 	for _, msg := range messages {
@@ -184,6 +181,7 @@ func countContentImages(content json.RawMessage) (int, error) {
 		return 0, errContentShape
 	}
 	dec := json.NewDecoder(bytes.NewReader(content))
+	dec.UseNumber()
 	if _, err := dec.Token(); err != nil {
 		return 0, errContentJSON
 	}
@@ -233,10 +231,13 @@ func scanPart(dec *json.Decoder) (bool, error) {
 			}
 			isImage = isImage || strings.EqualFold(value, imagePartType)
 		case strings.EqualFold(key, imagePartType):
-			isImage = true
-			fallthrough
+			first, err := skipValue(dec)
+			if err != nil {
+				return false, err
+			}
+			isImage = isImage || first != nil
 		default:
-			if err := skipValue(dec); err != nil {
+			if _, err := skipValue(dec); err != nil {
 				return false, err
 			}
 		}
@@ -247,18 +248,19 @@ func scanPart(dec *json.Decoder) (bool, error) {
 	return isImage, nil
 }
 
-func skipValue(dec *json.Decoder) error {
-	token, err := dec.Token()
+// skipValue consumes one value and returns its first token, nil for JSON null.
+func skipValue(dec *json.Decoder) (json.Token, error) {
+	first, err := dec.Token()
 	if err != nil {
-		return errContentJSON
+		return nil, errContentJSON
 	}
-	if delim, ok := token.(json.Delim); !ok || delim == '}' || delim == ']' {
-		return nil
+	if delim, ok := first.(json.Delim); !ok || delim == '}' || delim == ']' {
+		return first, nil
 	}
 	for depth := 1; depth > 0; {
-		token, err = dec.Token()
+		token, err := dec.Token()
 		if err != nil {
-			return errContentJSON
+			return nil, errContentJSON
 		}
 		if delim, ok := token.(json.Delim); ok {
 			if delim == '{' || delim == '[' {
@@ -268,10 +270,23 @@ func skipValue(dec *json.Decoder) error {
 			}
 		}
 	}
-	return nil
+	return first, nil
 }
 
+// HasImageParts decides as the translators' own decode does: a part is an
+// image when its type, as Go's decoder resolves it, is image_url.
 func HasImageParts(messages []oai.Message) bool {
-	n, _ := CountImageParts(messages)
-	return n > 0
+	return slices.ContainsFunc(messages, func(msg oai.Message) bool {
+		var parts []struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(msg.Content, &parts) != nil {
+			return false
+		}
+		return slices.ContainsFunc(parts, func(part struct {
+			Type string `json:"type"`
+		}) bool {
+			return part.Type == imagePartType
+		})
+	})
 }
