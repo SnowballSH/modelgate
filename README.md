@@ -377,7 +377,9 @@ Every completed request's token usage is priced from the model table and
 accumulated per key and globally by UTC calendar month. A model with
 `price_tiers` is priced by the prompt's total input tokens — uncached,
 cache-read and cache-write together: above a threshold the whole request,
-output and cache tokens included, is booked at that tier. Reasoning tokens
+output and cache tokens included, is booked at that tier. A stream cut
+before the provider reported its prompt size is booked, on the estimated
+size, at the dearest tier. Reasoning tokens
 are part of the output count and are billed as output tokens; when the
 upstream reports them separately they are passed on in
 `usage.completion_tokens_details.reasoning_tokens`.

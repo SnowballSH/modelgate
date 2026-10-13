@@ -274,7 +274,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		return
 	}
 
-	h.recordUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(aresp.Usage))
+	h.recordUsage(r.Context(), adm, req.Model, translate.ToStoreUsage(aresp.Usage), false)
 	if h.callerGone(r, observe) {
 		return
 	}
@@ -379,7 +379,7 @@ func (h *PublicHandler) chatOpenAI(ctx context.Context, call admittedCall) {
 		return
 	}
 
-	h.recordUsage(r.Context(), adm, req.Model, storeUsageFromOAI(resp.Usage))
+	h.recordUsage(r.Context(), adm, req.Model, storeUsageFromOAI(resp.Usage), false)
 	if h.callerGone(r, call.observe) {
 		return
 	}
@@ -523,7 +523,7 @@ func (h *PublicHandler) chatResponses(ctx context.Context, call admittedCall, fa
 		return
 	}
 
-	h.recordUsage(r.Context(), adm, req.Model, translate.ResponsesStoreUsage(resp.Usage))
+	h.recordUsage(r.Context(), adm, req.Model, translate.ResponsesStoreUsage(resp.Usage), false)
 	if h.callerGone(r, call.observe) {
 		return
 	}

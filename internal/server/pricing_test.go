@@ -2,10 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +89,41 @@ func TestAdmitReservesAtTheTopTier(t *testing.T) {
 	want := (1000*10.0 + 2000*25.0) / 1e6
 	if got := acct.Reserved(); math.Abs(got-want) > 1e-12 {
 		t.Errorf("reserved = %v, want %v (a 1000-token prompt still reserves at the tier it cannot be proven to stay under)", got, want)
+	}
+}
+
+func TestCutStreamBooksAnEstimatedPromptAtTheTopTier(t *testing.T) {
+	const body = `{"model":"tiered","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	text := strings.Repeat("a", 40)
+	tests := []struct {
+		name   string
+		events string
+		want   float64
+	}{
+		{"no usage reported", "",
+			(float64((len(body)+3)/4)*5.0 + 10*25.0) / 1e6},
+		{"input reported before the cut",
+			"data: {\"type\":\"message_start\",\"message\":{\"type\":\"message\",\"role\":\"assistant\",\"usage\":{\"input_tokens\":100,\"output_tokens\":1}}}\n\n",
+			(100*1.0 + 10*5.0) / 1e6},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cut := func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprint(w, tc.events)
+				fmt.Fprint(w, "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\n")
+				fmt.Fprintf(w, "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%q}}\n\n", text)
+			}
+			env := newDualEnvWithTable(t, tieredModelJSON, openaiChatResponse(), cut, 100)
+			auth, _ := insertTestKey(t, env.store, nil)
+			doDual(env, auth, body)
+			spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if math.Abs(spend-tc.want) > 1e-12 {
+				t.Errorf("spend = %v, want %v", spend, tc.want)
+			}
+		})
 	}
 }

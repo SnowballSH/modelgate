@@ -64,6 +64,7 @@ func (m streamMeter) bookable(reported store.Usage) (store.Usage, bool) {
 // an estimate as one in the log.
 func (h *PublicHandler) bookStreamUsage(ctx context.Context, adm Admission, publicModel string, meter streamMeter, reported store.Usage) {
 	usage, estimated := meter.bookable(reported)
+	inputEstimated := estimated && reported.PromptTokens() == 0
 	if !usage.HasTokens() {
 		return
 	}
@@ -72,16 +73,22 @@ func (h *PublicHandler) bookStreamUsage(ctx context.Context, adm Admission, publ
 			"request_id", requestIDFrom(ctx), "key_id", adm.Key.ID, "model", publicModel,
 			"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens)
 	}
-	h.recordUsage(ctx, adm, publicModel, usage)
+	h.recordUsage(ctx, adm, publicModel, usage, inputEstimated)
 }
 
 // recordUsage runs on a context detached from the request: spend the
-// provider billed must be booked even when the caller is already gone.
-func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage) {
+// provider billed must be booked even when the caller is already gone. An
+// estimated prompt size cannot prove which price tier the request crossed,
+// so it is booked at the dearest.
+func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage, inputEstimated bool) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookingTimeout)
 	defer cancel()
 	now := h.now()
-	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.PricingFor(usage.PromptTokens())); err != nil {
+	pricing := adm.Model.PricingFor(usage.PromptTokens())
+	if inputEstimated {
+		pricing = adm.Model.WorstCasePricing()
+	}
+	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, pricing); err != nil {
 		h.metrics.BookingFailed()
 		slog.Error("usage booking failed", "request_id", requestIDFrom(ctx), "key_id", adm.Key.ID,
 			"model", publicModel, "input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens, "err", err)
