@@ -124,6 +124,11 @@ request can never run.
 | `input_usd_per_mtok`, `output_usd_per_mtok`, `cache_read_usd_per_mtok`, `cache_write_usd_per_mtok` | All four required, all positive. |
 | `forced_tool_choice` | Optional boolean, default `true`. `false` declares that the model refuses forced tool use, and modelgate answers a request whose `tool_choice` is `"required"`, a named function or custom tool, or an `allowed_tools` set in `required` mode with a 400 of its own. |
 | `reasoning_efforts` | Optional list of the `reasoning_effort` levels the model accepts, compared against the request's `reasoning_effort` before translation and drawn from `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (exact, lowercase). A request naming any other level gets a 400 of its own. Omitted or `null` accepts every level; an empty list or an unknown level refuses the table. |
+| `default_max_tokens` | Optional integer, 1–128000: the output cap sent when a request names neither `max_completion_tokens` nor `max_tokens`. Absent, the gateway's `DEFAULT_MAX_TOKENS` applies. A value above `MAX_OUTPUT_TOKENS` refuses startup. |
+| `sampling` | Optional boolean: whether `temperature` and `top_p` are forwarded. `false` removes both before the provider call. Absent means `true` on `anthropic` and `chat_completions` rows and `false` on `responses` rows. |
+| `image_input` | Optional boolean, default `false`. `true` translates `image_url` content parts on `anthropic` and `responses` rows; otherwise such a request gets a 400 naming the model. A `chat_completions` row forwards content parts unchanged either way. |
+| `price_tiers` | Optional list of `{"above_input_tokens", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"}`. When a prompt's input tokens — uncached, cache-read and cache-write together — exceed a threshold, the whole request is booked at that tier's four prices. Thresholds are positive and strictly ascending and every price is positive; `[]` refuses the table. |
+| `cache_ttl` | Optional, `"5m"` (the default) or `"1h"`, `anthropic` rows only: the lifetime requested on every cache breakpoint. Set `cache_write_usd_per_mtok` to the price of that lifetime (2× input for `"1h"`, 1.25× for `"5m"`). |
 
 The limits are checked after the key's model allowlist and before the
 request takes a concurrency slot or reserves any cost, so a refused
@@ -136,8 +141,9 @@ provider. The 400 names the model and the rule:
 ```
 
 Fields the running build does not know are ignored, so a table written
-for a newer release loads in an older one (without the newer checks),
-and a v0.5.0 table loads unchanged in v0.6.0.
+for a newer release loads in an older one (without the newer rules: v0.6.0
+serves a v0.7.0 table with none of the five fields above), and a v0.6.0
+table loads unchanged in v0.7.0.
 
 OpenAI bills no separate cache write, so for OpenAI models set
 `cache_write_usd_per_mtok` to the input price; the gateway never
@@ -206,10 +212,10 @@ A current table, at the providers' published prices:
 ```
 
 Claude Opus 5.5 and Claude Fable 5.1 refuse forced tool use; GPT-6 Sol
-and Luna have no `minimal` effort. Anthropic cache writes are the
-five-minute rate, 1.25× input. A table cannot express tiered prices
-(GPT-6 bills prompts over 272K input tokens at a higher rate), so such a
-prompt is booked at the table's rate.
+and Luna have no `minimal` effort. Anthropic cache writes above are the
+five-minute rate, 1.25× input; a row with `cache_ttl: "1h"` carries the
+one-hour rate, 2× input. A model whose price changes with prompt size
+declares `price_tiers`, and admission reserves at the dearest tier.
 
 ## Request parameters on Anthropic models
 
