@@ -27,7 +27,20 @@ type ChatRequest struct {
 	Tools               []Tool          `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
 	User                string          `json:"user,omitempty"`
-	PromptCacheKey      string          `json:"prompt_cache_key,omitempty"`
+	PromptCacheKey      CacheKey        `json:"prompt_cache_key,omitempty"`
+}
+
+// CacheKey is a client's prompt_cache_key. A value that is not a JSON string
+// decodes to the empty key, which is neither forwarded nor an error.
+type CacheKey string
+
+func (k *CacheKey) UnmarshalJSON(data []byte) error {
+	var key string
+	if json.Unmarshal(data, &key) != nil {
+		key = ""
+	}
+	*k = CacheKey(key)
+	return nil
 }
 
 // ForcesToolCall reports whether tool_choice obliges the model to call a

@@ -8,6 +8,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
 	"github.com/SnowballSH/modelgate/internal/oai"
@@ -19,12 +20,26 @@ const (
 	anthropicImageType = "image"
 	responsesImageType = "input_image"
 	dataURIScheme      = "data:"
+	echoLimit          = 64
 )
 
 var (
 	imageMediaTypes = []string{"image/jpeg", "image/png", "image/gif", "image/webp"}
 	imageDetails    = []string{"auto", "low", "high"}
+	pricedPartTypes = []string{"text", imagePartType, "refusal"}
 )
+
+// echoed bounds a client string quoted back in an error message.
+func echoed(value string) string {
+	if len(value) <= echoLimit {
+		return value
+	}
+	cut := echoLimit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut] + "…"
+}
 
 type image struct {
 	url       string
@@ -44,7 +59,7 @@ type imageRef struct {
 type borrowedJSON []byte
 
 func (b *borrowedJSON) UnmarshalJSON(data []byte) error {
-	*b = data
+	*b = data[:len(data):len(data)]
 	return nil
 }
 
@@ -79,7 +94,7 @@ func isStandardBase64(data string) bool {
 
 func parseImage(rawURL, detail string) (image, error) {
 	if detail != "" && !slices.Contains(imageDetails, detail) {
-		return image{}, fmt.Errorf("image_url.detail %q is not one of %s", detail, strings.Join(imageDetails, ", "))
+		return image{}, fmt.Errorf("image_url.detail %q is not one of %s", echoed(detail), strings.Join(imageDetails, ", "))
 	}
 	if strings.HasPrefix(rawURL, "https://") {
 		return image{url: rawURL, detail: detail}, nil
@@ -96,9 +111,8 @@ func parseImage(rawURL, detail string) (image, error) {
 	if !isStandardBase64(data) {
 		return image{}, errImageAlphabet
 	}
-	mediaType = strings.ToLower(mediaType)
 	if !slices.Contains(imageMediaTypes, mediaType) {
-		return image{}, fmt.Errorf("unsupported image media type %q; use one of %s", mediaType, strings.Join(imageMediaTypes, ", "))
+		return image{}, fmt.Errorf("unsupported image media type %q; use one of %s", echoed(mediaType), strings.Join(imageMediaTypes, ", "))
 	}
 	return image{url: rawURL, mediaType: mediaType, data: data, detail: detail}, nil
 }
@@ -156,6 +170,14 @@ var (
 	errContentPartType   = errors.New("invalid message content: a content part's type must be a string")
 	errContentJSON       = errors.New("invalid message content: content is not valid JSON")
 )
+
+func unsupportedPartType(partType string) error {
+	return fmt.Errorf("invalid message content: unsupported content part type %q; a passthrough row forwards only text, image_url and refusal parts", echoed(partType))
+}
+
+func isPricedPartType(partType string) bool {
+	return slices.ContainsFunc(pricedPartTypes, func(priced string) bool { return strings.EqualFold(partType, priced) })
+}
 
 // CountImageParts counts the parts a provider could read as images from
 // content forwarded verbatim. It reads tokens rather than decoding into a
@@ -229,6 +251,9 @@ func scanPart(dec *json.Decoder) (bool, error) {
 			if !ok {
 				return false, errContentPartType
 			}
+			if !isPricedPartType(value) {
+				return false, unsupportedPartType(value)
+			}
 			isImage = isImage || strings.EqualFold(value, imagePartType)
 		case strings.EqualFold(key, imagePartType):
 			first, err := skipValue(dec)
@@ -273,19 +298,19 @@ func skipValue(dec *json.Decoder) (json.Token, error) {
 	return first, nil
 }
 
+type typedPart struct {
+	Type string `json:"type"`
+}
+
 // HasImageParts decides as the translators' own decode does: a part is an
 // image when its type, as Go's decoder resolves it, is image_url.
 func HasImageParts(messages []oai.Message) bool {
 	return slices.ContainsFunc(messages, func(msg oai.Message) bool {
-		var parts []struct {
-			Type string `json:"type"`
-		}
+		var parts []typedPart
 		if json.Unmarshal(msg.Content, &parts) != nil {
 			return false
 		}
-		return slices.ContainsFunc(parts, func(part struct {
-			Type string `json:"type"`
-		}) bool {
+		return slices.ContainsFunc(parts, func(part typedPart) bool {
 			return part.Type == imagePartType
 		})
 	})

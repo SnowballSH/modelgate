@@ -240,13 +240,14 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 	defer adm.Release()
 	record = resolved
 
+	if len(plan.dropped) > 0 {
+		w.Header().Set(translate.DroppedParamsHeader, strings.Join(plan.dropped, ", "))
+	}
+
 	breaker := h.up.breakerFor(adm.Model.Provider)
 	if !breaker.Allow() {
 		fail(CodeProviderUnavailable, "provider circuit open")
 		return
-	}
-	if len(plan.dropped) > 0 {
-		w.Header().Set(translate.DroppedParamsHeader, strings.Join(plan.dropped, ", "))
 	}
 
 	// A non-streaming call keeps running when the caller hangs up: the

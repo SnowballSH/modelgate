@@ -69,6 +69,8 @@ func TestLoadTableRejectsUnusableChatFields(t *testing.T) {
 		{"zero threshold", `"price_tiers":[{"above_input_tokens":0,` + pricedFields + `}]`, "price_tiers[0]: above_input_tokens must be positive, got 0"},
 		{"thresholds not ascending", `"price_tiers":[{"above_input_tokens":200000,` + pricedFields + `},{"above_input_tokens":200000,` + pricedFields + `}]`,
 			"price_tiers[1]: above_input_tokens 200000 must exceed the previous tier's 200000"},
+		{"thresholds descending", `"price_tiers":[{"above_input_tokens":200000,` + pricedFields + `},{"above_input_tokens":100000,` + pricedFields + `}]`,
+			"price_tiers[1]: above_input_tokens 100000 must exceed the previous tier's 200000"},
 		{"tier missing a price", `"price_tiers":[{"above_input_tokens":1,"input_usd_per_mtok":1,"output_usd_per_mtok":1,"cache_read_usd_per_mtok":1}]`,
 			"price_tiers[0]: cache_write_usd_per_mtok absent"},
 		{"tier with a zero price", `"price_tiers":[{"above_input_tokens":1,"input_usd_per_mtok":1,"output_usd_per_mtok":0,"cache_read_usd_per_mtok":1,"cache_write_usd_per_mtok":1}]`,

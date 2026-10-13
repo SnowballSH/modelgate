@@ -114,14 +114,52 @@ func TestUnusableImagesAreRefused(t *testing.T) {
 	}
 }
 
-func TestMediaTypeIsMatchedWithoutRegardToCase(t *testing.T) {
+func TestMediaTypeMustBeExactlyLowercase(t *testing.T) {
+	const message = `unsupported image media type "IMAGE/JPEG"; use one of image/jpeg, image/png, image/gif, image/webp`
 	req := chatRequest(t, `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:IMAGE/JPEG;base64,`+pngBase64+`"}}]}]}`)
-	areq, err := ToAnthropicWith(req, visionAnthropic)
-	if err != nil {
+	if _, err := ToAnthropicWith(req, visionAnthropic); err == nil || err.Error() != message {
+		t.Errorf("anthropic err = %v, want %q", err, message)
+	}
+	if _, err := ToResponsesWith(req, visionResponses); err == nil || err.Error() != message {
+		t.Errorf("responses err = %v, want %q", err, message)
+	}
+}
+
+func TestEchoedClientStringsAreTruncated(t *testing.T) {
+	long := strings.Repeat("x", 1<<20)
+	cases := []struct {
+		name string
+		part string
+		echo string
+	}{
+		{"detail", `{"url":"` + pngDataURI + `","detail":"` + long + `"}`, long},
+		{"media type", `{"url":"data:` + long + `;base64,AAAA"}`, long},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := chatRequest(t, `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":`+tc.part+`}]}]}`)
+			for name, err := range map[string]error{
+				"anthropic": func() error { _, err := ToAnthropicWith(req, visionAnthropic); return err }(),
+				"responses": func() error { _, err := ToResponsesWith(req, visionResponses); return err }(),
+			} {
+				if err == nil || len(err.Error()) > 200 || !strings.Contains(err.Error(), strings.Repeat("x", 16)) {
+					t.Errorf("%s: err = %.120v (%d bytes), want a refusal echoing a short prefix of the value", name, err, len(err.Error()))
+				}
+			}
+		})
+	}
+}
+
+func TestBorrowedJSONCannotBeAppendedOver(t *testing.T) {
+	const content = `{"url":"a"},"second":2}`
+	buffer := []byte(content)
+	var borrowed borrowedJSON
+	if err := borrowed.UnmarshalJSON(buffer[:len(`{"url":"a"}`)]); err != nil {
 		t.Fatal(err)
 	}
-	if got := areq.Messages[0].Content[0].Source.MediaType; got != "image/jpeg" {
-		t.Errorf("media_type = %q, want image/jpeg", got)
+	grown := append(borrowed, '!')
+	if len(grown) != len(borrowed)+1 || string(buffer) != content {
+		t.Errorf("appending to the borrowed bytes rewrote the content buffer: %s", buffer)
 	}
 }
 
@@ -286,7 +324,7 @@ func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 		{"string content", `"an image_url in prose"`, 0, ""},
 		{"no content", ``, 0, ""},
 		{"null content", `null`, 0, ""},
-		{"shadowing Type key", `[{"type":"image_url","Type":"x","image_url":` + image + `}]`, 1, ""},
+		{"shadowing Type key", `[{"type":"image_url","Type":"text","image_url":` + image + `}]`, 1, ""},
 		{"shadowing TYPE after the real key", `[{"type":"image_url","TYPE":"text","image_url":` + image + `}]`, 1, ""},
 		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text","image_url":` + image + `}]`, 1, ""},
 		{"duplicate type, last is text", `[{"type":"image_url","type":"text","image_url":` + image + `}]`, 1, ""},
@@ -303,6 +341,14 @@ func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 		{"image beside a part with a huge number", `[{"type":"image_url"},{"type":"text","text":"x","n":1e400}]`, 1, ""},
 		{"image_url nested in another key is not a part", `[{"type":"text","meta":{"image_url":1}}]`, 0, ""},
 		{"two images", `[{"type":"image_url"},{"type":"text"},{"type":"image_url"}]`, 2, ""},
+		{"refusal part", `[{"type":"refusal","refusal":"no"}]`, 0, ""},
+		{"part without a type key", `[{"text":"hi"}]`, 0, ""},
+		{"file part", `[{"type":"file","file":{"file_id":"f"}}]`, 0, "invalid message content: unsupported content part type \"file\"; a passthrough row forwards only text, image_url and refusal parts"},
+		{"input_audio part", `[{"type":"text"},{"type":"input_audio"}]`, 0, "invalid message content: unsupported content part type \"input_audio\"; a passthrough row forwards only text, image_url and refusal parts"},
+		{"invented type", `[{"type":"hologram"}]`, 0, "invalid message content: unsupported content part type \"hologram\"; a passthrough row forwards only text, image_url and refusal parts"},
+		{"unsupported type shadowed by a later text type", `[{"type":"file","TYPE":"text"}]`, 0, "invalid message content: unsupported content part type \"file\"; a passthrough row forwards only text, image_url and refusal parts"},
+		{"unsupported type beside an image", `[{"type":"image_url","Type":"x"}]`, 0, "invalid message content: unsupported content part type \"x\"; a passthrough row forwards only text, image_url and refusal parts"},
+		{"long unsupported type is truncated", `[{"type":"` + strings.Repeat("y", 1<<16) + `"}]`, 0, "invalid message content: unsupported content part type \"" + strings.Repeat("y", echoLimit) + "…\"; a passthrough row forwards only text, image_url and refusal parts"},
 		{"non-string type", `[{"type":"image_url","Type":5}]`, 0, "invalid message content: a content part's type must be a string"},
 		{"sibling with a non-string type", `[{"type":"image_url"},{"type":5}]`, 0, "invalid message content: a content part's type must be a string"},
 		{"bare string element", `[{"type":"image_url"},"x"]`, 0, "invalid message content: content parts must be objects"},

@@ -21,7 +21,7 @@ type preparedCall struct {
 
 func (h *PublicHandler) prepare(req oai.ChatRequest, model models.Model, keyID string) (preparedCall, error) {
 	outputCap := model.OutputCapDefault(h.defaultMaxTokens)
-	cacheKey := translate.NamespacedCacheKey(keyID, req.PromptCacheKey)
+	cacheKey := translate.NamespacedCacheKey(keyID, string(req.PromptCacheKey))
 	switch {
 	case model.Provider == models.ProviderAnthropic:
 		return h.prepareAnthropic(req, translate.AnthropicOptions{
@@ -89,7 +89,7 @@ func (h *PublicHandler) prepareResponses(req oai.ChatRequest, opts translate.Res
 func passthroughRequest(req oai.ChatRequest, model models.Model, outputCap int, cacheKey string) oai.ChatRequest {
 	up := req
 	up.Model = model.ProviderModel
-	up.PromptCacheKey = cacheKey
+	up.PromptCacheKey = oai.CacheKey(cacheKey)
 	if up.MaxTokens == nil && up.MaxCompletionTokens == nil {
 		up.MaxCompletionTokens = &outputCap
 	}

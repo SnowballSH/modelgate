@@ -126,7 +126,7 @@ request can never run.
 | `reasoning_efforts` | Optional list of the `reasoning_effort` levels the model accepts, compared against the request's `reasoning_effort` before translation and drawn from `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (exact, lowercase). A request naming any other level gets a 400 of its own. Omitted or `null` accepts every level; an empty list or an unknown level refuses the table. |
 | `default_max_tokens` | Optional integer, 1–128000: the output cap sent when a request names neither `max_completion_tokens` nor `max_tokens`. Absent, the gateway's `DEFAULT_MAX_TOKENS` applies. A value above `MAX_OUTPUT_TOKENS` refuses startup. |
 | `sampling` | Optional boolean: whether `temperature` and `top_p` are forwarded. `false` removes both before the provider call. Absent means `true` on `anthropic` and `chat_completions` rows and `false` on `responses` rows. |
-| `image_input` | Optional boolean, default `false`. `true` translates `image_url` content parts on `anthropic` and `responses` rows; otherwise such a request gets a 400 naming the model (`model <id> does not support image input`), whichever message role carries the image: the check runs before translation, so the translator's own `unsupported content part: image_url` surfaces only on a row with `image_input: true`, for an image in a `system`, `assistant` or `tool` message. A `chat_completions` row forwards content parts unchanged either way. |
+| `image_input` | Optional boolean, default `false`. `true` translates `image_url` content parts on `anthropic` and `responses` rows; otherwise such a request gets a 400 naming the model (`model <id> does not support image input`), whichever message role carries the image: the check runs before translation, so the translator's own `unsupported content part: image_url` surfaces only on a row with `image_input: true`, for an image in a `system`, `assistant` or `tool` message. A `chat_completions` row forwards `text`, `image_url` and `refusal` parts unchanged either way and refuses any other part type. |
 | `price_tiers` | Optional list of `{"above_input_tokens", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"}`. When a prompt's input tokens — uncached, cache-read and cache-write together — exceed a threshold, the whole request is booked at that tier's four prices. Thresholds are positive and strictly ascending and every price is positive; `[]` refuses the table. |
 | `cache_ttl` | Optional, `"5m"` (the default) or `"1h"`, `anthropic` rows only: the lifetime requested on every cache breakpoint. Set `cache_write_usd_per_mtok` to the price of that lifetime (2× input for `"1h"`, 1.25× for `"5m"`). |
 
@@ -271,7 +271,7 @@ then the provider's circuit breaker. A request the gateway cannot
 translate is therefore refused with a 400 before it holds any shared
 capacity. On a `chat_completions` row that includes a message whose
 `content` is neither a string, `null` nor an array of JSON objects with
-string `type` fields (`invalid message content: ...`), because the
+string `type` fields of a type it can price (`text`, `image_url`, `refusal`) (`invalid message content: ...`), because the
 gateway counts that row's image parts before forwarding them; v0.6.0
 forwarded such content unread.
 
@@ -408,8 +408,9 @@ is counted when any `type` key of any letter case says `image_url` or an
 `image_url` key holds a non-null value, and the bytes stay counted. The
 bound assumes a provider bills an image block by its dimensions, never
 by tokenising its bytes as text, and rejects a payload that is not an
-image; on a `chat_completions` row, non-image parts such as `file` are
-forwarded unread and bounded by their bytes only. A request is admitted
+image; a `chat_completions` row forwards only the content-part types it
+can price (`text`, `image_url`, `refusal`) and refuses any other with a
+400. A request is admitted
 only while recorded spend plus every reservation stays below the key
 quota and the budget, so concurrent requests can overshoot a cap by at
 most one request's bound. Recorded spend at a cap answers

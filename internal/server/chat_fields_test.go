@@ -203,13 +203,59 @@ func TestPromptCacheKeyIsNamespacedPerGatewayKey(t *testing.T) {
 
 	doDual(env, first, chatReadyRequest("gpt-pass", fields))
 	seen := *env.openaiSeen
-	if len(seen) != 1 || seen[0].PromptCacheKey != firstKey {
+	if len(seen) != 1 || string(seen[0].PromptCacheKey) != firstKey {
 		t.Errorf("passthrough prompt_cache_key = %+v, want %q", seen, firstKey)
 	}
 
 	doDual(env, first, chatReadyRequest("claude-chat", fields))
 	if raw := capture.bodies[len(capture.bodies)-1]; bytes.Contains(raw, []byte("prompt_cache_key")) || bytes.Contains(raw, []byte("thread-1")) {
 		t.Errorf("prompt_cache_key reached the anthropic upstream: %s", raw)
+	}
+}
+
+func TestNonStringPromptCacheKeyIsIgnored(t *testing.T) {
+	values := map[string]string{
+		"number": `123`, "object": `{"a":1}`, "array": `["x"]`, "null": `null`, "empty string": `""`,
+	}
+	for name, value := range values {
+		for _, model := range []string{"gpt-vision", "gpt-pass", "claude-chat"} {
+			t.Run(name+"/"+model, func(t *testing.T) {
+				env, capture, auth := chatReadyEnv(t)
+				rec := doDual(env, auth, chatReadyRequest(model, `"prompt_cache_key":`+value+`,`))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+				}
+				if got := rec.Header().Values(translate.DroppedParamsHeader); len(got) != 0 {
+					t.Errorf("%s = %v, want the header absent", translate.DroppedParamsHeader, got)
+				}
+				var sent []byte
+				if model == "claude-chat" {
+					sent = capture.bodies[0]
+				} else {
+					sent = (*env.openaiCalls)[0].body
+				}
+				if bytes.Contains(sent, []byte("prompt_cache_key")) {
+					t.Errorf("a cache key reached the upstream: %s", sent)
+				}
+			})
+		}
+	}
+}
+
+func TestDroppedParamsHeaderSurvivesAnOpenBreaker(t *testing.T) {
+	failing := func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusInternalServerError)
+	}
+	env := newDualEnvWithTable(t, chatReadyModelJSON, dispatchOpenAI(), failing, 1)
+	auth, _ := insertTestKey(t, env.store, nil)
+
+	doDual(env, auth, chatReadyRequest("claude-chat", ``))
+	rec := doDual(env, auth, chatReadyRequest("claude-chat", `"temperature":0.7,`))
+	if rec.Code != http.StatusServiceUnavailable || decodeErrorMessage(t, rec) != "provider circuit open" {
+		t.Fatalf("status %d, body %s; want the open-circuit 503", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Values(translate.DroppedParamsHeader); len(got) != 1 || got[0] != "temperature" {
+		t.Errorf("%s = %v, want [temperature]", translate.DroppedParamsHeader, got)
 	}
 }
 

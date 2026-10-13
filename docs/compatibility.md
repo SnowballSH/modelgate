@@ -41,7 +41,7 @@ included**. The matrix below covers the subset.
 | `user` text content (string or `text` parts) | Translated: one text block per non-empty part; content with neither text nor an image is rejected. | Supported. | Translated: `input_text` parts; content with neither text nor an image is rejected. |
 | `image_url` parts in a `user` message, on a row with `image_input: true` (since `v0.7.0`) | Translated: a `data:` URI becomes an `image` block with a `base64` source, an `https://` URL one with a `url` source. `detail` is dropped: the Messages API has none. | Supported. | Translated: an `input_image` part carrying the URL or the `data:` URI unchanged, and `detail` when it is `auto`, `low` or `high`. |
 | `image_url` parts on a row without `image_input`, or in a `system`, `assistant` or `tool` message | Rejected: `model <id> does not support image input` on such a row, `unsupported content part: image_url` in those roles. | Supported. | Rejected the same way. |
-| `input_audio`, `file` parts | Rejected (`unsupported content part`). | Supported. | Rejected. |
+| `input_audio`, `file` and any other part type outside `text`, `image_url`, `refusal` | Rejected (`unsupported content part`). | Rejected (since `v0.7.0`) with a 400 `invalid message content: unsupported content part type ...` before admission: a passthrough row forwards only part types it can price. | Rejected. |
 | `assistant` text and `tool_calls` | Translated: a text block and `tool_use` blocks. | Supported. | Translated: a message item and `function_call` items correlated by `call_id` alone. |
 | `tool_calls[].function.arguments` `""` | Translated: `{}` (a call that took no arguments). | Supported. | Translated: `{}`. |
 | `tool_calls[].function.arguments` not JSON | Rejected. | Supported. | Rejected. |
@@ -112,13 +112,16 @@ That includes the case a row cannot override: on Anthropic rows a request's
 `reasoning_effort` displaces `temperature` and `top_p` even when the row
 declares `sampling: true`, because the models that accept an effort refuse
 both, and the header then names them. A parameter outside the decoded
-subset is never listed, and neither is `prompt_cache_key`.
+subset is never listed, and neither is `prompt_cache_key`. A
+`prompt_cache_key` that is not a JSON string (a number, object, array or
+`null`) is ignored on every row: not forwarded, not an error.
 
 ### Images
 
 On the translated upstreams an image is a `data:` URI whose media type
-is `image/jpeg`, `image/png`, `image/gif` or `image/webp` — the set both
-providers document — with a base64 payload, or an `https://` URL.
+is exactly `image/jpeg`, `image/png`, `image/gif` or `image/webp` — the set both
+providers document, lowercase as written: `data:IMAGE/PNG;...` is refused
+on both upstreams — with a base64 payload, or an `https://` URL.
 Anything else is a 400 naming what is wrong: another scheme (`http://`
 included), another media type, a `data:` URI that is not base64 or whose
 payload strays outside the standard alphabet (`A-Z a-z 0-9 + /`, in
@@ -148,8 +151,15 @@ counted as text (over-counting is the safe side). The passthrough
 refuses, with a 400 `invalid message content: ...` before admission, a
 message whose `content` is neither a string, `null` nor an array of JSON
 objects with string `type` fields; v0.6.0 forwarded such content unread.
-Non-image parts such as `file` are still forwarded unread and bounded by
-their bytes only. The number follows the row's upstream:
+A passthrough row forwards only part types it can price: a part whose
+`type` (any key occurrence, any letter case) is anything but `text`,
+`image_url` or `refusal` is refused with a 400 `invalid message content:
+unsupported content part type ...` before admission, reserving nothing,
+which keeps `file` parts (billed per page as images) and `input_audio`
+parts (audio tokens inside `prompt_tokens`) out of the byte-bounded path.
+A part with no `type` key is forwarded and counted only by its
+`image_url` key. The echoed type, like an echoed `detail` or media type,
+is cut to 64 bytes. The number follows the row's upstream:
 
 | Row | Tokens per image | Source |
 |---|---|---|

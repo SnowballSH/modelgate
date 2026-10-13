@@ -396,7 +396,7 @@ func TestPassthroughImageCountCannotBeShadowedOrZeroed(t *testing.T) {
 		refused bool
 	}{
 		{"plain image", `[{"type":"image_url",` + image + `}]`, 1, false},
-		{"shadowing Type key", `[{"type":"image_url","Type":"x",` + image + `}]`, 1, false},
+		{"shadowing Type key", `[{"type":"image_url","Type":"text",` + image + `}]`, 1, false},
 		{"shadowing TYPE key", `[{"type":"image_url","TYPE":"text",` + image + `}]`, 1, false},
 		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text",` + image + `}]`, 1, false},
 		{"duplicate type, last is text", `[{"type":"image_url","type":"text",` + image + `}]`, 1, false},
@@ -406,6 +406,12 @@ func TestPassthroughImageCountCannotBeShadowedOrZeroed(t *testing.T) {
 		{"null image_url beside text", `[{"type":"text","text":"hi","image_url":null}]`, 0, false},
 		{"string image_url", `[{"type":"text","image_url":"https://example.com/a.png"}]`, 1, false},
 		{"number beyond float64 range", `[{"type":"text","text":"x","n":1e400}]`, 0, false},
+		{"refusal part", `[{"type":"refusal","refusal":"no"}]`, 0, false},
+		{"part without a type key", `[{"text":"hi"}]`, 0, false},
+		{"file part", `[{"type":"file","file":{"file_id":"f"}}]`, 0, true},
+		{"input_audio part", `[{"type":"text","text":"hi"},{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, true},
+		{"invented type", `[{"type":"hologram"}]`, 0, true},
+		{"unsupported type beside an image", `[{"type":"image_url","Type":"file",` + image + `}]`, 0, true},
 		{"non-string Type key", `[{"type":"image_url","Type":5,` + image + `}]`, 0, true},
 		{"sibling with a non-string type", `[{"type":"image_url",` + image + `},{"type":5}]`, 0, true},
 		{"bare string element", `[{"type":"image_url",` + image + `},"x"]`, 0, true},
@@ -453,7 +459,7 @@ func TestPassthroughCutStreamEstimateChargesEachImage(t *testing.T) {
 	auth, _ := insertTestKey(t, env.store, nil)
 	body := `{"model":"gpt-pass","stream":true,"max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"hi"},` +
 		`{"type":"image_url","image_url":{"url":"` + inlineImagePrefix + strings.Repeat("A", 4000) + `"}},` +
-		`{"type":"image_url","Type":"x","image_url":{"url":"https://example.com/a.png"}}]}]}`
+		`{"type":"image_url","Type":"text","image_url":{"url":"https://example.com/a.png"}}]}]}`
 	doDual(env, auth, body)
 
 	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
