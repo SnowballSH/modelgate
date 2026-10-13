@@ -10,31 +10,37 @@ import (
 	"github.com/SnowballSH/modelgate/internal/oairesp"
 )
 
-// ToResponses builds a Responses API request from a Chat Completions one.
-// temperature and top_p are normalised away rather than refused: this upstream
-// serves reasoning models, which accept only the default value of either.
+type ResponsesOptions struct {
+	ProviderModel    string
+	DefaultMaxTokens int
+	DropSampling     bool
+}
+
+// ToResponses translates for a reasoning model, which accepts only the
+// default temperature and top_p: both are normalised away rather than refused.
 func ToResponses(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (oairesp.Request, error) {
-	stops, err := parseStop(req.Stop)
-	if err != nil {
+	return ToResponsesWith(req, ResponsesOptions{ProviderModel: providerModel, DefaultMaxTokens: defaultMaxTokens, DropSampling: true})
+}
+
+func ToResponsesWith(req oai.ChatRequest, opts ResponsesOptions) (oairesp.Request, error) {
+	if _, err := parseStop(req.Stop); err != nil {
 		return oairesp.Request{}, err
 	}
-	if err := refuseUnsupported(req, "on the responses upstream", map[string]bool{
-		"stop":              len(stops) > 0,
-		"frequency_penalty": req.FrequencyPenalty != nil,
-		"presence_penalty":  req.PresencePenalty != nil,
-		"seed":              req.Seed != nil,
-	}); err != nil {
+	if err := refuseUnsupported(req, "on the responses upstream", nil); err != nil {
 		return oairesp.Request{}, err
 	}
 
-	outputCap := maxOutputTokens(req, defaultMaxTokens)
+	outputCap := maxOutputTokens(req, opts.DefaultMaxTokens)
 	out := oairesp.Request{
-		Model:             providerModel,
+		Model:             opts.ProviderModel,
 		ParallelToolCalls: req.ParallelToolCalls,
 		MaxOutputTokens:   &outputCap,
 		Store:             false,
 		Stream:            req.Stream,
 		User:              req.User,
+	}
+	if !opts.DropSampling {
+		out.Temperature, out.TopP = req.Temperature, req.TopP
 	}
 
 	if req.ReasoningEffort != "" {

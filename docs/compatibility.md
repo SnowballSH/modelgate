@@ -20,13 +20,14 @@ the code is right and this page is the defect.
 - **Translated** — sent as the upstream's equivalent field.
 - **Rejected** — refused by modelgate with `400 invalid_request_error`
   before any upstream call; the message names the field, for example
-  `seed is not supported for anthropic models`.
+  `response_format is not supported for anthropic models`.
 - **Dropped** — accepted and not sent. Every drop is deliberate and listed
-  here with its reason.
+  here with its reason. A dropped sampling parameter is also named in the
+  response header `X-Modelgate-Dropped-Params` (see below).
 
 modelgate decodes every request into a fixed subset of the Chat
 Completions request (`internal/oai`). A field outside that subset —
-`prompt_cache_key`, `metadata`, `store`, `service_tier`, `logit_bias`,
+`prompt_cache_key`, `metadata`, `store`, `service_tier`,
 `modalities`, `audio`, `prediction`, `web_search_options`, `verbosity`
 and any other — is **dropped on every upstream, the passthrough
 included**. The matrix below covers the subset.
@@ -48,11 +49,11 @@ included**. The matrix below covers the subset.
 | `max_completion_tokens` | Translated: `max_tokens`. Preferred over `max_tokens` when both are set. | Supported. | Translated: `max_output_tokens`, which caps reasoning and visible output together. Preferred over `max_tokens`. |
 | `max_tokens` | Translated: `max_tokens`. | Supported. | Translated: `max_output_tokens`. |
 | neither cap | The gateway's default (`DEFAULT_MAX_TOKENS`). | `max_completion_tokens` set to the gateway's default. | `max_output_tokens` set to the gateway's default. |
-| `temperature`, `top_p` | Translated when no `reasoning_effort` is set; dropped when one is, because effort-capable models refuse them. Models released after Claude Opus 4.6 accept only `temperature: 1.0` and `top_p >= 0.99`; other values come back as a 400 with the upstream's reason in the log. | Supported. | Dropped: the reasoning models behind this upstream accept only their defaults. |
-| `frequency_penalty`, `presence_penalty`, `seed` | Rejected. | Supported. | Rejected. |
+| `temperature`, `top_p` | Translated when the row allows sampling and no `reasoning_effort` is set; dropped when the row declares `sampling: false` or an effort is set, because effort-capable models refuse them. | Supported; dropped when the row declares `sampling: false`. | Dropped unless the row declares `sampling: true`: the reasoning models behind this upstream accept only their defaults. |
+| `frequency_penalty`, `presence_penalty`, `seed`, `logit_bias` | Dropped (since `v0.7.0`; rejected before): the Messages API has no equivalent. | Supported (`logit_bias` since `v0.7.0`). | Dropped (since `v0.7.0`; rejected before). |
 | `n` | `1` accepted; anything else rejected. | Supported. | `1` accepted; anything else rejected. |
-| `logprobs`, `top_logprobs` | `logprobs: true` and `top_logprobs > 0` rejected; `false` and `0` accepted. | Supported, and the returned `logprobs` reach the client (since `v0.6.0`). | `logprobs: true` and `top_logprobs > 0` rejected. |
-| `stop` | Translated: `stop_sequences`; empty strings are ignored. | Supported. | Rejected when it names any sequence: the Responses API has no stop parameter. `null`, `""` and `[]` are accepted. |
+| `logprobs`, `top_logprobs` | Dropped (since `v0.7.0`): the response carries no log probabilities. | Supported, and the returned `logprobs` reach the client (since `v0.6.0`). | Dropped (since `v0.7.0`). |
+| `stop` | Translated: `stop_sequences`; empty strings are ignored. | Supported. | Dropped (since `v0.7.0`): the Responses API has no stop parameter. A value that is neither a string nor a list of strings is rejected. |
 | `stream` | Translated. | Supported. | Translated. |
 | `stream_options.include_usage` | The gateway emits a final usage chunk when asked. | The gateway always asks the upstream for usage (so an aborted stream can be billed) and forwards the usage chunk only when the client asked. | The gateway emits a final usage chunk when asked. |
 | `tools` (type `function`) | Translated: `name`, `description`, `input_schema`; a tool with no `parameters` gets `{"type":"object"}`. | Supported. | Translated: flat function tools with `strict: false`. |
@@ -76,6 +77,24 @@ on every upstream, the passthrough included. Anything undeclared reaches
 the upstream, which answers 400; the client gets `400
 invalid_request_error` with modelgate's fixed message, and the upstream's
 reason is in the log.
+
+### `X-Modelgate-Dropped-Params`
+
+A chat client sends sampling parameters by default, so the translated
+upstreams drop the ones they cannot honour instead of refusing the
+request. The response — a JSON body or a stream — names what was removed:
+
+```
+X-Modelgate-Dropped-Params: temperature, seed
+```
+
+The value lists, comma-and-space separated and always in this order, the
+parameters the request carried that were not forwarded: `temperature`,
+`top_p`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`,
+`top_logprobs`, `logit_bias`, `stop`. A neutral value is not a drop
+(`frequency_penalty: 0`, `logprobs: false`, `top_logprobs: 0`,
+`logit_bias: {}`, an empty `stop`, any `null`), and the header is absent
+when nothing was dropped.
 
 ## Response fields
 
@@ -194,9 +213,7 @@ alone.
 Documented, not built:
 
 - Images, audio and files on the translated upstreams.
-- `n > 1`, log probabilities, `frequency_penalty`, `presence_penalty` and
-  `seed` on the translated upstreams.
-- `stop` on the Responses upstream.
+- `n > 1` on the translated upstreams.
 - `response_format` on Anthropic models (the Messages API's structured
   outputs are a different shape and are not translated).
 - Returning Claude's thinking, or Responses reasoning items, to the client.

@@ -222,10 +222,11 @@ declares `price_tiers`, and admission reserves at the dearest tier.
 | Request field | Handling |
 |---|---|
 | `reasoning_effort` | Translated to `output_config.effort`. `none` and `minimal` map to `low`; `low`, `medium`, `high`, `xhigh` and `max` pass through; anything else is a 400. Omitting it leaves the model's default (`medium` on Claude Opus 5.5, `high` on most others). |
-| `temperature`, `top_p` | Forwarded, unless `reasoning_effort` is set: models that accept effort reject a temperature other than 1.0 and a `top_p` below 0.99, so effort displaces both. |
+| `temperature`, `top_p` | Forwarded, unless the row declares `sampling: false` or `reasoning_effort` is set: models that accept effort reject a temperature other than 1.0 and a `top_p` below 0.99, so effort displaces both. |
+| `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `logit_bias` | Dropped, and named in `X-Modelgate-Dropped-Params`. |
 | `stop` | Forwarded as `stop_sequences`. A `null`, an empty string, and a list with no non-empty entry all mean unset. |
 | `system`, `developer` messages | Folded into the `system` prompt, which carries a prompt-cache breakpoint. |
-| `response_format`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `n` other than 1 | Rejected with a 400. |
+| `response_format`, `n` other than 1 | Rejected with a 400. |
 
 Anthropic's list of effort-supporting models does not name
 `claude-haiku-4-5`, so a `reasoning_effort` on that model is refused
@@ -240,12 +241,12 @@ not reuse Anthropic's cached prefixes from earlier turns.
 | Request field | Handling |
 |---|---|
 | `reasoning_effort` | Sent as `reasoning.effort` unchanged; anything outside `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max` is a 400. Declare a model's accepted levels with `reasoning_efforts` to have modelgate refuse the rest; otherwise an unsupported level is refused upstream. |
-| `temperature`, `top_p` | Dropped: this upstream serves reasoning models, which accept only the default of either. |
+| `temperature`, `top_p` | Dropped unless the row declares `sampling: true`: this upstream serves reasoning models, which accept only the default of either. |
 | `max_completion_tokens`, `max_tokens` | Sent as `max_output_tokens`, which caps reasoning and visible output together. |
 | `system`, `developer` messages | Folded into `instructions`. |
 | `response_format` | Translated to `text.format`. |
-| `stop` | Rejected with a 400 when it names a stop sequence; `null`, `""` and a list with no non-empty entry are accepted as unset. |
-| `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `n` other than 1 | Rejected with a 400. |
+| `stop`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `logit_bias` | Dropped, and named in `X-Modelgate-Dropped-Params`. |
+| `n` other than 1 | Rejected with a 400. |
 
 Requests are sent with `store: false`, so nothing is retained upstream.
 The known cost of that: a Chat Completions history carries no reasoning

@@ -74,6 +74,13 @@ type AnthropicOptions struct {
 	ProviderModel        string
 	DefaultMaxTokens     int
 	DisablePromptCaching bool
+	DropSampling         bool
+}
+
+// Models that accept output_config.effort reject any temperature other than
+// 1.0 and any top_p below 0.99, so effort displaces both.
+func (o AnthropicOptions) dropsSampling(req oai.ChatRequest) bool {
+	return o.DropSampling || req.ReasoningEffort != ""
 }
 
 // ToAnthropic translates with prompt caching on, the default for every model.
@@ -83,10 +90,7 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 
 func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.MessagesRequest, error) {
 	if err := refuseUnsupported(req, "for anthropic models", map[string]bool{
-		"response_format":   req.ResponseFormat != nil,
-		"frequency_penalty": req.FrequencyPenalty != nil,
-		"presence_penalty":  req.PresencePenalty != nil,
-		"seed":              req.Seed != nil,
+		"response_format": req.ResponseFormat != nil,
 	}); err != nil {
 		return anthro.MessagesRequest{}, err
 	}
@@ -99,11 +103,10 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 		MaxTokens: maxOutputTokens(req, opts.DefaultMaxTokens),
 		Stream:    req.Stream,
 	}
-	// Models that accept output_config.effort reject any temperature other
-	// than 1.0 and any top_p below 0.99, so effort displaces both.
 	if effort != "" {
 		out.OutputConfig = &anthro.OutputConfig{Effort: effort}
-	} else {
+	}
+	if !opts.dropsSampling(req) {
 		out.Temperature = req.Temperature
 		out.TopP = req.TopP
 	}
@@ -146,20 +149,15 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 	return out, nil
 }
 
-// refuseUnsupported names the first field, in a fixed order, that the
-// upstream cannot honour, together with the fields both translated upstreams
-// refuse: more than one choice and token log probabilities.
+// refuseUnsupported names the first field, in alphabetical order, that the
+// upstream cannot honour and that dropping would change the answer's shape:
+// more than one choice, plus whatever the caller lists.
 func refuseUnsupported(req oai.ChatRequest, where string, specific map[string]bool) error {
-	common := map[string]bool{
-		"n other than 1": req.N != nil && *req.N != 1,
-		"logprobs":       req.Logprobs != nil && *req.Logprobs,
-		"top_logprobs":   req.TopLogprobs != nil && *req.TopLogprobs > 0,
-	}
-	for _, fields := range []map[string]bool{common, specific} {
-		for _, name := range slices.Sorted(maps.Keys(fields)) {
-			if fields[name] {
-				return fmt.Errorf("%s is not supported %s", name, where)
-			}
+	fields := map[string]bool{"n other than 1": req.N != nil && *req.N != 1}
+	maps.Copy(fields, specific)
+	for _, name := range slices.Sorted(maps.Keys(fields)) {
+		if fields[name] {
+			return fmt.Errorf("%s is not supported %s", name, where)
 		}
 	}
 	return nil

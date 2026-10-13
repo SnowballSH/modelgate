@@ -4,8 +4,8 @@ package oairesp
 
 import "encoding/json"
 
-// Request carries no temperature or top_p: this upstream serves reasoning
-// models, which accept only the default value of either.
+// Request carries temperature and top_p only for a model whose table row
+// declares sampling: true; reasoning models accept only the default of either.
 type Request struct {
 	Model             string          `json:"model"`
 	Instructions      string          `json:"instructions,omitempty"`
@@ -15,6 +15,8 @@ type Request struct {
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
 	Reasoning         *Reasoning      `json:"reasoning,omitempty"`
 	MaxOutputTokens   *int            `json:"max_output_tokens,omitempty"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	TopP              *float64        `json:"top_p,omitempty"`
 	Text              *TextConfig     `json:"text,omitempty"`
 	Store             bool            `json:"store"`
 	Stream            bool            `json:"stream,omitempty"`

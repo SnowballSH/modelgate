@@ -17,6 +17,7 @@ type ChatRequest struct {
 	N                   *int            `json:"n,omitempty"`
 	Logprobs            *bool           `json:"logprobs,omitempty"`
 	TopLogprobs         *int            `json:"top_logprobs,omitempty"`
+	LogitBias           json.RawMessage `json:"logit_bias,omitempty"`
 	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
 	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
