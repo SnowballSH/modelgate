@@ -7,19 +7,48 @@ import (
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/translate"
 )
 
 // promptOverheadTokens covers what a provider adds to the prompt beyond the
 // request body, such as the system text Anthropic injects for tool use.
 const promptOverheadTokens = 2048
 
+// imageTokenAllowance is the most prompt tokens one image is assumed to cost.
+// OpenAI documents at most 30,000 patches per image and a 1.2 multiplier on
+// its current vision models, so 36,000; Anthropic's documented maximum is
+// 4,784. An image is priced by this and never by its bytes: base64 data is
+// megabytes a provider bills as a few thousand tokens, and a URL is a few
+// bytes it bills the same way.
+const imageTokenAllowance = 36_000
+
+type promptSize struct {
+	textBytes   int
+	imageTokens int64
+}
+
+func measurePrompt(bodyBytes int, images translate.ImageLoad) promptSize {
+	return promptSize{
+		textBytes:   bodyBytes - images.InlineBytes,
+		imageTokens: int64(images.Count) * imageTokenAllowance,
+	}
+}
+
+func (p promptSize) worstCaseTokens() int64 {
+	return int64(p.textBytes) + p.imageTokens + promptOverheadTokens
+}
+
+func (p promptSize) estimatedTokens() int64 {
+	return int64((p.textBytes+3)/4) + p.imageTokens
+}
+
 // worstCaseDemand bounds what a request can consume. Every prompt token is
-// at least one byte of the body. The output bound is the largest output cap
+// at least one byte of the body's text, and an image is its allowance. The output bound is the largest output cap
 // any upstream path could apply: the translators send max_completion_tokens
 // when it is set and max_tokens otherwise, the passthrough sends both, the
 // model's default applies only when the request names neither, and n
 // multiplies the choices generated.
-func worstCaseDemand(req oai.ChatRequest, promptBytes, defaultMaxTokens, ceiling int) (accounting.Demand, error) {
+func worstCaseDemand(req oai.ChatRequest, prompt promptSize, defaultMaxTokens, ceiling int) (accounting.Demand, error) {
 	var caps []int
 	for _, field := range []struct {
 		name  string
@@ -48,7 +77,7 @@ func worstCaseDemand(req oai.ChatRequest, promptBytes, defaultMaxTokens, ceiling
 		return accounting.Demand{}, fmt.Errorf("the requested output (n times the max tokens) exceeds this gateway's ceiling of %d tokens", ceiling)
 	}
 	return accounting.Demand{
-		InputTokens:  int64(promptBytes) + promptOverheadTokens,
+		InputTokens:  prompt.worstCaseTokens(),
 		OutputTokens: int64(choices * perChoice),
 	}, nil
 }

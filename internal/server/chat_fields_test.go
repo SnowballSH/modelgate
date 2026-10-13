@@ -246,3 +246,72 @@ func TestReasoningEffortDisplacesSamplingOnTheWire(t *testing.T) {
 		t.Errorf("claude-plain with a reasoning effort received temperature %v, top_p %v", got.Temperature, got.TopP)
 	}
 }
+
+func TestRefusedRequestsHoldNoReservationOrSlot(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		body  string
+	}{
+		{"translation refusal on anthropic", "claude-chat", `{"model":"claude-chat","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{}}]}]}`},
+		{"translation refusal on responses", "gpt-vision", `{"model":"gpt-vision","messages":[{"role":"user","content":[{"type":"input_audio","input_audio":{}}]}]}`},
+		{"output bound on anthropic", "claude-chat", chatReadyRequest("claude-chat", `"max_tokens":0,`)},
+		{"output bound on the passthrough", "gpt-pass", chatReadyRequest("gpt-pass", `"n":0,`)},
+		{"output above the ceiling", "claude-chat", chatReadyRequest("claude-chat", `"max_tokens":999999999,`)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env, capture, auth := chatReadyEnv(t)
+			rec := doDual(env, auth, tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body %s", rec.Code, rec.Body.String())
+			}
+			if reserved := env.acct.Reserved(); reserved != 0 || len(env.guards.slots) != 0 {
+				t.Errorf("reservation USD %v and %d slots held after a refusal, want none", reserved, len(env.guards.slots))
+			}
+			if len(capture.bodies) != 0 || len(*env.openaiCalls) != 0 {
+				t.Errorf("a refused request reached an upstream")
+			}
+		})
+	}
+}
+
+func TestUnknownModelWithInvalidCapsIsNotFound(t *testing.T) {
+	env, _, auth := chatReadyEnv(t)
+	rec := doDual(env, auth, chatReadyRequest("no-such-model", `"max_tokens":0,"n":0,`))
+	if rec.Code != http.StatusNotFound || decodeErrorCode(t, rec) != CodeModelNotFound {
+		t.Errorf("status = %d, body %s; want 404 %s before the caps are examined", rec.Code, rec.Body.String(), CodeModelNotFound)
+	}
+}
+
+func TestDroppedParamsHeaderPrecedesEveryStream(t *testing.T) {
+	streams := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/responses" {
+			openaiResponsesStreamHandler()(w, r)
+			return
+		}
+		openaiStreamHandler()(w, r)
+	}
+	tests := []struct {
+		name   string
+		model  string
+		fields string
+		want   string
+	}{
+		{"responses stream", "gpt-vision", `"stream":true,"temperature":0.7,"seed":7,`, "temperature, seed"},
+		{"passthrough stream", "gpt-pass", `"stream":true,"temperature":0.7,`, "temperature"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newDualEnvWithTable(t, chatReadyModelJSON, streams, (&upstreamCapture{}).anthropic(), 100)
+			auth, _ := insertTestKey(t, env.store, nil)
+			rec := doDual(env, auth, chatReadyRequest(tc.model, tc.fields))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Values(translate.DroppedParamsHeader); len(got) != 1 || got[0] != tc.want {
+				t.Errorf("%s = %v, want %q", translate.DroppedParamsHeader, got, tc.want)
+			}
+		})
+	}
+}

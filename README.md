@@ -126,7 +126,7 @@ request can never run.
 | `reasoning_efforts` | Optional list of the `reasoning_effort` levels the model accepts, compared against the request's `reasoning_effort` before translation and drawn from `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (exact, lowercase). A request naming any other level gets a 400 of its own. Omitted or `null` accepts every level; an empty list or an unknown level refuses the table. |
 | `default_max_tokens` | Optional integer, 1–128000: the output cap sent when a request names neither `max_completion_tokens` nor `max_tokens`. Absent, the gateway's `DEFAULT_MAX_TOKENS` applies. A value above `MAX_OUTPUT_TOKENS` refuses startup. |
 | `sampling` | Optional boolean: whether `temperature` and `top_p` are forwarded. `false` removes both before the provider call. Absent means `true` on `anthropic` and `chat_completions` rows and `false` on `responses` rows. |
-| `image_input` | Optional boolean, default `false`. `true` translates `image_url` content parts on `anthropic` and `responses` rows; otherwise such a request gets a 400 naming the model. A `chat_completions` row forwards content parts unchanged either way. |
+| `image_input` | Optional boolean, default `false`. `true` translates `image_url` content parts on `anthropic` and `responses` rows; otherwise such a request gets a 400 naming the model (`model <id> does not support image input`), whichever message role carries the image: the check runs before translation, so the translator's own `unsupported content part: image_url` surfaces only on a row with `image_input: true`, for an image in a `system`, `assistant` or `tool` message. A `chat_completions` row forwards content parts unchanged either way. |
 | `price_tiers` | Optional list of `{"above_input_tokens", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"}`. When a prompt's input tokens — uncached, cache-read and cache-write together — exceed a threshold, the whole request is booked at that tier's four prices. Thresholds are positive and strictly ascending and every price is positive; `[]` refuses the table. |
 | `cache_ttl` | Optional, `"5m"` (the default) or `"1h"`, `anthropic` rows only: the lifetime requested on every cache breakpoint. Set `cache_write_usd_per_mtok` to the price of that lifetime (2× input for `"1h"`, 1.25× for `"5m"`). |
 
@@ -271,8 +271,8 @@ then the provider's circuit breaker. A request the gateway cannot
 translate is therefore refused with a 400 before it holds any shared
 capacity.
 
-A response whose request carried sampling parameters the upstream cannot
-honour names them in `X-Modelgate-Dropped-Params`; see
+A response whose request carried parameters the upstream cannot honour
+or the row drops names every one of them in `X-Modelgate-Dropped-Params`; see
 [docs/compatibility.md](docs/compatibility.md).
 
 Every response carries `X-Request-ID`: the caller's own value when it is
@@ -383,24 +383,27 @@ monthly USD quota, and an expiry.
 Every completed request's token usage is priced from the model table and
 accumulated per key and globally by UTC calendar month. A model with
 `price_tiers` is priced by the prompt's total input tokens — uncached,
-cache-read and cache-write together: above a threshold the whole request,
-output and cache tokens included, is booked at that tier. A stream cut
-before the provider reported its prompt size is booked, on the estimated
-size, at the dearest tier. Reasoning tokens
-are part of the output count and are billed as output tokens; when the
-upstream reports them separately they are passed on in
+cache-read and cache-write together: above a threshold the whole
+request, output and cache tokens included, is booked at that tier. A
+stream cut before the provider reported its prompt size is booked, on
+the estimated size, at the dearest tier. Reasoning tokens are part of
+the output count and are billed as output tokens; when the upstream
+reports them separately they are passed on in
 `usage.completion_tokens_details.reasoning_tokens`.
 
 Admission reserves each request's worst-case cost — the body's bytes
-plus 2,048 tokens of overhead at the dearest input-side price of any
-tier, plus the largest output the request allows at the dearest output
-price — and holds it until the real usage is
-booked. A request is admitted only while
-recorded spend plus every reservation stays below the key quota and the
-budget, so concurrent requests can overshoot a cap by at most one
-request's bound. Recorded spend at a cap answers `insufficient_quota`; a
-cap held only by reservations answers the retryable `cap_reserved`.
-The output bound is the request's own cap when it names one, and otherwise the model's `default_max_tokens` (or `DEFAULT_MAX_TOKENS`).
+(less any inline image data) plus 36,000 tokens per image and 2,048
+tokens of overhead at the dearest input-side price of any tier, plus the
+largest output the request allows at the dearest output price — and
+holds it until the real usage is booked. An image is charged that
+allowance whether it arrives inline or as an `https://` URL, and never
+by its bytes. A request is admitted only while recorded spend plus every
+reservation stays below the key quota and the budget, so concurrent
+requests can overshoot a cap by at most one request's bound. Recorded
+spend at a cap answers `insufficient_quota`; a cap held only by
+reservations answers the retryable `cap_reserved`. The output bound is
+the request's own cap when it names one, and otherwise the model's
+`default_max_tokens` (or `DEFAULT_MAX_TOKENS`).
 
 A stream cut before its final usage event is booked from an estimate:
 output of at least one token per four streamed characters, and the whole

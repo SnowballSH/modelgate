@@ -7,7 +7,7 @@ upstream APIs. The model table chooses the upstream per model:
 | Upstream | Model table | What modelgate does |
 |---|---|---|
 | Anthropic Messages | `provider: anthropic` (the default) | Translates the request and the response, both ways, including streams. |
-| OpenAI Chat Completions | `provider: openai` | Passes the request through, substituting the model name and a default output cap. |
+| OpenAI Chat Completions | `provider: openai` | Passes the request through, substituting the model name and a default output cap, namespacing `prompt_cache_key` per gateway key, and removing `temperature` and `top_p` on a row that declares `sampling: false`. |
 | OpenAI Responses | `provider: openai`, `upstream_api: responses` | Translates the request and the response, both ways, including streams. |
 
 This page is the per-field contract as of `v0.7.0`. It describes the code
@@ -22,7 +22,7 @@ the code is right and this page is the defect.
   before any upstream call; the message names the field, for example
   `response_format is not supported for anthropic models`.
 - **Dropped** — accepted and not sent. Every drop is deliberate and listed
-  here with its reason. A dropped sampling parameter is also named in the
+  here with its reason. A dropped request parameter is also named in the
   response header `X-Modelgate-Dropped-Params` (see below).
 
 modelgate decodes every request into a fixed subset of the Chat
@@ -38,8 +38,10 @@ included**. The matrix below covers the subset.
 |---|---|---|---|
 | `model` | Translated: the table's `provider_model`. | Translated: the table's `provider_model`. | Translated: the table's `provider_model`. |
 | `system` / `developer` messages | Translated: messages from any position in the history are joined, in order, with a blank line into one `system` text block, which carries the prefix cache breakpoint. | Supported. | Translated: joined into `instructions`. |
-| `user` text content (string or `text` parts) | Translated: one text block per non-empty part; content with no text at all is rejected. | Supported. | Translated: `input_text` parts; content with no text is rejected. |
-| `image_url`, `input_audio`, `file` parts | Rejected (`unsupported content part`). | Supported. | Rejected. |
+| `user` text content (string or `text` parts) | Translated: one text block per non-empty part; content with neither text nor an image is rejected. | Supported. | Translated: `input_text` parts; content with neither text nor an image is rejected. |
+| `image_url` parts in a `user` message, on a row with `image_input: true` (since `v0.7.0`) | Translated: a `data:` URI becomes an `image` block with a `base64` source, an `https://` URL one with a `url` source. `detail` is dropped: the Messages API has none. | Supported. | Translated: an `input_image` part carrying the URL or the `data:` URI unchanged, and `detail` when it is `auto`, `low` or `high`. |
+| `image_url` parts on a row without `image_input`, or in a `system`, `assistant` or `tool` message | Rejected: `model <id> does not support image input` on such a row, `unsupported content part: image_url` in those roles. | Supported. | Rejected the same way. |
+| `input_audio`, `file` parts | Rejected (`unsupported content part`). | Supported. | Rejected. |
 | `assistant` text and `tool_calls` | Translated: a text block and `tool_use` blocks. | Supported. | Translated: a message item and `function_call` items correlated by `call_id` alone. |
 | `tool_calls[].function.arguments` `""` | Translated: `{}` (a call that took no arguments). | Supported. | Translated: `{}`. |
 | `tool_calls[].function.arguments` not JSON | Rejected. | Supported. | Rejected. |
@@ -111,6 +113,30 @@ That includes the case a row cannot override: on Anthropic rows a request's
 declares `sampling: true`, because the models that accept an effort refuse
 both, and the header then names them. A parameter outside the decoded
 subset is never listed, and neither is `prompt_cache_key`.
+
+### Images
+
+On the translated upstreams an image is a `data:` URI whose media type is
+`image/jpeg`, `image/png`, `image/gif` or `image/webp` — the set both
+providers document — with a base64 payload, or an `https://` URL. Anything
+else is a 400 naming what is wrong: another scheme (`http://` included),
+another media type, a `data:` URI that is not base64, or a `detail`
+outside `auto`, `low`, `high`. modelgate does not decode or measure the
+image; a provider that refuses its size or content answers 400.
+
+A row without `image_input: true` refuses every image with `model <id>
+does not support image input`, whichever role carries it, so that message
+wins over the translator's `unsupported content part: image_url`, which
+surfaces only on an image-capable row for an image outside a `user`
+message.
+
+For admission an image is 36,000 prompt tokens, inline or remote, never
+its bytes, and an inline image's base64 does not count toward the
+prompt's byte bound. 36,000 is OpenAI's documented ceiling for its
+current vision models (30,000 patches per image at 1.2 tokens a patch);
+Anthropic's documented maximum is 4,784 tokens. A request with a
+multi-megabyte image therefore reserves an image's cost, and still needs
+`MAX_BODY_BYTES` raised above its 1 MiB default to be read at all.
 
 ## Response fields
 
@@ -236,7 +262,7 @@ alone.
 
 Documented, not built:
 
-- Images, audio and files on the translated upstreams.
+- Audio and files on the translated upstreams; images in tool results.
 - `n > 1` on the translated upstreams.
 - `response_format` on Anthropic models (the Messages API's structured
   outputs are a different shape and are not translated).

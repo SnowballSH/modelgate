@@ -15,6 +15,7 @@ type failFunc func(code, message string)
 // once admitted.
 type preparedCall struct {
 	dropped []string
+	images  translate.ImageLoad
 	serve   func(ctx context.Context, call admittedCall, fail failFunc)
 }
 
@@ -56,6 +57,7 @@ func (h *PublicHandler) prepareAnthropic(req oai.ChatRequest, opts translate.Ant
 	}
 	return preparedCall{
 		dropped: opts.Dropped(req),
+		images:  translate.AnthropicImageLoad(areq),
 		serve: func(ctx context.Context, call admittedCall, _ failFunc) {
 			h.chatAnthropic(ctx, call, areq)
 		},
@@ -69,6 +71,7 @@ func (h *PublicHandler) prepareResponses(req oai.ChatRequest, opts translate.Res
 	}
 	return preparedCall{
 		dropped: opts.Dropped(req),
+		images:  translate.ResponsesImageLoad(rreq),
 		serve: func(ctx context.Context, call admittedCall, fail failFunc) {
 			h.chatResponses(ctx, call, rreq, fail)
 		},

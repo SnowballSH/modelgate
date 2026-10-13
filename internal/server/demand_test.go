@@ -5,6 +5,7 @@ import (
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/translate"
 )
 
 func intPtr(v int) *int { return &v }
@@ -26,7 +27,7 @@ func TestWorstCaseDemand(t *testing.T) {
 		{"at the ceiling", oai.ChatRequest{MaxTokens: intPtr(ceiling)}, ceiling},
 	}
 	for _, tc := range cases {
-		got, err := worstCaseDemand(tc.req, body, def, ceiling)
+		got, err := worstCaseDemand(tc.req, measurePrompt(body, translate.ImageLoad{}), def, ceiling)
 		if err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
@@ -44,7 +45,7 @@ func TestWorstCaseDemand(t *testing.T) {
 		"negative max_completion":    {MaxCompletionTokens: intPtr(-5)},
 		"zero n":                     {N: intPtr(0)},
 	} {
-		if _, err := worstCaseDemand(req, body, def, ceiling); err == nil {
+		if _, err := worstCaseDemand(req, measurePrompt(body, translate.ImageLoad{}), def, ceiling); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

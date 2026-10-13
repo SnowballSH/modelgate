@@ -217,7 +217,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		record = resolved
 		fail(CodeInvalidRequest, message)
 	}
-	if violation := limitViolation(req.Model, model.Limits, req, effort); violation != "" {
+	if violation := limitViolation(req.Model, model, req, effort); violation != "" {
 		failResolved(violation)
 		return
 	}
@@ -226,7 +226,8 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		failResolved(err.Error())
 		return
 	}
-	demand, err := worstCaseDemand(req, len(body), model.OutputCapDefault(h.defaultMaxTokens), h.maxOutputTokens)
+	prompt := measurePrompt(len(body), plan.images)
+	demand, err := worstCaseDemand(req, prompt, model.OutputCapDefault(h.defaultMaxTokens), h.maxOutputTokens)
 	if err != nil {
 		failResolved(err.Error())
 		return
@@ -256,7 +257,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 	}
 	ctx, cancel := context.WithTimeout(upstreamCtx, h.requestDeadline)
 	defer cancel()
-	plan.serve(ctx, admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, promptBytes: len(body), hidesOutput: mayHideOutput(adm.Model, effort)}, fail)
+	plan.serve(ctx, admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, prompt: prompt, hidesOutput: mayHideOutput(adm.Model, effort)}, fail)
 }
 
 func (h *PublicHandler) chatAnthropic(ctx context.Context, call admittedCall, areq anthro.MessagesRequest) {
@@ -292,14 +293,14 @@ type admittedCall struct {
 	adm         Admission
 	breaker     *provider.Breaker
 	observe     func(string)
-	promptBytes int
+	prompt      promptSize
 	hidesOutput bool
 }
 
 // meter starts the tally for a stream whose upstream request caps output
 // at outputCap tokens.
 func (c admittedCall) meter(outputCap int) streamMeter {
-	m := streamMeter{promptBytes: c.promptBytes}
+	m := streamMeter{prompt: c.prompt}
 	if c.hidesOutput {
 		m.hiddenOutputCap = int64(outputCap)
 	}
