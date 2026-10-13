@@ -230,7 +230,9 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 			if err != nil {
 				return "", nil, err
 			}
-			result = append(result, m)
+			if len(m.Content) > 0 {
+				result = append(result, m)
+			}
 		case "tool":
 			var blocks []anthro.ContentBlock
 			for ; i < len(messages) && messages[i].Role == "tool"; i++ {
@@ -274,8 +276,10 @@ func assistantMessage(msg oai.Message) (anthro.Message, error) {
 }
 
 // assistantParts reads an assistant message as the text and the tool calls a
-// history item should carry, refusing one that would render as neither. Both
-// translators build their assistant items from it, so the rules stay one rule.
+// history item should carry. Whitespace-only text is no text: a stopped or
+// regenerated reply leaves one in a chat client's history, and Anthropic
+// refuses the block. Both translators build their assistant items from it, and
+// both skip a turn that yields neither.
 func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
 	var text string
 	if len(msg.Content) > 0 {
@@ -283,7 +287,9 @@ func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
 		if err != nil {
 			return "", nil, err
 		}
-		text = content
+		if strings.TrimSpace(content) != "" {
+			text = content
+		}
 	}
 	calls := make([]oai.ToolCall, len(msg.ToolCalls))
 	for i, call := range msg.ToolCalls {
@@ -292,9 +298,6 @@ func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
 			return "", nil, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
 		}
 		calls[i] = call
-	}
-	if text == "" && len(calls) == 0 {
-		return "", nil, errors.New("assistant message has neither content nor tool calls")
 	}
 	return text, calls, nil
 }

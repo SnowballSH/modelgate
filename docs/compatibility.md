@@ -43,7 +43,7 @@ included**. The matrix below covers the subset.
 | `assistant` text and `tool_calls` | Translated: a text block and `tool_use` blocks. | Supported. | Translated: a message item and `function_call` items correlated by `call_id` alone. |
 | `tool_calls[].function.arguments` `""` | Translated: `{}` (a call that took no arguments). | Supported. | Translated: `{}`. |
 | `tool_calls[].function.arguments` not JSON | Rejected. | Supported. | Rejected. |
-| `assistant` with neither text nor tool calls | Rejected. | Supported. | Rejected. |
+| `assistant` with neither text nor tool calls (empty, `null` or whitespace-only content) | Skipped (since `v0.7.0`; rejected before): a stopped or regenerated reply leaves one in a chat client's history. Whitespace-only text beside tool calls is dropped and the calls kept. | Supported. | Skipped (since `v0.7.0`). |
 | `tool` messages | Translated: consecutive tool messages become one user turn of `tool_result` blocks; text content only. | Supported. | Translated: `function_call_output` items; `tool_call_id` required. |
 | message `name` | Dropped: the Messages API has no per-message name. | Supported. | Dropped: no per-item name. |
 | `max_completion_tokens` | Translated: `max_tokens`. Preferred over `max_tokens` when both are set. | Supported. | Translated: `max_output_tokens`, which caps reasoning and visible output together. Preferred over `max_tokens`. |

@@ -93,9 +93,6 @@ func TestToResponsesRejects(t *testing.T) {
 		"empty_user_content": func(r *oai.ChatRequest) {
 			r.Messages = append(r.Messages, oai.Message{Role: "user", Content: json.RawMessage(`""`)})
 		},
-		"assistant_without_content_or_tool_calls": func(r *oai.ChatRequest) {
-			r.Messages = append(r.Messages, oai.Message{Role: "assistant", Content: json.RawMessage(`null`)})
-		},
 		"invalid_tool_arguments": func(r *oai.ChatRequest) {
 			r.Messages = append(r.Messages, oai.Message{Role: "assistant", ToolCalls: []oai.ToolCall{{
 				ID:       "call_1",
