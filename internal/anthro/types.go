@@ -51,17 +51,26 @@ type Message struct {
 	Content []ContentBlock `json:"content"`
 }
 
-// ContentBlock covers the text, tool_use, and tool_result block shapes;
-// which fields are set depends on Type.
+// ContentBlock covers the text, image, tool_use, and tool_result block
+// shapes; which fields are set depends on Type.
 type ContentBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text,omitempty"`
+	Source    *ImageSource    `json:"source,omitempty"`
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
 	Input     json.RawMessage `json:"input,omitempty"`
 	ToolUseID string          `json:"tool_use_id,omitempty"`
 	Content   string          `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
+}
+
+// ImageSource.Type is "base64" (with MediaType and Data) or "url" (with URL).
+type ImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type,omitempty"`
+	Data      string `json:"data,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 type Tool struct {

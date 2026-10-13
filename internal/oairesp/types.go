@@ -60,13 +60,28 @@ func (i Item) MarshalJSON() ([]byte, error) {
 	}{item: item(i), Content: i.Text})
 }
 
-// ContentPart.Type is input_text for user parts, output_text for assistant
-// parts, and refusal for a declined one, which carries its explanation in
-// Refusal and leaves Text empty.
+// ContentPart.Type is input_text or input_image for user parts, output_text
+// for assistant parts, and refusal for a declined one, which carries its
+// explanation in Refusal and leaves Text empty. An input_image carries
+// ImageURL (an https URL or a data: URI) and no text key at all.
 type ContentPart struct {
-	Type    string `json:"type"`
-	Text    string `json:"text"`
-	Refusal string `json:"refusal,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Refusal  string `json:"refusal,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+func (p ContentPart) MarshalJSON() ([]byte, error) {
+	if p.Type != "input_image" {
+		type part ContentPart
+		return json.Marshal(part(p))
+	}
+	return json.Marshal(struct {
+		Type     string `json:"type"`
+		ImageURL string `json:"image_url"`
+		Detail   string `json:"detail,omitempty"`
+	}{Type: p.Type, ImageURL: p.ImageURL, Detail: p.Detail})
 }
 
 // Tool.Strict carries no omitempty: the Responses API defaults it to true and

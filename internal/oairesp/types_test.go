@@ -117,3 +117,24 @@ func TestItemMarshalsEmptyToolOutput(t *testing.T) {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 }
+
+func TestContentPartWireShapes(t *testing.T) {
+	cases := []struct {
+		part ContentPart
+		want string
+	}{
+		{ContentPart{Type: "input_text", Text: "hi"}, `{"type":"input_text","text":"hi"}`},
+		{ContentPart{Type: "output_text"}, `{"type":"output_text","text":""}`},
+		{ContentPart{Type: "input_image", ImageURL: "https://example.com/a.png"}, `{"type":"input_image","image_url":"https://example.com/a.png"}`},
+		{ContentPart{Type: "input_image", ImageURL: "https://example.com/a.png", Detail: "high"}, `{"type":"input_image","image_url":"https://example.com/a.png","detail":"high"}`},
+	}
+	for _, tc := range cases {
+		raw, err := json.Marshal(tc.part)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != tc.want {
+			t.Errorf("marshal %+v = %s, want %s", tc.part, raw, tc.want)
+		}
+	}
+}

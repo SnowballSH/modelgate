@@ -75,6 +75,7 @@ type AnthropicOptions struct {
 	DefaultMaxTokens     int
 	DisablePromptCaching bool
 	DropSampling         bool
+	ImageInput           bool
 }
 
 // Models that accept output_config.effort reject any temperature other than
@@ -132,7 +133,7 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 	}
 	out.ToolChoice = withParallelToolCalls(choice, req.ParallelToolCalls, len(tools) > 0)
 
-	system, messages, err := convertMessages(req.Messages)
+	system, messages, err := convertMessages(req.Messages, opts.ImageInput)
 	if err != nil {
 		return anthro.MessagesRequest{}, err
 	}
@@ -207,7 +208,7 @@ func markCacheBreakpoints(req *anthro.MessagesRequest) {
 	req.CacheControl = anthro.Ephemeral()
 }
 
-func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
+func convertMessages(messages []oai.Message, imageInput bool) (string, []anthro.Message, error) {
 	var systemParts []string
 	var result []anthro.Message
 	for i := 0; i < len(messages); i++ {
@@ -220,7 +221,7 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 			}
 			systemParts = append(systemParts, text)
 		case "user":
-			blocks, err := contentBlocks(msg.Content)
+			blocks, err := contentBlocks(msg.Content, imageInput)
 			if err != nil {
 				return "", nil, err
 			}
@@ -311,43 +312,71 @@ func normalizedArguments(arguments string) string {
 	return arguments
 }
 
-func contentBlocks(content json.RawMessage) ([]anthro.ContentBlock, error) {
-	texts, err := nonEmptyTexts(content)
+func contentBlocks(content json.RawMessage, imageInput bool) ([]anthro.ContentBlock, error) {
+	parts, err := userParts(content, imageInput)
 	if err != nil {
 		return nil, err
 	}
-	blocks := make([]anthro.ContentBlock, len(texts))
-	for i, text := range texts {
-		blocks[i] = anthro.ContentBlock{Type: "text", Text: text}
+	blocks := make([]anthro.ContentBlock, len(parts))
+	for i, part := range parts {
+		if part.image != nil {
+			blocks[i] = part.image.anthropicBlock()
+			continue
+		}
+		blocks[i] = anthro.ContentBlock{Type: "text", Text: part.text}
 	}
 	return blocks, nil
 }
 
-// nonEmptyTexts reads a message content field — a plain string or an array of
-// text parts — as the texts a content builder should render, refusing content
-// that carries no text at all. Both translators map over it.
-func nonEmptyTexts(content json.RawMessage) ([]string, error) {
+var errEmptyContent = errors.New("message content is empty")
+
+type userPart struct {
+	text  string
+	image *image
+}
+
+// userParts reads a user message's content — a plain string or an array of
+// text and image parts — as what a content builder should render, in order,
+// refusing content that carries nothing. Both translators map over it.
+func userParts(content json.RawMessage, imageInput bool) ([]userPart, error) {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
 		if s == "" {
-			return nil, errors.New("message content is empty")
+			return nil, errEmptyContent
 		}
-		return []string{s}, nil
+		return []userPart{{text: s}}, nil
 	}
-	parts, err := textParts(content)
-	if err != nil {
-		return nil, err
+	var raw []struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		ImageURL struct {
+			URL    string `json:"url"`
+			Detail string `json:"detail"`
+		} `json:"image_url"`
 	}
-	texts := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" {
-			texts = append(texts, part)
+	if err := json.Unmarshal(content, &raw); err != nil {
+		return nil, fmt.Errorf("invalid message content: %w", err)
+	}
+	parts := make([]userPart, 0, len(raw))
+	for _, p := range raw {
+		switch {
+		case p.Type == "text" && p.Text != "":
+			parts = append(parts, userPart{text: p.Text})
+		case p.Type == "text":
+		case p.Type == imagePartType && imageInput:
+			img, err := parseImage(p.ImageURL.URL, p.ImageURL.Detail)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, userPart{image: &img})
+		default:
+			return nil, fmt.Errorf("unsupported content part: %s", p.Type)
 		}
 	}
-	if len(texts) == 0 {
-		return nil, errors.New("message content is empty")
+	if len(parts) == 0 {
+		return nil, errEmptyContent
 	}
-	return texts, nil
+	return parts, nil
 }
 
 func contentText(content json.RawMessage) (string, error) {

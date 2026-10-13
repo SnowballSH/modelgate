@@ -14,6 +14,7 @@ type ResponsesOptions struct {
 	ProviderModel    string
 	DefaultMaxTokens int
 	DropSampling     bool
+	ImageInput       bool
 }
 
 // ToResponses translates for a reasoning model, which accepts only the
@@ -51,7 +52,7 @@ func ToResponsesWith(req oai.ChatRequest, opts ResponsesOptions) (oairesp.Reques
 		out.Reasoning = &oairesp.Reasoning{Effort: level}
 	}
 
-	instructions, items, err := responsesInput(req.Messages)
+	instructions, items, err := responsesInput(req.Messages, opts.ImageInput)
 	if err != nil {
 		return oairesp.Request{}, err
 	}
@@ -83,7 +84,7 @@ func ToResponsesWith(req oai.ChatRequest, opts ResponsesOptions) (oairesp.Reques
 // renders the rest as input items. Assistant tool calls go back without their
 // ids: a function_call carrying an id but no paired reasoning item is refused
 // upstream, and a Chat Completions history cannot carry reasoning items.
-func responsesInput(messages []oai.Message) (string, []oairesp.Item, error) {
+func responsesInput(messages []oai.Message, imageInput bool) (string, []oairesp.Item, error) {
 	var instructions []string
 	var items []oairesp.Item
 	for _, msg := range messages {
@@ -95,7 +96,7 @@ func responsesInput(messages []oai.Message) (string, []oairesp.Item, error) {
 			}
 			instructions = append(instructions, text)
 		case "user":
-			parts, err := responsesContentParts(msg.Content)
+			parts, err := responsesContentParts(msg.Content, imageInput)
 			if err != nil {
 				return "", nil, err
 			}
@@ -145,16 +146,20 @@ func responsesAssistantItems(msg oai.Message) ([]oairesp.Item, error) {
 	return items, nil
 }
 
-func responsesContentParts(content json.RawMessage) ([]oairesp.ContentPart, error) {
-	texts, err := nonEmptyTexts(content)
+func responsesContentParts(content json.RawMessage, imageInput bool) ([]oairesp.ContentPart, error) {
+	parts, err := userParts(content, imageInput)
 	if err != nil {
 		return nil, err
 	}
-	parts := make([]oairesp.ContentPart, len(texts))
-	for i, text := range texts {
-		parts[i] = oairesp.ContentPart{Type: "input_text", Text: text}
+	out := make([]oairesp.ContentPart, len(parts))
+	for i, part := range parts {
+		if part.image != nil {
+			out[i] = part.image.responsesPart()
+			continue
+		}
+		out[i] = oairesp.ContentPart{Type: "input_text", Text: part.text}
 	}
-	return parts, nil
+	return out, nil
 }
 
 func responsesTools(tools []oai.Tool) ([]oairesp.Tool, error) {
