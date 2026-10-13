@@ -68,6 +68,8 @@ Changed.
   gateway key.
 - Startup refuses a row whose `default_max_tokens` exceeds
   `MAX_OUTPUT_TOKENS`.
+- Built with Go 1.26.9, which fixes the standard-library vulnerabilities
+  `govulncheck` reported against 1.26.6 and 1.26.8.
 
 ### Upgrading
 
