@@ -54,7 +54,7 @@ func (m streamMeter) bookable(reported store.Usage) (store.Usage, bool) {
 	}
 	estimate := reported
 	estimate.OutputTokens = max(reported.OutputTokens, int64((m.outputChars+3)/4), m.hiddenOutputCap)
-	if reported.InputTokens+reported.CacheReadTokens+reported.CacheWriteTokens == 0 {
+	if reported.PromptTokens() == 0 {
 		estimate.InputTokens = int64((m.promptBytes + 3) / 4)
 	}
 	return estimate, true
@@ -81,7 +81,7 @@ func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicMo
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookingTimeout)
 	defer cancel()
 	now := h.now()
-	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.Pricing); err != nil {
+	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.PricingFor(usage.PromptTokens())); err != nil {
 		h.metrics.BookingFailed()
 		slog.Error("usage booking failed", "request_id", requestIDFrom(ctx), "key_id", adm.Key.ID,
 			"model", publicModel, "input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens, "err", err)

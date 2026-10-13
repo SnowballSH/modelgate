@@ -103,7 +103,7 @@ func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, model models.Mo
 	default:
 		return Admission{}, &Refusal{Code: CodeRateLimited, RetryAfter: slotRetryAfter}
 	}
-	reservation, err := g.acct.Reserve(ctx, now, key, accounting.WorstCaseCost(demand, model.Pricing))
+	reservation, err := g.acct.Reserve(ctx, now, key, accounting.WorstCaseCost(demand, model.WorstCasePricing()))
 	if err != nil {
 		<-g.slots
 		switch {

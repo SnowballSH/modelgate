@@ -374,15 +374,19 @@ monthly USD quota, and an expiry.
 ## Spend ceilings
 
 Every completed request's token usage is priced from the model table and
-accumulated per key and globally by UTC calendar month. Reasoning tokens
+accumulated per key and globally by UTC calendar month. A model with
+`price_tiers` is priced by the prompt's total input tokens — uncached,
+cache-read and cache-write together: above a threshold the whole request,
+output and cache tokens included, is booked at that tier. Reasoning tokens
 are part of the output count and are billed as output tokens; when the
 upstream reports them separately they are passed on in
 `usage.completion_tokens_details.reasoning_tokens`.
 
 Admission reserves each request's worst-case cost — the body's bytes
-plus 2,048 tokens of overhead at the dearest input-side price, plus the
-largest output the request allows at the output price — and holds it
-until the real usage is booked. A request is admitted only while
+plus 2,048 tokens of overhead at the dearest input-side price of any
+tier, plus the largest output the request allows at the dearest output
+price — and holds it until the real usage is
+booked. A request is admitted only while
 recorded spend plus every reservation stays below the key quota and the
 budget, so concurrent requests can overshoot a cap by at most one
 request's bound. Recorded spend at a cap answers `insufficient_quota`; a
