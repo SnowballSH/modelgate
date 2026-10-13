@@ -21,6 +21,7 @@ type Request struct {
 	Store             bool            `json:"store"`
 	Stream            bool            `json:"stream,omitempty"`
 	User              string          `json:"user,omitempty"`
+	PromptCacheKey    string          `json:"prompt_cache_key,omitempty"`
 }
 
 type Reasoning struct {

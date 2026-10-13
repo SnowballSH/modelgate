@@ -15,6 +15,7 @@ type ResponsesOptions struct {
 	DefaultMaxTokens int
 	DropSampling     bool
 	ImageInput       bool
+	PromptCacheKey   string
 }
 
 // ToResponses translates for a reasoning model, which accepts only the
@@ -39,6 +40,7 @@ func ToResponsesWith(req oai.ChatRequest, opts ResponsesOptions) (oairesp.Reques
 		Store:             false,
 		Stream:            req.Stream,
 		User:              req.User,
+		PromptCacheKey:    opts.PromptCacheKey,
 	}
 	if !opts.DropSampling {
 		out.Temperature, out.TopP = req.Temperature, req.TopP

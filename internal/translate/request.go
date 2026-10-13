@@ -76,6 +76,7 @@ type AnthropicOptions struct {
 	DisablePromptCaching bool
 	DropSampling         bool
 	ImageInput           bool
+	CacheTTL             string
 }
 
 // Models that accept output_config.effort reject any temperature other than
@@ -145,7 +146,7 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 	}
 	out.Messages = messages
 	if !opts.DisablePromptCaching {
-		markCacheBreakpoints(&out)
+		markCacheBreakpoints(&out, opts.CacheTTL)
 	}
 	return out, nil
 }
@@ -196,16 +197,17 @@ func withParallelToolCalls(choice *anthro.ToolChoice, parallel *bool, hasTools b
 // markCacheBreakpoints puts one explicit breakpoint at the end of the static
 // prefix (tools render before system, so the last system block covers both)
 // and turns on the request-level automatic breakpoint, which follows the end
-// of the conversation turn by turn. Prefixes under the model's minimum are
-// not cached and cost nothing extra.
-func markCacheBreakpoints(req *anthro.MessagesRequest) {
+// of the conversation turn by turn. Every breakpoint carries the same
+// lifetime: the API refuses a longer one placed after a shorter one. Prefixes
+// under the model's minimum are not cached and cost nothing extra.
+func markCacheBreakpoints(req *anthro.MessagesRequest, ttl string) {
 	switch {
 	case len(req.System) > 0:
-		req.System[len(req.System)-1].CacheControl = anthro.Ephemeral()
+		req.System[len(req.System)-1].CacheControl = anthro.Ephemeral(ttl)
 	case len(req.Tools) > 0:
-		req.Tools[len(req.Tools)-1].CacheControl = anthro.Ephemeral()
+		req.Tools[len(req.Tools)-1].CacheControl = anthro.Ephemeral(ttl)
 	}
-	req.CacheControl = anthro.Ephemeral()
+	req.CacheControl = anthro.Ephemeral(ttl)
 }
 
 func convertMessages(messages []oai.Message, imageInput bool) (string, []anthro.Message, error) {

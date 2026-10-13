@@ -23,13 +23,15 @@ type MessagesRequest struct {
 	CacheControl  *CacheControl `json:"cache_control,omitempty"`
 }
 
-// CacheControl.Type is always "ephemeral", the five-minute prompt cache.
+// CacheControl.Type is always "ephemeral". An empty TTL is the five-minute
+// prompt cache; "1h" asks for the one-hour cache, whose writes cost more.
 type CacheControl struct {
 	Type string `json:"type"`
+	TTL  string `json:"ttl,omitempty"`
 }
 
-func Ephemeral() *CacheControl {
-	return &CacheControl{Type: "ephemeral"}
+func Ephemeral(ttl string) *CacheControl {
+	return &CacheControl{Type: "ephemeral", TTL: ttl}
 }
 
 type TextBlock struct {
