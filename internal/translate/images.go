@@ -85,7 +85,7 @@ func isStandardBase64(data string) bool {
 	}
 	for i := range len(body) {
 		c := body[i]
-		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/') {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '+' && c != '/' {
 			return false
 		}
 	}
