@@ -40,10 +40,14 @@ func (h *PublicHandler) prepare(req oai.ChatRequest, model models.Model, keyID s
 			PromptCacheKey:   cacheKey,
 		})
 	default:
+		imageParts, err := translate.CountImageParts(req.Messages)
+		if err != nil {
+			return preparedCall{}, err
+		}
 		up := passthroughRequest(req, model, outputCap, cacheKey)
 		return preparedCall{
 			dropped: translate.PassthroughDropped(req, model.DropsSampling),
-			images:  translate.ImageLoad{Count: translate.CountImageParts(req.Messages)},
+			images:  translate.ImageLoad{Count: imageParts},
 			serve: func(ctx context.Context, call admittedCall, _ failFunc) {
 				h.chatOpenAI(ctx, call, up)
 			},

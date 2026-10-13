@@ -269,7 +269,11 @@ upstream, the output bounds, a concurrency slot, a reservation of the
 request's worst-case cost against the key quota and the monthly budget,
 then the provider's circuit breaker. A request the gateway cannot
 translate is therefore refused with a 400 before it holds any shared
-capacity.
+capacity. On a `chat_completions` row that includes a message whose
+`content` is neither a string, `null` nor an array of JSON objects with
+string `type` fields (`invalid message content: ...`), because the
+gateway counts that row's image parts before forwarding them; v0.6.0
+forwarded such content unread.
 
 A response whose request carried parameters the upstream cannot honour
 or the row drops names every one of them in `X-Modelgate-Dropped-Params`; see
@@ -400,13 +404,17 @@ also charged a fixed allowance, whether it arrives inline or as an
 row. On the translated upstreams an inline image's base64 is then not
 counted as text; on a `chat_completions` row, whose content parts are
 forwarded unread, the image parts are counted by type and their bytes
-stay counted. A request is admitted only while recorded spend plus every
-reservation stays below the key quota and the budget, so concurrent
-requests can overshoot a cap by at most one request's bound. Recorded
-spend at a cap answers `insufficient_quota`; a cap held only by
-reservations answers the retryable `cap_reserved`. The output bound is
-the request's own cap when it names one, and otherwise the model's
-`default_max_tokens` (or `DEFAULT_MAX_TOKENS`).
+stay counted. The bound assumes a provider bills an image block by its
+dimensions, never by tokenising its bytes as text, and rejects a payload
+that is not an image; on a `chat_completions` row, non-image parts such
+as `file` are forwarded unread and bounded by their bytes only. A
+request is admitted only while recorded spend plus every reservation
+stays below the key quota and the budget, so concurrent requests can
+overshoot a cap by at most one request's bound. Recorded spend at a cap
+answers `insufficient_quota`; a cap held only by reservations answers
+the retryable `cap_reserved`. The output bound is the request's own cap
+when it names one, and otherwise the model's `default_max_tokens` (or
+`DEFAULT_MAX_TOKENS`).
 
 A stream cut before its final usage event is booked from an estimate:
 output of at least one token per four streamed characters, and the whole

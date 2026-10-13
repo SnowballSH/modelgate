@@ -121,8 +121,8 @@ On the translated upstreams an image is a `data:` URI whose media type is
 providers document — with a base64 payload, or an `https://` URL. Anything
 else is a 400 naming what is wrong: another scheme (`http://` included),
 another media type, a `data:` URI that is not base64 or whose payload
-strays outside the standard alphabet (`A-Z a-z 0-9 + /`, with `=` only at
-the end: no URL-safe `-` `_`, no whitespace), or a `detail` outside
+strays outside the standard alphabet (`A-Z a-z 0-9 + /`, in whole
+four-character groups, `=` only at the end: no URL-safe `-` `_`, no whitespace), or a `detail` outside
 `auto`, `low`, `high`. modelgate does not decode or measure the image; a
 provider that refuses its size or content answers 400.
 
@@ -136,8 +136,15 @@ For admission every image is a fixed number of prompt tokens, inline or
 remote, on all three upstreams. On the translated upstreams the image's
 base64 also stops counting toward the prompt's byte bound; the
 `chat_completions` passthrough forwards content parts unread, so it
-counts its `image_url` parts by type and charges the allowance for each,
-and its bytes stay counted as text (over-counting is the safe side). The
+counts its `image_url` parts by walking every key of every part (a part
+counts when any key spelled `type` or `image_url`, in any letter case,
+names an image) and charges the allowance for each; its bytes stay
+counted as text (over-counting is the safe side). The passthrough
+refuses, with a 400 `invalid message content: ...` before admission, a
+message whose `content` is neither a string, `null` nor an array of JSON
+objects with string `type` fields; v0.6.0 forwarded such content
+unread. Non-image parts such as `file` are still forwarded unread and
+bounded by their bytes only. The
 number follows the row's upstream:
 
 | Row | Tokens per image | Source |

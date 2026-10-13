@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
+	"github.com/SnowballSH/modelgate/internal/oai"
 	"github.com/SnowballSH/modelgate/internal/oairesp"
 )
 
@@ -96,6 +97,8 @@ func TestUnusableImagesAreRefused(t *testing.T) {
 		{"padding before the end", `{"url":"data:image/png;base64,AA=AAAAA"}`, alphabetMessage},
 		{"more than two padding characters", `{"url":"data:image/png;base64,AAAAA==="}`, alphabetMessage},
 		{"non-ascii", `{"url":"data:image/png;base64,AAAA\u00ffAAAA"}`, alphabetMessage},
+		{"only padding", `{"url":"data:image/png;base64,===="}`, alphabetMessage},
+		{"length not a multiple of four", `{"url":"data:image/png;base64,AAAAA"}`, alphabetMessage},
 		{"unknown detail", `{"url":"` + pngDataURI + `","detail":"ultra"}`, `image_url.detail "ultra" is not one of auto, low, high`},
 	}
 	for _, tc := range cases {
@@ -266,15 +269,57 @@ func TestStandardBase64WithTrailingPaddingIsAccepted(t *testing.T) {
 	}
 }
 
-func TestCountImageParts(t *testing.T) {
-	cases := map[string]int{
-		visionTurn: 2,
-		`{"messages":[{"role":"user","content":"a string mentioning image_url"}]}`:                                                                              0,
-		`{"messages":[{"role":"user","content":[{"type":"image_url"},{"type":"text"},{"type":"image_url"}]},{"role":"user","content":[{"type":"image_url"}]}]}`: 3,
+func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
+	const image = `{"url":"https://example.com/a.png"}`
+	cases := []struct {
+		name    string
+		content string
+		want    int
+		refused string
+	}{
+		{"plain image", `[{"type":"image_url","image_url":` + image + `}]`, 1, ""},
+		{"text only", `[{"type":"text","text":"hi"}]`, 0, ""},
+		{"string content", `"an image_url in prose"`, 0, ""},
+		{"no content", ``, 0, ""},
+		{"null content", `null`, 0, ""},
+		{"shadowing Type key", `[{"type":"image_url","Type":"x","image_url":` + image + `}]`, 1, ""},
+		{"shadowing TYPE after the real key", `[{"type":"image_url","TYPE":"text","image_url":` + image + `}]`, 1, ""},
+		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text","image_url":` + image + `}]`, 1, ""},
+		{"duplicate type, last is text", `[{"type":"image_url","type":"text","image_url":` + image + `}]`, 1, ""},
+		{"escaped type value", `[{"type":"image\u005furl"}]`, 1, ""},
+		{"only a differently cased type key", `[{"Type":"image_url"}]`, 1, ""},
+		{"image_url key without type", `[{"image_url":` + image + `}]`, 1, ""},
+		{"differently cased image_url key", `[{"type":"text","Image_URL":` + image + `}]`, 1, ""},
+		{"image_url nested in another key is not a part", `[{"type":"text","meta":{"image_url":1}}]`, 0, ""},
+		{"two images", `[{"type":"image_url"},{"type":"text"},{"type":"image_url"}]`, 2, ""},
+		{"non-string type", `[{"type":"image_url","Type":5}]`, 0, "invalid message content: a content part's type must be a string"},
+		{"sibling with a non-string type", `[{"type":"image_url"},{"type":5}]`, 0, "invalid message content: a content part's type must be a string"},
+		{"bare string element", `[{"type":"image_url"},"x"]`, 0, "invalid message content: content parts must be objects"},
+		{"nested array element", `[[{"type":"image_url"}]]`, 0, "invalid message content: content parts must be objects"},
+		{"object content", `{"type":"image_url"}`, 0, "invalid message content: content must be a string or an array of content parts"},
+		{"number content", `5`, 0, "invalid message content: content must be a string or an array of content parts"},
+		{"truncated array", `[{"type":"image_url"}`, 0, "invalid message content: content is not valid JSON"},
+		{"trailing data", `[{"type":"image_url"}] 1`, 0, "invalid message content: content is not valid JSON"},
 	}
-	for body, want := range cases {
-		if got := CountImageParts(chatRequest(t, body).Messages); got != want {
-			t.Errorf("CountImageParts(%.60s…) = %d, want %d", body, got, want)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CountImageParts([]oai.Message{{Role: "user", Content: json.RawMessage(tc.content)}})
+			switch {
+			case tc.refused != "" && (err == nil || err.Error() != tc.refused):
+				t.Errorf("err = %v, want %q", err, tc.refused)
+			case tc.refused == "" && err != nil:
+				t.Errorf("err = %v, want none", err)
+			case tc.refused == "" && got != tc.want:
+				t.Errorf("count = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountImagePartsSumsAcrossMessages(t *testing.T) {
+	req := chatRequest(t, visionTurn)
+	got, err := CountImageParts(append(req.Messages, req.Messages...))
+	if err != nil || got != 4 {
+		t.Errorf("count = %d, %v; want 4", got, err)
 	}
 }

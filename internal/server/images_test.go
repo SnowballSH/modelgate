@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -362,36 +363,103 @@ func TestWellFormedImageReservesTextPlusTheAllowance(t *testing.T) {
 	}
 }
 
-func TestPassthroughImagesAreChargedTheAllowanceAndKeepTheirBytes(t *testing.T) {
-	text := strings.Repeat("t", 1000)
-	plain := `{"model":"gpt-pass","max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"` + text + `"}]}]}`
-	withImages := `{"model":"gpt-pass","max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"` + text + `"},` +
-		`{"type":"image_url","image_url":{"url":"` + inlineImagePrefix + strings.Repeat("A", 5000) + `"}},` +
-		`{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}]}`
+func decodeErrorMessage(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body oai.ErrorBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode %.200q: %v", rec.Body.String(), err)
+	}
+	return body.Error.Message
+}
 
-	reservedFor := func(body string) float64 {
-		var env *dualEnv
-		var reserved float64
-		chat := openaiChatResponse()
-		env = newDualEnvWithTable(t, chatReadyModelJSON, func(w http.ResponseWriter, r *http.Request) {
-			reserved = env.acct.Reserved()
-			chat(w, r)
-		}, fullResponseHandler(), 100)
-		auth, _ := insertTestKey(t, env.store, nil)
-		if rec := doDual(env, auth, body); rec.Code != http.StatusOK {
-			t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
+func passthroughChatBody(content string) string {
+	return `{"model":"gpt-pass","max_tokens":1000,"messages":[{"role":"user","content":` + content + `}]}`
+}
+
+func passthroughReservation(t *testing.T, body string) (reserved float64, rec *httptest.ResponseRecorder, env *dualEnv) {
+	t.Helper()
+	chat := openaiChatResponse()
+	env = newDualEnvWithTable(t, chatReadyModelJSON, func(w http.ResponseWriter, r *http.Request) {
+		reserved = env.acct.Reserved()
+		chat(w, r)
+	}, fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+	return reserved, doDual(env, auth, body), env
+}
+
+func TestPassthroughImageCountCannotBeShadowedOrZeroed(t *testing.T) {
+	const image = `"image_url":{"url":"https://example.com/a.png"}`
+	tests := []struct {
+		name    string
+		content string
+		images  int64
+		refused bool
+	}{
+		{"plain image", `[{"type":"image_url",` + image + `}]`, 1, false},
+		{"shadowing Type key", `[{"type":"image_url","Type":"x",` + image + `}]`, 1, false},
+		{"shadowing TYPE key", `[{"type":"image_url","TYPE":"text",` + image + `}]`, 1, false},
+		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text",` + image + `}]`, 1, false},
+		{"duplicate type, last is text", `[{"type":"image_url","type":"text",` + image + `}]`, 1, false},
+		{"differently cased type only", `[{"Type":"image_url",` + image + `}]`, 1, false},
+		{"image_url key without type", `[{` + image + `}]`, 1, false},
+		{"two images beside text", `[{"type":"text","text":"hi"},{"type":"image_url",` + image + `},{"type":"image_url",` + image + `}]`, 2, false},
+		{"non-string Type key", `[{"type":"image_url","Type":5,` + image + `}]`, 0, true},
+		{"sibling with a non-string type", `[{"type":"image_url",` + image + `},{"type":5}]`, 0, true},
+		{"bare string element", `[{"type":"image_url",` + image + `},"x"]`, 0, true},
+		{"nested array", `[[{"type":"image_url",` + image + `}]]`, 0, true},
+		{"object content", `{"type":"image_url",` + image + `}`, 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := passthroughChatBody(tc.content)
+			reserved, rec, env := passthroughReservation(t, body)
+			if tc.refused {
+				if rec.Code != http.StatusBadRequest || !strings.HasPrefix(decodeErrorMessage(t, rec), "invalid message content: ") {
+					t.Errorf("status %d, body %s; want a 400 invalid message content", rec.Code, rec.Body.String())
+				}
+				if reserved != 0 || env.acct.Reserved() != 0 || len(*env.openaiCalls) != 0 {
+					t.Errorf("a refused request reserved USD %v or reached the upstream", reserved)
+				}
+				return
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
+			}
+			floor := (float64(int64(len(body))+tc.images*openAIImageTokenAllowance+promptOverheadTokens) + 1000) / 1e6
+			if reserved < floor-1e-9 {
+				t.Errorf("reservation = USD %v, below %v: %d image(s) must be charged %d tokens each", reserved, floor, tc.images, openAIImageTokenAllowance)
+			}
+		})
+	}
+}
+
+func TestPassthroughStringAndNullContentAreUntouched(t *testing.T) {
+	for _, content := range []string{`"hello"`, `null`} {
+		if _, rec, _ := passthroughReservation(t, passthroughChatBody(content)); rec.Code != http.StatusOK {
+			t.Errorf("content %s: status = %d, body %.200s", content, rec.Code, rec.Body.String())
 		}
-		return reserved
 	}
-	extraBytes := len(withImages) - len(plain)
-	want := (float64(extraBytes)*1 + 2*openAIImageTokenAllowance) / 1e6
-	if got := reservedFor(withImages) - reservedFor(plain); math.Abs(got-want) > 1e-9 {
-		t.Errorf("two images raised the reservation by USD %v, want %v: the allowance each plus their bytes as text", got, want)
-	}
+}
 
-	prompt := measurePrompt(len(withImages), translate.ImageLoad{Count: 2}, openAIImageTokenAllowance)
-	if got, floor := prompt.estimatedTokens(), measurePrompt(len(plain), translate.ImageLoad{}, openAIImageTokenAllowance).estimatedTokens()+2*openAIImageTokenAllowance; got < floor {
-		t.Errorf("estimate = %d, below %d", got, floor)
+func TestPassthroughCutStreamEstimateChargesEachImage(t *testing.T) {
+	truncated := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-pass\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"twelve chars\"},\"finish_reason\":null}]}\n\n")
+	}
+	env := newDualEnvWithTable(t, chatReadyModelJSON, truncated, fullResponseHandler(), 100)
+	auth, _ := insertTestKey(t, env.store, nil)
+	body := `{"model":"gpt-pass","stream":true,"max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"hi"},` +
+		`{"type":"image_url","image_url":{"url":"` + inlineImagePrefix + strings.Repeat("A", 4000) + `"}},` +
+		`{"type":"image_url","Type":"x","image_url":{"url":"https://example.com/a.png"}}]}]}`
+	doDual(env, auth, body)
+
+	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := (float64((len(body)+3)/4) + 2*openAIImageTokenAllowance + 3) / 1e6
+	if math.Abs(spend-want) > 1e-12 {
+		t.Errorf("cut stream booked USD %v, want %v: the body's bytes as text plus two images at %d tokens", spend, want, openAIImageTokenAllowance)
 	}
 }
 

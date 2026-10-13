@@ -1,9 +1,11 @@
 package translate
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 
@@ -58,11 +60,12 @@ func decodeImageRef(raw borrowedJSON) (imageRef, error) {
 
 var errImageAlphabet = errors.New("image_url.url data URI payload must use only the standard base64 alphabet (A-Z, a-z, 0-9, + and /, with = only at the end)")
 
-// isStandardBase64 holds every accepted payload to one byte per byte, so the
-// decoded string's length is the length it occupies in the request body.
+// isStandardBase64 holds every accepted payload to the standard alphabet and
+// whole four-character groups, so it decodes to exactly the bytes the body
+// carried.
 func isStandardBase64(data string) bool {
 	body := strings.TrimRight(data, "=")
-	if len(data)-len(body) > 2 {
+	if len(data)-len(body) > 2 || body == "" || len(data)%4 != 0 {
 		return false
 	}
 	for i := range len(body) {
@@ -147,26 +150,128 @@ func ResponsesImageLoad(req oairesp.Request) ImageLoad {
 	return load
 }
 
-// CountImageParts reads only each part's type, so counting costs no copy of
-// an inline image.
-func CountImageParts(messages []oai.Message) int {
-	count := 0
+var (
+	errContentShape      = errors.New("invalid message content: content must be a string or an array of content parts")
+	errContentNotObjects = errors.New("invalid message content: content parts must be objects")
+	errContentPartType   = errors.New("invalid message content: a content part's type must be a string")
+	errContentJSON       = errors.New("invalid message content: content is not valid JSON")
+)
+
+// CountImageParts counts the image parts a message list forwards verbatim, so
+// a pass-through request can be charged for them. It walks the token stream
+// and sees every key as written: a part counts when any key matching `type`
+// or `image_url`, in any letter case, names an image, so no duplicate or
+// re-cased key can hide one. Content that is neither a string nor an array
+// of objects is an error.
+func CountImageParts(messages []oai.Message) (int, error) {
+	total := 0
 	for _, msg := range messages {
-		var parts []struct {
-			Type string `json:"type"`
+		n, err := countContentImages(msg.Content)
+		if err != nil {
+			return 0, err
 		}
-		if json.Unmarshal(msg.Content, &parts) != nil {
-			continue
+		total += n
+	}
+	return total, nil
+}
+
+func countContentImages(content json.RawMessage) (int, error) {
+	content = bytes.TrimSpace(content)
+	if len(content) == 0 || string(content) == "null" || content[0] == '"' {
+		return 0, nil
+	}
+	if content[0] != '[' {
+		return 0, errContentShape
+	}
+	dec := json.NewDecoder(bytes.NewReader(content))
+	if _, err := dec.Token(); err != nil {
+		return 0, errContentJSON
+	}
+	count := 0
+	for dec.More() {
+		open, err := dec.Token()
+		if err != nil {
+			return 0, errContentJSON
 		}
-		for _, part := range parts {
-			if part.Type == imagePartType {
-				count++
+		if delim, ok := open.(json.Delim); !ok || delim != '{' {
+			return 0, errContentNotObjects
+		}
+		isImage, err := scanPart(dec)
+		if err != nil {
+			return 0, err
+		}
+		if isImage {
+			count++
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return 0, errContentJSON
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return 0, errContentJSON
+	}
+	return count, nil
+}
+
+func scanPart(dec *json.Decoder) (bool, error) {
+	isImage := false
+	for dec.More() {
+		keyToken, err := dec.Token()
+		if err != nil {
+			return false, errContentJSON
+		}
+		key, _ := keyToken.(string)
+		switch {
+		case strings.EqualFold(key, "type"):
+			valueToken, err := dec.Token()
+			if err != nil {
+				return false, errContentJSON
+			}
+			value, ok := valueToken.(string)
+			if !ok {
+				return false, errContentPartType
+			}
+			isImage = isImage || strings.EqualFold(value, imagePartType)
+		case strings.EqualFold(key, imagePartType):
+			isImage = true
+			fallthrough
+		default:
+			if err := skipValue(dec); err != nil {
+				return false, err
 			}
 		}
 	}
-	return count
+	if _, err := dec.Token(); err != nil {
+		return false, errContentJSON
+	}
+	return isImage, nil
+}
+
+func skipValue(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		return errContentJSON
+	}
+	if delim, ok := token.(json.Delim); !ok || delim == '}' || delim == ']' {
+		return nil
+	}
+	for depth := 1; depth > 0; {
+		token, err = dec.Token()
+		if err != nil {
+			return errContentJSON
+		}
+		if delim, ok := token.(json.Delim); ok {
+			if delim == '{' || delim == '[' {
+				depth++
+			} else {
+				depth--
+			}
+		}
+	}
+	return nil
 }
 
 func HasImageParts(messages []oai.Message) bool {
-	return CountImageParts(messages) > 0
+	n, _ := CountImageParts(messages)
+	return n > 0
 }
