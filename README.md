@@ -392,19 +392,21 @@ reports them separately they are passed on in
 `usage.completion_tokens_details.reasoning_tokens`.
 
 Admission reserves each request's worst-case cost — the body's bytes
-(less any inline image data) plus 4,784 tokens per image on an Anthropic
-row, 36,000 on an OpenAI row, and 2,048 tokens of overhead at the
-dearest input-side price of any tier, plus the largest output the
-request allows at the dearest output price — and holds it until the real
-usage is booked. An image is charged that allowance whether it arrives
-inline or as an `https://` URL, and never by its bytes. A request is
-admitted only while recorded spend plus every reservation stays below
-the key quota and the budget, so concurrent requests can overshoot a cap
-by at most one request's bound. Recorded spend at a cap answers
-`insufficient_quota`; a cap held only by reservations answers the
-retryable `cap_reserved`. The output bound is the request's own cap when
-it names one, and otherwise the model's `default_max_tokens` (or
-`DEFAULT_MAX_TOKENS`).
+plus 2,048 tokens of overhead at the dearest input-side price of any
+tier, plus the largest output the request allows at the dearest output
+price — and holds it until the real usage is booked. Every image part is
+also charged a fixed allowance, whether it arrives inline or as an
+`https://` URL: 4,784 tokens on an Anthropic row and 36,000 on an OpenAI
+row. On the translated upstreams an inline image's base64 is then not
+counted as text; on a `chat_completions` row, whose content parts are
+forwarded unread, the image parts are counted by type and their bytes
+stay counted. A request is admitted only while recorded spend plus every
+reservation stays below the key quota and the budget, so concurrent
+requests can overshoot a cap by at most one request's bound. Recorded
+spend at a cap answers `insufficient_quota`; a cap held only by
+reservations answers the retryable `cap_reserved`. The output bound is
+the request's own cap when it names one, and otherwise the model's
+`default_max_tokens` (or `DEFAULT_MAX_TOKENS`).
 
 A stream cut before its final usage event is booked from an estimate:
 output of at least one token per four streamed characters, and the whole

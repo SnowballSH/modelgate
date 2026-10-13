@@ -120,9 +120,11 @@ On the translated upstreams an image is a `data:` URI whose media type is
 `image/jpeg`, `image/png`, `image/gif` or `image/webp` — the set both
 providers document — with a base64 payload, or an `https://` URL. Anything
 else is a 400 naming what is wrong: another scheme (`http://` included),
-another media type, a `data:` URI that is not base64, or a `detail`
-outside `auto`, `low`, `high`. modelgate does not decode or measure the
-image; a provider that refuses its size or content answers 400.
+another media type, a `data:` URI that is not base64 or whose payload
+strays outside the standard alphabet (`A-Z a-z 0-9 + /`, with `=` only at
+the end: no URL-safe `-` `_`, no whitespace), or a `detail` outside
+`auto`, `low`, `high`. modelgate does not decode or measure the image; a
+provider that refuses its size or content answers 400.
 
 A row without `image_input: true` refuses every image with `model <id>
 does not support image input`, whichever role carries it, so that message
@@ -130,9 +132,13 @@ wins over the translator's `unsupported content part: image_url`, which
 surfaces only on an image-capable row for an image outside a `user`
 message.
 
-For admission an image is a fixed number of prompt tokens, inline or
-remote, never its bytes, and an inline image's base64 does not count
-toward the prompt's byte bound. The number follows the row's upstream:
+For admission every image is a fixed number of prompt tokens, inline or
+remote, on all three upstreams. On the translated upstreams the image's
+base64 also stops counting toward the prompt's byte bound; the
+`chat_completions` passthrough forwards content parts unread, so it
+counts its `image_url` parts by type and charges the allowance for each,
+and its bytes stay counted as text (over-counting is the safe side). The
+number follows the row's upstream:
 
 | Row | Tokens per image | Source |
 |---|---|---|
@@ -143,9 +149,11 @@ The OpenAI figure is documented for `gpt-6-astra` and applied to the rest
 of the GPT-6 family (`gpt-6.1-sol`, `gpt-6-luna`) because the provider's
 page lists no separate figure for them. A request with a multi-megabyte
 image therefore reserves an image's cost, and still needs
-`MAX_BODY_BYTES` raised above its 1 MiB default to be read at all. A
-`chat_completions` row forwards content parts unread, so its request is
-bounded by its bytes as before.
+`MAX_BODY_BYTES` raised above its 1 MiB default to be read at all.
+
+The bound rests on one assumption: a provider bills an image block by its
+dimensions, never by tokenising its bytes as text, and rejects a payload
+that is not an image.
 
 ## Response fields
 

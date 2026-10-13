@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -243,36 +244,160 @@ func TestPromptSize(t *testing.T) {
 	}
 }
 
-func TestInlineBytesNeverLeaveTheTextRemainderNegativeOrShort(t *testing.T) {
-	payload := strings.Repeat("A", 4096)
-	body := imageRequest("claude-vision", false, inlineImagePrefix+payload)
-	var req oai.ChatRequest
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		t.Fatal(err)
-	}
-	trueText := len(body) - len(inlineImagePrefix) - len(payload)
+const alphabetRefusal = "image_url.url data URI payload must use only the standard base64 alphabet (A-Z, a-z, 0-9, + and /, with = only at the end)"
 
-	areq, err := translate.ToAnthropicWith(req, translate.AnthropicOptions{ProviderModel: "m", DefaultMaxTokens: 10, ImageInput: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	anthropicText := measurePrompt(len(body), translate.AnthropicImageLoad(areq), anthropicImageTokenAllowance).textBytes
-	if anthropicText != trueText+len(inlineImagePrefix) {
-		t.Errorf("anthropic text remainder = %d, want %d: only the base64 data is subtracted, so the data: header stays counted as text", anthropicText, trueText+len(inlineImagePrefix))
-	}
+func rawImageBody(model, text, imageURL string) string {
+	return `{"model":"` + model + `","max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"` + text + `"},{"type":"image_url","image_url":{"url":"` + imageURL + `"}}]}]}`
+}
 
-	rreq, err := translate.ToResponsesWith(req, translate.ResponsesOptions{ProviderModel: "m", DefaultMaxTokens: 10, ImageInput: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	responsesText := measurePrompt(len(body), translate.ResponsesImageLoad(rreq), openAIImageTokenAllowance).textBytes
-	if responsesText != trueText {
-		t.Errorf("responses text remainder = %d, want %d: the whole data URI is subtracted", responsesText, trueText)
-	}
+type reservationProbe struct {
+	env      *dualEnv
+	auth     string
+	reserved *float64
+}
 
-	for name, text := range map[string]int{"anthropic": anthropicText, "responses": responsesText} {
-		if text < trueText {
-			t.Errorf("%s remainder %d under-counts the %d text bytes", name, text, trueText)
+func newReservationProbe(t *testing.T) reservationProbe {
+	t.Helper()
+	var probe reservationProbe
+	var reserved float64
+	answer, responses := fullResponseHandler(), openaiResponsesHandler()
+	probe.env = newDualEnvWithTable(t, visionRowJSON, func(w http.ResponseWriter, r *http.Request) {
+		reserved = probe.env.acct.Reserved()
+		responses(w, r)
+	}, func(w http.ResponseWriter, r *http.Request) {
+		reserved = probe.env.acct.Reserved()
+		answer(w, r)
+	}, 100)
+	probe.auth, _ = insertTestKey(t, probe.env.store, nil)
+	probe.reserved = &reserved
+	return probe
+}
+
+func (p reservationProbe) textOnlyBound(text string, allowance int64) float64 {
+	return (float64(int64(len(text))+allowance+promptOverheadTokens)*20 + 1000*50) / 1e6
+}
+
+func TestRawInvalidUTF8InAPayloadIsRefusedAndReservesNothing(t *testing.T) {
+	shapes := []struct {
+		name    string
+		text    int
+		invalid int
+	}{
+		{"large text, 200k invalid bytes", 400_000, 200_000},
+		{"small text, 300k invalid bytes", 1_000, 300_000},
+	}
+	for _, model := range []string{"claude-vision", "gpt-vision"} {
+		for _, shape := range shapes {
+			t.Run(model+"/"+shape.name, func(t *testing.T) {
+				probe := newReservationProbe(t)
+				payload := append([]byte("AAAA"), bytes.Repeat([]byte{0xFF}, shape.invalid)...)
+				body := rawImageBody(model, strings.Repeat("t", shape.text), inlineImagePrefix+string(payload))
+
+				rec := doDual(probe.env, probe.auth, body)
+				var refusal oai.ErrorBody
+				if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil {
+					t.Fatalf("decode %.200q: %v", rec.Body.String(), err)
+				}
+				if rec.Code != http.StatusBadRequest || refusal.Error.Message != alphabetRefusal {
+					t.Errorf("status %d, message %q; want 400 %q", rec.Code, refusal.Error.Message, alphabetRefusal)
+				}
+				if *probe.reserved != 0 || probe.env.acct.Reserved() != 0 || len(probe.env.guards.slots) != 0 || *probe.env.anthropicHits+len(*probe.env.openaiCalls) != 0 {
+					t.Errorf("a refused request reserved USD %v / held %d slots / reached an upstream", probe.env.acct.Reserved(), len(probe.env.guards.slots))
+				}
+			})
 		}
+	}
+}
+
+func TestEscapedAndDuplicatedImageKeysNeverReserveLessThanTheText(t *testing.T) {
+	text := strings.Repeat("t", 200_000)
+	escaped := inlineImagePrefix + "AAAA" + strings.Repeat(`\/`, 40_000) + strings.Repeat(`\u0041`, 10_000)
+	duplicated := func(model string) string {
+		big := inlineImagePrefix + strings.Repeat("A", 100_000)
+		return `{"model":"` + model + `","max_tokens":1000,"messages":[{"role":"user","content":"ignored","content":[{"type":"text","text":"` + text + `"},` +
+			`{"type":"image_url","image_url":{"url":"` + big + `"},"image_url":{"url":"https://example.com/cat.png"}}]}]}`
+	}
+	tests := []struct {
+		name string
+		body func(model string) string
+	}{
+		{"json escapes in the payload", func(model string) string { return rawImageBody(model, text, escaped) }},
+		{"duplicate content and image_url keys", duplicated},
+	}
+	for model, allowance := range map[string]int64{"claude-vision": anthropicImageTokenAllowance, "gpt-vision": openAIImageTokenAllowance} {
+		for _, tc := range tests {
+			t.Run(model+"/"+tc.name, func(t *testing.T) {
+				probe := newReservationProbe(t)
+				rec := doDual(probe.env, probe.auth, tc.body(model))
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
+				}
+				if floor := probe.textOnlyBound(text, allowance); *probe.reserved < floor-1e-9 {
+					t.Errorf("reservation = USD %v, below the text plus one image allowance %v", *probe.reserved, floor)
+				}
+			})
+		}
+	}
+}
+
+func TestWellFormedImageReservesTextPlusTheAllowance(t *testing.T) {
+	text := strings.Repeat("t", 50_000)
+	payload := strings.Repeat("A", 100_000)
+	for model, allowance := range map[string]int64{"claude-vision": anthropicImageTokenAllowance, "gpt-vision": openAIImageTokenAllowance} {
+		t.Run(model, func(t *testing.T) {
+			probe := newReservationProbe(t)
+			if rec := doDual(probe.env, probe.auth, rawImageBody(model, text, inlineImagePrefix+payload)); rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
+			}
+			overhead := 0
+			if model == "claude-vision" {
+				overhead = len(inlineImagePrefix)
+			}
+			jsonOverhead := len(rawImageBody(model, "", ""))
+			want := (float64(int64(len(text)+jsonOverhead+overhead)+allowance+promptOverheadTokens)*20 + 1000*50) / 1e6
+			if math.Abs(*probe.reserved-want) > 1e-9 {
+				t.Errorf("reservation = USD %v, want %v", *probe.reserved, want)
+			}
+		})
+	}
+}
+
+func TestPassthroughImagesAreChargedTheAllowanceAndKeepTheirBytes(t *testing.T) {
+	text := strings.Repeat("t", 1000)
+	plain := `{"model":"gpt-pass","max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"` + text + `"}]}]}`
+	withImages := `{"model":"gpt-pass","max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"` + text + `"},` +
+		`{"type":"image_url","image_url":{"url":"` + inlineImagePrefix + strings.Repeat("A", 5000) + `"}},` +
+		`{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]}]}`
+
+	reservedFor := func(body string) float64 {
+		var env *dualEnv
+		var reserved float64
+		chat := openaiChatResponse()
+		env = newDualEnvWithTable(t, chatReadyModelJSON, func(w http.ResponseWriter, r *http.Request) {
+			reserved = env.acct.Reserved()
+			chat(w, r)
+		}, fullResponseHandler(), 100)
+		auth, _ := insertTestKey(t, env.store, nil)
+		if rec := doDual(env, auth, body); rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
+		}
+		return reserved
+	}
+	extraBytes := len(withImages) - len(plain)
+	want := (float64(extraBytes)*1 + 2*openAIImageTokenAllowance) / 1e6
+	if got := reservedFor(withImages) - reservedFor(plain); math.Abs(got-want) > 1e-9 {
+		t.Errorf("two images raised the reservation by USD %v, want %v: the allowance each plus their bytes as text", got, want)
+	}
+
+	prompt := measurePrompt(len(withImages), translate.ImageLoad{Count: 2}, openAIImageTokenAllowance)
+	if got, floor := prompt.estimatedTokens(), measurePrompt(len(plain), translate.ImageLoad{}, openAIImageTokenAllowance).estimatedTokens()+2*openAIImageTokenAllowance; got < floor {
+		t.Errorf("estimate = %d, below %d", got, floor)
+	}
+}
+
+func TestMeasurePromptFloorsTheTextRemainderAtZero(t *testing.T) {
+	prompt := measurePrompt(100, translate.ImageLoad{Count: 1, InlineBytes: 5000}, anthropicImageTokenAllowance)
+	if prompt.textBytes != 0 || prompt.worstCaseTokens() != anthropicImageTokenAllowance+promptOverheadTokens {
+		t.Errorf("prompt = %+v: an inline count above the body must leave no negative text", prompt)
 	}
 }

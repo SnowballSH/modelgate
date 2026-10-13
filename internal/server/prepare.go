@@ -43,6 +43,7 @@ func (h *PublicHandler) prepare(req oai.ChatRequest, model models.Model, keyID s
 		up := passthroughRequest(req, model, outputCap, cacheKey)
 		return preparedCall{
 			dropped: translate.PassthroughDropped(req, model.DropsSampling),
+			images:  translate.ImageLoad{Count: translate.CountImageParts(req.Messages)},
 			serve: func(ctx context.Context, call admittedCall, _ failFunc) {
 				h.chatOpenAI(ctx, call, up)
 			},

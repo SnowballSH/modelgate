@@ -76,6 +76,7 @@ func TestImageOnlyUserMessageIsNotEmpty(t *testing.T) {
 }
 
 func TestUnusableImagesAreRefused(t *testing.T) {
+	const alphabetMessage = "image_url.url data URI payload must use only the standard base64 alphabet (A-Z, a-z, 0-9, + and /, with = only at the end)"
 	const mediaTypes = "use one of image/jpeg, image/png, image/gif, image/webp"
 	cases := []struct {
 		name    string
@@ -89,6 +90,12 @@ func TestUnusableImagesAreRefused(t *testing.T) {
 		{"svg", `{"url":"data:image/svg+xml;base64,PHN2Zz4="}`, `unsupported image media type "image/svg+xml"; ` + mediaTypes},
 		{"not base64", `{"url":"data:image/png,rawbytes"}`, "image_url.url data URI must carry base64 data"},
 		{"no payload", `{"url":"data:image/png;base64,"}`, "image_url.url data URI must carry base64 data"},
+		{"url-safe alphabet", `{"url":"data:image/png;base64,AA-_AAAA"}`, alphabetMessage},
+		{"embedded whitespace", `{"url":"data:image/png;base64,AAAA AAAA"}`, alphabetMessage},
+		{"embedded newline escape", `{"url":"data:image/png;base64,AAAA\nAAAA"}`, alphabetMessage},
+		{"padding before the end", `{"url":"data:image/png;base64,AA=AAAAA"}`, alphabetMessage},
+		{"more than two padding characters", `{"url":"data:image/png;base64,AAAAA==="}`, alphabetMessage},
+		{"non-ascii", `{"url":"data:image/png;base64,AAAA\u00ffAAAA"}`, alphabetMessage},
 		{"unknown detail", `{"url":"` + pngDataURI + `","detail":"ultra"}`, `image_url.detail "ultra" is not one of auto, low, high`},
 	}
 	for _, tc := range cases {
@@ -247,5 +254,27 @@ func TestMalformedImageURLIsRefusedWhenImagesAreOn(t *testing.T) {
 				t.Errorf("responses err = %v, want %q", err, want)
 			}
 		})
+	}
+}
+
+func TestStandardBase64WithTrailingPaddingIsAccepted(t *testing.T) {
+	for _, payload := range []string{"AAAA", "AAA=", "AA==", "a+/9", "Zm9v+/Zm9v=="} {
+		req := chatRequest(t, `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,`+payload+`"}}]}]}`)
+		if _, err := ToAnthropicWith(req, visionAnthropic); err != nil {
+			t.Errorf("payload %q refused: %v", payload, err)
+		}
+	}
+}
+
+func TestCountImageParts(t *testing.T) {
+	cases := map[string]int{
+		visionTurn: 2,
+		`{"messages":[{"role":"user","content":"a string mentioning image_url"}]}`:                                                                              0,
+		`{"messages":[{"role":"user","content":[{"type":"image_url"},{"type":"text"},{"type":"image_url"}]},{"role":"user","content":[{"type":"image_url"}]}]}`: 3,
+	}
+	for body, want := range cases {
+		if got := CountImageParts(chatRequest(t, body).Messages); got != want {
+			t.Errorf("CountImageParts(%.60s…) = %d, want %d", body, got, want)
+		}
 	}
 }

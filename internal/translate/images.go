@@ -56,6 +56,24 @@ func decodeImageRef(raw borrowedJSON) (imageRef, error) {
 	return *ref, nil
 }
 
+var errImageAlphabet = errors.New("image_url.url data URI payload must use only the standard base64 alphabet (A-Z, a-z, 0-9, + and /, with = only at the end)")
+
+// isStandardBase64 holds every accepted payload to one byte per byte, so the
+// decoded string's length is the length it occupies in the request body.
+func isStandardBase64(data string) bool {
+	body := strings.TrimRight(data, "=")
+	if len(data)-len(body) > 2 {
+		return false
+	}
+	for i := range len(body) {
+		c := body[i]
+		if !(c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/') {
+			return false
+		}
+	}
+	return true
+}
+
 func parseImage(rawURL, detail string) (image, error) {
 	if detail != "" && !slices.Contains(imageDetails, detail) {
 		return image{}, fmt.Errorf("image_url.detail %q is not one of %s", detail, strings.Join(imageDetails, ", "))
@@ -71,6 +89,9 @@ func parseImage(rawURL, detail string) (image, error) {
 	mediaType, isBase64 := strings.CutSuffix(header, ";base64")
 	if !isBase64 || data == "" {
 		return image{}, errors.New("image_url.url data URI must carry base64 data")
+	}
+	if !isStandardBase64(data) {
+		return image{}, errImageAlphabet
 	}
 	mediaType = strings.ToLower(mediaType)
 	if !slices.Contains(imageMediaTypes, mediaType) {
@@ -126,21 +147,26 @@ func ResponsesImageLoad(req oairesp.Request) ImageLoad {
 	return load
 }
 
-// HasImageParts reads only each part's type, so asking costs no copy of an
-// inline image.
-func HasImageParts(messages []oai.Message) bool {
-	return slices.ContainsFunc(messages, func(msg oai.Message) bool {
+// CountImageParts reads only each part's type, so counting costs no copy of
+// an inline image.
+func CountImageParts(messages []oai.Message) int {
+	count := 0
+	for _, msg := range messages {
 		var parts []struct {
 			Type string `json:"type"`
 		}
 		if json.Unmarshal(msg.Content, &parts) != nil {
-			return false
+			continue
 		}
 		for _, part := range parts {
 			if part.Type == imagePartType {
-				return true
+				count++
 			}
 		}
-		return false
-	})
+	}
+	return count
+}
+
+func HasImageParts(messages []oai.Message) bool {
+	return CountImageParts(messages) > 0
 }

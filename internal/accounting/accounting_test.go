@@ -284,3 +284,20 @@ func TestRecordedSpendAtACapIsExhaustionEvenWhileReservationsAreHeld(t *testing.
 		})
 	}
 }
+
+func TestReserveRefusesABoundThatIsNegativeOrNotANumber(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
+	for name, bound := range map[string]float64{"negative": -11.84, "NaN": math.NaN()} {
+		t.Run(name, func(t *testing.T) {
+			a := New(newStore(t), 100)
+			r, err := a.Reserve(ctx, now, noQuota, bound)
+			if !errors.Is(err, ErrInvalidBound) || r != nil {
+				t.Fatalf("Reserve(%v) = %v, %v; want ErrInvalidBound", bound, r, err)
+			}
+			if held := a.Reserved(); held != 0 {
+				t.Errorf("a refused bound left USD %v reserved", held)
+			}
+		})
+	}
+}

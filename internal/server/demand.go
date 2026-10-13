@@ -15,12 +15,8 @@ import (
 // request body, such as the system text Anthropic injects for tool use.
 const promptOverheadTokens = 2048
 
-// The most prompt tokens one image is assumed to cost, by the upstream that
-// bills it. Anthropic documents 4,784 visual tokens as the maximum for
-// Claude 4.7 and later; OpenAI documents 30,000 patches per image at a 1.2
-// multiplier on its current vision models, so 36,000. An image is priced by
-// these and never by its bytes: base64 data is megabytes a provider bills as
-// a few thousand tokens, and a URL is a few bytes it bills the same way.
+// Documented per-image maxima: Anthropic's 4,784 visual tokens for Claude 4.7
+// and later, and OpenAI's 30,000 patches at a 1.2 multiplier.
 const (
 	anthropicImageTokenAllowance = 4_784
 	openAIImageTokenAllowance    = 36_000
@@ -40,7 +36,7 @@ type promptSize struct {
 
 func measurePrompt(bodyBytes int, images translate.ImageLoad, perImageTokens int64) promptSize {
 	return promptSize{
-		textBytes:   bodyBytes - images.InlineBytes,
+		textBytes:   max(0, bodyBytes-images.InlineBytes),
 		imageTokens: int64(images.Count) * perImageTokens,
 	}
 }
@@ -54,11 +50,11 @@ func (p promptSize) estimatedTokens() int64 {
 }
 
 // worstCaseDemand bounds what a request can consume. Every prompt token is
-// at least one byte of the body's text, and an image is its allowance. The output bound is the largest output cap
-// any upstream path could apply: the translators send max_completion_tokens
-// when it is set and max_tokens otherwise, the passthrough sends both, the
-// model's default applies only when the request names neither, and n
-// multiplies the choices generated.
+// at least one byte of the body's text, and an image is its allowance. The
+// output bound is the largest output cap any upstream path could apply: the
+// translators send max_completion_tokens when it is set and max_tokens
+// otherwise, the passthrough sends both, the model's default applies only
+// when the request names neither, and n multiplies the choices generated.
 func worstCaseDemand(req oai.ChatRequest, prompt promptSize, defaultMaxTokens, ceiling int) (accounting.Demand, error) {
 	var caps []int
 	for _, field := range []struct {

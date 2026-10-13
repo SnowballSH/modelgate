@@ -97,6 +97,9 @@ func (g *Guards) ResolveModel(key store.KeyRecord, requestedModel string) (model
 // slot, then a reservation of its worst-case cost against the key quota and
 // the budget.
 func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, model models.Model, demand accounting.Demand) (Admission, *Refusal) {
+	if demand.InputTokens < 0 || demand.OutputTokens < 0 {
+		return Admission{}, &Refusal{Code: CodeInternal}
+	}
 	now := g.now()
 	select {
 	case g.slots <- struct{}{}:
