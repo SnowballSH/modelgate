@@ -130,13 +130,22 @@ wins over the translator's `unsupported content part: image_url`, which
 surfaces only on an image-capable row for an image outside a `user`
 message.
 
-For admission an image is 36,000 prompt tokens, inline or remote, never
-its bytes, and an inline image's base64 does not count toward the
-prompt's byte bound. 36,000 is OpenAI's documented ceiling for its
-current vision models (30,000 patches per image at 1.2 tokens a patch);
-Anthropic's documented maximum is 4,784 tokens. A request with a
-multi-megabyte image therefore reserves an image's cost, and still needs
-`MAX_BODY_BYTES` raised above its 1 MiB default to be read at all.
+For admission an image is a fixed number of prompt tokens, inline or
+remote, never its bytes, and an inline image's base64 does not count
+toward the prompt's byte bound. The number follows the row's upstream:
+
+| Row | Tokens per image | Source |
+|---|---|---|
+| Anthropic (`claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, `claude-haiku-5-5`) | 4,784 | Anthropic's vision guide: "High-resolution \| Claude 4.7 and later models \| 2576 px \| 4784" (`platform.claude.com/docs/en/build-with-claude/vision`). |
+| OpenAI (`responses` and `chat_completions` rows) | 36,000 | OpenAI's images guide: at most 30,000 patches per image, times the 1.2 patch multiplier (`developers.openai.com/api/docs/guides/images-vision`). |
+
+The OpenAI figure is documented for `gpt-6-astra` and applied to the rest
+of the GPT-6 family (`gpt-6.1-sol`, `gpt-6-luna`) because the provider's
+page lists no separate figure for them. A request with a multi-megabyte
+image therefore reserves an image's cost, and still needs
+`MAX_BODY_BYTES` raised above its 1 MiB default to be read at all. A
+`chat_completions` row forwards content parts unread, so its request is
+bounded by its bytes as before.
 
 ## Response fields
 

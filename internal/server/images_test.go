@@ -117,15 +117,28 @@ func TestLargeInlineImageReservesAnImageNotItsBytes(t *testing.T) {
 		t.Errorf("upstream image payload = %d bytes, want %d", upstreamImageBytes, len(payload))
 	}
 	textBytes := len(body) - len(payload)
-	want := (float64(textBytes+imageTokenAllowance+promptOverheadTokens)*20 + 1000*50) / 1e6
+	want := (float64(textBytes+anthropicImageTokenAllowance+promptOverheadTokens)*20 + 1000*50) / 1e6
 	if math.Abs(reserved-want) > 1e-9 {
-		t.Errorf("reservation while the image was in flight = USD %v, want %v: an image is %d tokens, not one per byte", reserved, want, imageTokenAllowance)
+		t.Errorf("reservation while the image was in flight = USD %v, want %v: an image is %d tokens, not one per byte", reserved, want, anthropicImageTokenAllowance)
 	}
 }
 
-func TestRemoteImageIsChargedTheAllowanceOnBothTranslatedUpstreams(t *testing.T) {
-	for _, model := range []string{"claude-vision", "gpt-vision"} {
-		t.Run(model, func(t *testing.T) {
+func TestEachImageIsChargedItsUpstreamsAllowance(t *testing.T) {
+	const payload = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	tests := []struct {
+		name      string
+		model     string
+		imageURL  string
+		allowance int64
+		textBytes func(body string) int
+	}{
+		{"anthropic https", "claude-vision", "https://example.com/cat.png", anthropicImageTokenAllowance, func(body string) int { return len(body) }},
+		{"anthropic inline", "claude-vision", inlineImagePrefix + payload, anthropicImageTokenAllowance, func(body string) int { return len(body) - len(payload) }},
+		{"responses https", "gpt-vision", "https://example.com/cat.png", openAIImageTokenAllowance, func(body string) int { return len(body) }},
+		{"responses inline", "gpt-vision", inlineImagePrefix + payload, openAIImageTokenAllowance, func(body string) int { return len(body) - len(inlineImagePrefix) - len(payload) }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			var env *dualEnv
 			var reserved float64
 			answer, responses := fullResponseHandler(), openaiResponsesHandler()
@@ -138,35 +151,68 @@ func TestRemoteImageIsChargedTheAllowanceOnBothTranslatedUpstreams(t *testing.T)
 			}, 100)
 			auth, _ := insertTestKey(t, env.store, nil)
 
-			body := imageRequest(model, false, "https://example.com/cat.png")
+			body := imageRequest(tc.model, false, tc.imageURL)
 			if rec := doDual(env, auth, body); rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 			}
-			want := (float64(len(body)+imageTokenAllowance+promptOverheadTokens)*20 + 1000*50) / 1e6
+			want := (float64(int64(tc.textBytes(body))+tc.allowance+promptOverheadTokens)*20 + 1000*50) / 1e6
 			if math.Abs(reserved-want) > 1e-9 {
-				t.Errorf("reservation = USD %v, want %v: a remote image costs its allowance although it adds no inline bytes", reserved, want)
+				t.Errorf("reservation = USD %v, want %v: one image at %d tokens", reserved, want, tc.allowance)
 			}
 		})
 	}
 }
 
+func TestImageAllowanceFollowsTheRowsUpstream(t *testing.T) {
+	table := tableFrom(t, chatReadyModelJSON)
+	tests := []struct {
+		model string
+		want  int64
+	}{
+		{"claude-chat", anthropicImageTokenAllowance},
+		{"gpt-vision", openAIImageTokenAllowance},
+		{"gpt-pass", openAIImageTokenAllowance},
+	}
+	for _, tc := range tests {
+		row, ok := table.Resolve(tc.model)
+		if !ok {
+			t.Fatalf("%s is not in the table", tc.model)
+		}
+		if got := imageAllowance(row); got != tc.want {
+			t.Errorf("%s: allowance = %d, want %d", tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestCutStreamEstimateUsesTheRowsAllowance(t *testing.T) {
+	table := tableFrom(t, visionRowJSON)
+	for model, allowance := range map[string]int64{"claude-vision": anthropicImageTokenAllowance, "gpt-vision": openAIImageTokenAllowance} {
+		row, _ := table.Resolve(model)
+		prompt := measurePrompt(400, translate.ImageLoad{Count: 2}, imageAllowance(row))
+		booked := streamMeter{started: true, prompt: prompt}.bookable(store.Usage{})
+		if want := 100 + 2*allowance; booked.usage.InputTokens != want {
+			t.Errorf("%s: input estimate = %d, want %d", model, booked.usage.InputTokens, want)
+		}
+	}
+}
+
 func TestCutStreamEstimateCountsImagesAsTokens(t *testing.T) {
-	prompt := measurePrompt(15<<20+400, translate.ImageLoad{Count: 2, InlineBytes: 15 << 20})
+	prompt := measurePrompt(15<<20+400, translate.ImageLoad{Count: 2, InlineBytes: 15 << 20}, anthropicImageTokenAllowance)
 	booked := streamMeter{started: true, prompt: prompt}.bookable(store.Usage{})
-	if want := int64(100 + 2*imageTokenAllowance); !booked.inputEstimated || booked.usage.InputTokens != want {
+	if want := int64(100 + 2*anthropicImageTokenAllowance); !booked.inputEstimated || booked.usage.InputTokens != want {
 		t.Errorf("estimate = %+v, want %d input tokens: 400 text bytes at four per token plus two images", booked, want)
 	}
 }
 
 func TestCutStreamEstimateCountsARemoteImage(t *testing.T) {
-	booked := streamMeter{started: true, prompt: measurePrompt(400, translate.ImageLoad{Count: 1})}.bookable(store.Usage{})
-	if want := int64(100 + imageTokenAllowance); booked.usage.InputTokens != want {
+	booked := streamMeter{started: true, prompt: measurePrompt(400, translate.ImageLoad{Count: 1}, anthropicImageTokenAllowance)}.bookable(store.Usage{})
+	if want := int64(100 + anthropicImageTokenAllowance); booked.usage.InputTokens != want {
 		t.Errorf("input estimate = %d, want %d: 400 text bytes at four per token plus one remote image", booked.usage.InputTokens, want)
 	}
 }
 
 func TestBookableDecidesWhetherInputWasEstimated(t *testing.T) {
-	prompt := measurePrompt(400, translate.ImageLoad{})
+	prompt := measurePrompt(400, translate.ImageLoad{}, anthropicImageTokenAllowance)
 	tests := []struct {
 		name     string
 		meter    streamMeter
@@ -187,12 +233,12 @@ func TestBookableDecidesWhetherInputWasEstimated(t *testing.T) {
 }
 
 func TestPromptSize(t *testing.T) {
-	plain := measurePrompt(1000, translate.ImageLoad{})
+	plain := measurePrompt(1000, translate.ImageLoad{}, anthropicImageTokenAllowance)
 	if plain.worstCaseTokens() != 1000+promptOverheadTokens || plain.estimatedTokens() != 250 {
 		t.Errorf("text-only prompt = %+v: worst case %d, estimate %d", plain, plain.worstCaseTokens(), plain.estimatedTokens())
 	}
-	remote := measurePrompt(1000, translate.ImageLoad{Count: 1})
-	if remote.worstCaseTokens() != 1000+imageTokenAllowance+promptOverheadTokens {
+	remote := measurePrompt(1000, translate.ImageLoad{Count: 1}, anthropicImageTokenAllowance)
+	if remote.worstCaseTokens() != 1000+anthropicImageTokenAllowance+promptOverheadTokens {
 		t.Errorf("a remote image must add its allowance to the bound, got %d", remote.worstCaseTokens())
 	}
 }
@@ -210,7 +256,7 @@ func TestInlineBytesNeverLeaveTheTextRemainderNegativeOrShort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	anthropicText := measurePrompt(len(body), translate.AnthropicImageLoad(areq)).textBytes
+	anthropicText := measurePrompt(len(body), translate.AnthropicImageLoad(areq), anthropicImageTokenAllowance).textBytes
 	if anthropicText != trueText+len(inlineImagePrefix) {
 		t.Errorf("anthropic text remainder = %d, want %d: only the base64 data is subtracted, so the data: header stays counted as text", anthropicText, trueText+len(inlineImagePrefix))
 	}
@@ -219,7 +265,7 @@ func TestInlineBytesNeverLeaveTheTextRemainderNegativeOrShort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	responsesText := measurePrompt(len(body), translate.ResponsesImageLoad(rreq)).textBytes
+	responsesText := measurePrompt(len(body), translate.ResponsesImageLoad(rreq), openAIImageTokenAllowance).textBytes
 	if responsesText != trueText {
 		t.Errorf("responses text remainder = %d, want %d: the whole data URI is subtracted", responsesText, trueText)
 	}

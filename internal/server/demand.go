@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
+	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
 	"github.com/SnowballSH/modelgate/internal/translate"
 )
@@ -14,23 +15,33 @@ import (
 // request body, such as the system text Anthropic injects for tool use.
 const promptOverheadTokens = 2048
 
-// imageTokenAllowance is the most prompt tokens one image is assumed to cost.
-// OpenAI documents at most 30,000 patches per image and a 1.2 multiplier on
-// its current vision models, so 36,000; Anthropic's documented maximum is
-// 4,784. An image is priced by this and never by its bytes: base64 data is
-// megabytes a provider bills as a few thousand tokens, and a URL is a few
-// bytes it bills the same way.
-const imageTokenAllowance = 36_000
+// The most prompt tokens one image is assumed to cost, by the upstream that
+// bills it. Anthropic documents 4,784 visual tokens as the maximum for
+// Claude 4.7 and later; OpenAI documents 30,000 patches per image at a 1.2
+// multiplier on its current vision models, so 36,000. An image is priced by
+// these and never by its bytes: base64 data is megabytes a provider bills as
+// a few thousand tokens, and a URL is a few bytes it bills the same way.
+const (
+	anthropicImageTokenAllowance = 4_784
+	openAIImageTokenAllowance    = 36_000
+)
+
+func imageAllowance(model models.Model) int64 {
+	if model.Provider == models.ProviderAnthropic {
+		return anthropicImageTokenAllowance
+	}
+	return openAIImageTokenAllowance
+}
 
 type promptSize struct {
 	textBytes   int
 	imageTokens int64
 }
 
-func measurePrompt(bodyBytes int, images translate.ImageLoad) promptSize {
+func measurePrompt(bodyBytes int, images translate.ImageLoad, perImageTokens int64) promptSize {
 	return promptSize{
 		textBytes:   bodyBytes - images.InlineBytes,
-		imageTokens: int64(images.Count) * imageTokenAllowance,
+		imageTokens: int64(images.Count) * perImageTokens,
 	}
 }
 
