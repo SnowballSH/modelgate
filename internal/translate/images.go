@@ -31,6 +31,31 @@ type image struct {
 	detail    string
 }
 
+type imageRef struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail"`
+}
+
+// borrowedJSON keeps the bytes it was decoded from instead of copying them,
+// which json.RawMessage would: an inline image is megabytes. The caller's
+// content buffer outlives the decode and is never written to.
+type borrowedJSON []byte
+
+func (b *borrowedJSON) UnmarshalJSON(data []byte) error {
+	*b = data
+	return nil
+}
+
+var errImageRefShape = errors.New("image_url must be an object with a url")
+
+func decodeImageRef(raw borrowedJSON) (imageRef, error) {
+	var ref *imageRef
+	if json.Unmarshal(raw, &ref) != nil || ref == nil {
+		return imageRef{}, errImageRefShape
+	}
+	return *ref, nil
+}
+
 func parseImage(rawURL, detail string) (image, error) {
 	if detail != "" && !slices.Contains(imageDetails, detail) {
 		return image{}, fmt.Errorf("image_url.detail %q is not one of %s", detail, strings.Join(imageDetails, ", "))

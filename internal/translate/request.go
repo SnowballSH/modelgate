@@ -347,12 +347,9 @@ func userParts(content json.RawMessage, imageInput bool) ([]userPart, error) {
 		return []userPart{{text: s}}, nil
 	}
 	var raw []struct {
-		Type     string `json:"type"`
-		Text     string `json:"text"`
-		ImageURL struct {
-			URL    string `json:"url"`
-			Detail string `json:"detail"`
-		} `json:"image_url"`
+		Type     string       `json:"type"`
+		Text     string       `json:"text"`
+		ImageURL borrowedJSON `json:"image_url"`
 	}
 	if err := json.Unmarshal(content, &raw); err != nil {
 		return nil, fmt.Errorf("invalid message content: %w", err)
@@ -364,7 +361,11 @@ func userParts(content json.RawMessage, imageInput bool) ([]userPart, error) {
 			parts = append(parts, userPart{text: p.Text})
 		case p.Type == "text":
 		case p.Type == imagePartType && imageInput:
-			img, err := parseImage(p.ImageURL.URL, p.ImageURL.Detail)
+			ref, err := decodeImageRef(p.ImageURL)
+			if err != nil {
+				return nil, err
+			}
+			img, err := parseImage(ref.URL, ref.Detail)
 			if err != nil {
 				return nil, err
 			}

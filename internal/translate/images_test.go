@@ -214,7 +214,38 @@ func TestInlineImageIsTranslatedWithOneCopy(t *testing.T) {
 	if got := len(areq.Messages[0].Content[1].Source.Data); got != len(payload) {
 		t.Fatalf("translated payload = %d bytes, want %d", got, len(payload))
 	}
-	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 2*uint64(len(payload)) {
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > uint64(len(payload))*6/5 {
 		t.Errorf("translating a %d-byte image allocated %d bytes; want one copy of the payload, not several", len(payload), allocated)
+	}
+}
+
+func TestStringFormImageURLIsRefusedWhenImagesAreOff(t *testing.T) {
+	req := chatRequest(t, `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":"https://example.com/cat.png"}]}]}`)
+	const want = "unsupported content part: image_url"
+	if _, err := ToAnthropic(req, "claude-real", 1024); err == nil || err.Error() != want {
+		t.Errorf("anthropic err = %v, want %q", err, want)
+	}
+	if _, err := ToResponses(req, "gpt-real", 1024); err == nil || err.Error() != want {
+		t.Errorf("responses err = %v, want %q", err, want)
+	}
+}
+
+func TestMalformedImageURLIsRefusedWhenImagesAreOn(t *testing.T) {
+	const want = "image_url must be an object with a url"
+	for name, value := range map[string]string{
+		"string": `"https://example.com/cat.png"`,
+		"number": `7`,
+		"array":  `[]`,
+		"null":   `null`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := chatRequest(t, `{"messages":[{"role":"user","content":[{"type":"image_url","image_url":`+value+`}]}]}`)
+			if _, err := ToAnthropicWith(req, visionAnthropic); err == nil || err.Error() != want {
+				t.Errorf("anthropic err = %v, want %q", err, want)
+			}
+			if _, err := ToResponsesWith(req, visionResponses); err == nil || err.Error() != want {
+				t.Errorf("responses err = %v, want %q", err, want)
+			}
+		})
 	}
 }
