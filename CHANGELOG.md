@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.0 — unreleased
+## v0.7.0 — 2026-10-14
 
 A v0.6.0 model table loads unchanged, and a row carrying none of the new
 fields is served as before. What changes for such a row is listed under
