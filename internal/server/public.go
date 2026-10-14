@@ -226,7 +226,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		failResolved(err.Error())
 		return
 	}
-	prompt := measurePrompt(len(body), plan.images, imageAllowance(model))
+	prompt := measurePrompt(len(body), plan.images, imageAllowance(model)).cappedAt(model.MaxInputTokens)
 	demand, err := worstCaseDemand(req, prompt, model.OutputCapDefault(h.defaultMaxTokens), h.maxOutputTokens)
 	if err != nil {
 		failResolved(err.Error())

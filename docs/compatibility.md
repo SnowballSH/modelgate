@@ -10,7 +10,7 @@ upstream APIs. The model table chooses the upstream per model:
 | OpenAI Chat Completions | `provider: openai` | Passes the request through, substituting the model name and a default output cap, namespacing `prompt_cache_key` per gateway key, and removing `temperature` and `top_p` on a row that declares `sampling: false`. |
 | OpenAI Responses | `provider: openai`, `upstream_api: responses` | Translates the request and the response, both ways, including streams. |
 
-This page is the per-field contract as of `v0.7.0`. It describes the code
+This page is the per-field contract as of `v0.7.1`. It describes the code
 in `internal/translate` and `internal/provider`; when the two disagree,
 the code is right and this page is the defect.
 
@@ -183,6 +183,50 @@ image therefore reserves an image's cost, and still needs
 The bound rests on one assumption: a provider bills an image block by its
 dimensions, never by tokenising its bytes as text, and rejects a payload
 that is not an image.
+
+## Context window
+
+A row may declare `max_input_tokens`, the largest prompt its provider
+accepts. Admission then holds the prompt side of a request's worst-case
+bound — the body's text bytes, every image's allowance and the 2,048
+tokens of overhead, summed — at that figure, and prices it as before at
+the dearest input-side rate of any tier; the output side is unchanged. A
+stream cut before the provider reported its prompt size is booked on an
+estimate held at the same figure: one token per four bytes of text plus
+the image allowances, or `max_input_tokens` if that is less. A request
+under the figure reserves and is estimated exactly as on a row without
+it.
+
+The cap rests on one assumption: a provider rejects, and does not bill, a
+prompt longer than the model's context window, and every input token
+counts toward that window — uncached, cache-read and cache-write alike,
+and the system text, tool definitions and images the provider adds.
+Anthropic documents that everything in the request counts toward the
+window, with `input_tokens`, `cache_read_input_tokens` and
+`cache_creation_input_tokens` all counted, and that input that alone
+exceeds the window is answered `400 invalid_request_error` ("prompt is
+too long") (`platform.claude.com/docs/en/build-with-claude/context-windows`);
+that the refused request is not billed rests on 4xx requests generally
+not being billed. OpenAI's pages state neither the rejection nor the
+non-billing, so a cap on an OpenAI row relies on the observed `400
+context_length_exceeded` behaviour.
+
+Declare the model's context window. OpenAI's model pages also state a
+smaller maximum input (`922,000` beside a `1,050,000` window: the window
+less the maximum output), but a provider that checks prompt plus
+requested output against the window accepts, and bills, a prompt up to
+the whole window when the output cap is small. Declare a smaller figure
+only where the provider documents that it rejects any prompt above it,
+whatever the output cap.
+
+Nothing else trusts the figure. Booking prices the provider's reported
+usage, so a provider that did accept and bill a longer prompt is booked
+in full, and the quota and budget count it from then on; only that one
+request's reservation was too small. A tier is chosen by the reported
+prompt size, so a table whose `price_tiers` threshold is at or above
+`max_input_tokens` declares a tier no prompt can reach and is refused.
+modelgate forwards no field that lets a provider exceed the window on the
+client's behalf, such as Anthropic's server-side compaction.
 
 ## Response fields
 
