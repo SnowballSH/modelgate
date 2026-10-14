@@ -1,6 +1,7 @@
 package config
 
 import (
+	"maps"
 	"reflect"
 	"strings"
 	"testing"
@@ -172,5 +173,46 @@ func TestLoadFullEnv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Fatalf("Load = %+v, want %+v", cfg, want)
+	}
+}
+
+func TestLoadProviderBudgets(t *testing.T) {
+	cases := []struct {
+		name string
+		set  map[string]string
+		want map[string]float64
+	}{
+		{"absent means no ceiling", nil, map[string]float64{}},
+		{"anthropic only", map[string]string{"BUDGET_MONTHLY_USD_ANTHROPIC": "175"}, map[string]float64{"anthropic": 175}},
+		{"both", map[string]string{"BUDGET_MONTHLY_USD_ANTHROPIC": "175", "BUDGET_MONTHLY_USD_OPENAI": "50.5"}, map[string]float64{"anthropic": 175, "openai": 50.5}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := validEnv()
+			maps.Copy(env, tc.set)
+			cfg, err := Load(getenvFrom(env))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.ProviderBudgetsUSD) != len(tc.want) || !maps.Equal(cfg.ProviderBudgetsUSD, tc.want) {
+				t.Fatalf("ProviderBudgetsUSD = %v, want %v", cfg.ProviderBudgetsUSD, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidProviderBudgets(t *testing.T) {
+	for _, key := range []string{"BUDGET_MONTHLY_USD_ANTHROPIC", "BUDGET_MONTHLY_USD_OPENAI"} {
+		for _, value := range []string{"0", "-5", "lots", "NaN", "Inf"} {
+			t.Run(key+"="+value, func(t *testing.T) {
+				env := validEnv()
+				env[key] = value
+				_, err := Load(getenvFrom(env))
+				want := "config: " + key + ": must be a positive finite number"
+				if err == nil || err.Error() != want {
+					t.Fatalf("Load with %s=%q: err %v, want %q", key, value, err, want)
+				}
+			})
+		}
 	}
 }

@@ -106,13 +106,13 @@ func eventually(t *testing.T, cond func() bool, failure func() string) {
 // parallelAgainstCap sends one request per auth at once to an upstream that
 // holds every call until each request has reached it or been answered, and
 // returns every response status.
-func parallelAgainstCap(t *testing.T, env *publicEnv, arrivals *atomic.Int32, release chan struct{}, auths []string) []int {
+func parallelAgainstCap(t *testing.T, send func(auth string) int, arrivals *atomic.Int32, release chan struct{}, auths []string) []int {
 	t.Helper()
 	var returned atomic.Int32
 	codes := make(chan int, len(auths))
 	for _, auth := range auths {
 		go func() {
-			code := doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(false)).Code
+			code := send(auth)
 			returned.Add(1)
 			codes <- code
 		}()
@@ -130,10 +130,21 @@ func parallelAgainstCap(t *testing.T, env *publicEnv, arrivals *atomic.Int32, re
 	return out
 }
 
+func sendPublic(env *publicEnv) func(auth string) int {
+	return func(auth string) int {
+		return doPublic(env, http.MethodPost, "/v1/chat/completions", auth, chatBody(false)).Code
+	}
+}
+
 func holdingUpstream() (http.HandlerFunc, *atomic.Int32, chan struct{}) {
+	return holding(fullResponseHandler())
+}
+
+// holding wraps an upstream so every call waits for release, counting the
+// calls that arrive.
+func holding(full http.HandlerFunc) (http.HandlerFunc, *atomic.Int32, chan struct{}) {
 	var arrivals atomic.Int32
 	release := make(chan struct{})
-	full := fullResponseHandler()
 	return func(w http.ResponseWriter, r *http.Request) {
 		arrivals.Add(1)
 		<-release
@@ -146,7 +157,7 @@ func TestParallelRequestsCannotOvershootKeyQuota(t *testing.T) {
 	env := newPublicEnv(t, upstream, 1<<20)
 	auth := insertQuotaKey(t, env, 0.0001)
 
-	codes := parallelAgainstCap(t, env, arrivals, release, slices.Repeat([]string{auth}, 8))
+	codes := parallelAgainstCap(t, sendPublic(env), arrivals, release, slices.Repeat([]string{auth}, 8))
 
 	if got := arrivals.Load(); got != 1 {
 		t.Fatalf("%d of 8 parallel requests reached the provider against a quota one request exhausts, want 1 (statuses %v)", got, codes)
@@ -161,7 +172,7 @@ func TestParallelRequestsCannotOvershootMonthlyBudget(t *testing.T) {
 		auths[i], _ = insertTestKey(t, env.store, nil)
 	}
 
-	codes := parallelAgainstCap(t, env, arrivals, release, auths)
+	codes := parallelAgainstCap(t, sendPublic(env), arrivals, release, auths)
 
 	if got := arrivals.Load(); got != 1 {
 		t.Fatalf("%d of 8 keys reached the provider against a budget one request exhausts, want 1 (statuses %v)", got, codes)

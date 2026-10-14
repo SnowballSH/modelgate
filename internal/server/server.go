@@ -108,17 +108,18 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		return nil, fmt.Errorf("startup: %w", err)
 	}
 
-	st, err := store.Open(cfg.DataDir)
+	st, err := store.Open(cfg.DataDir, table.ProviderByModel())
 	if err != nil {
 		return nil, fmt.Errorf("startup: open store: %w", err)
 	}
 
-	acct := accounting.New(st, cfg.BudgetMonthlyUSD)
+	acct := accounting.New(st, cfg.BudgetMonthlyUSD, cfg.ProviderBudgetsUSD)
 	metrics := NewMetrics(cfg.BudgetMonthlyUSD)
 	if ks, err := st.ListKeys(context.Background()); err == nil {
 		metrics.SetKeyCount(float64(len(ks)))
 	}
 	metrics.TrackMonthSpend(st, time.Now)
+	metrics.TrackProviderSpend(acct, time.Now)
 	var up Upstreams
 	if key, ok := apiKeys[models.ProviderAnthropic]; ok {
 		up.Anthropic = provider.NewClient(cfg.AnthropicBaseURL, key, &http.Client{})

@@ -45,7 +45,7 @@ func newAdminEnv(t *testing.T) *adminEnv {
 	s := testStore(t)
 	table := testTable(t)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	acct := accounting.New(s, 100)
+	acct := accounting.New(s, 100, nil)
 	m := NewMetrics(100)
 	handler := NewAdminHandler(s, acct, table, m, testBoundary(t), 100, func() time.Time { return now }, rand.Reader, nil)
 	return &adminEnv{handler: handler, store: s, acct: acct, now: now}
@@ -198,7 +198,7 @@ func TestAdminUsage(t *testing.T) {
 
 	usage := store.Usage{InputTokens: 1000, OutputTokens: 500}
 	pricing, _ := testTable(t).Resolve("claude-sonnet-5")
-	if err := env.acct.Record(t.Context(), env.now, created.ID, "claude-sonnet-5", usage, pricing.Pricing); err != nil {
+	if err := env.acct.Record(t.Context(), env.now, created.ID, "claude-sonnet-5", models.ProviderAnthropic, usage, pricing.Pricing); err != nil {
 		t.Fatal(err)
 	}
 	wantSpend := 1000*3/1e6 + 500*15/1e6
@@ -243,7 +243,7 @@ func TestAdminPublicFullFlow(t *testing.T) {
 	table := testTable(t)
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
-	acct := accounting.New(s, 100)
+	acct := accounting.New(s, 100, nil)
 	m := NewMetrics(100)
 	admin := NewAdminHandler(s, acct, table, m, testBoundary(t), 100, nowFn, rand.Reader, nil)
 	guards := NewGuards(s, acct, table, 1000, 8, nowFn)
@@ -317,7 +317,7 @@ func TestAdminListModels(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
-	acct := accounting.New(s, 100)
+	acct := accounting.New(s, 100, nil)
 	handler := NewAdminHandler(s, acct, table, NewMetrics(100), testBoundary(t), 100, func() time.Time { return now }, rand.Reader, nil)
 	env := &adminEnv{handler: handler, store: s, acct: acct, now: now}
 

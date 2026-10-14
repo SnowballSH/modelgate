@@ -280,11 +280,26 @@ func (h *AdminHandler) usage(w http.ResponseWriter, r *http.Request) {
 		}
 		usages[i] = keyUsage{ID: k.ID, Label: k.Label, SpendUSD: keySpend, QuotaUSD: k.QuotaUSD}
 	}
+	spends, err := h.acct.ProviderSpend(r.Context(), now)
+	if err != nil {
+		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to read provider spend")
+		return
+	}
+	type providerUsage struct {
+		Provider  string   `json:"provider"`
+		SpendUSD  float64  `json:"spend_usd"`
+		BudgetUSD *float64 `json:"budget_usd"`
+	}
+	providers := make([]providerUsage, len(spends))
+	for i, p := range spends {
+		providers[i] = providerUsage{Provider: p.Provider, SpendUSD: p.SpendUSD, BudgetUSD: p.BudgetUSD}
+	}
 	writeJSONStatus(w, http.StatusOK, map[string]any{
 		"month":      month,
 		"budget_usd": h.budgetUSD,
 		"spend_usd":  spend,
 		"keys":       usages,
+		"providers":  providers,
 	})
 }
 

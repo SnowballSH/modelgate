@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"maps"
 	"math"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 func openTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	dir := t.TempDir()
-	s, err := Open(dir)
+	s, err := Open(dir, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -223,10 +224,10 @@ func TestAddUsageAccumulates(t *testing.T) {
 	s, _ := openTestStore(t)
 	ctx := context.Background()
 	u := Usage{Requests: 1, InputTokens: 10, OutputTokens: 20, CacheReadTokens: 5, CacheWriteTokens: 3, CostUSD: 0.25}
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", u); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", "anthropic", u); err != nil {
 		t.Fatalf("AddUsage: %v", err)
 	}
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", u); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", "anthropic", u); err != nil {
 		t.Fatalf("second AddUsage: %v", err)
 	}
 	got, err := s.MonthUsage(ctx, "2026-08")
@@ -242,16 +243,16 @@ func TestAddUsageAccumulates(t *testing.T) {
 func TestMonthSpend(t *testing.T) {
 	s, _ := openTestStore(t)
 	ctx := context.Background()
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", Usage{CostUSD: 1.5}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", "anthropic", Usage{CostUSD: 1.5}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m2", Usage{CostUSD: 2.5}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m2", "anthropic", Usage{CostUSD: 2.5}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddUsage(ctx, "2026-08", "k2", "m1", Usage{CostUSD: 4}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k2", "m1", "anthropic", Usage{CostUSD: 4}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddUsage(ctx, "2026-07", "k1", "m1", Usage{CostUSD: 100}); err != nil {
+	if err := s.AddUsage(ctx, "2026-07", "k1", "m1", "anthropic", Usage{CostUSD: 100}); err != nil {
 		t.Fatal(err)
 	}
 	total, err := s.MonthSpend(ctx, "2026-08")
@@ -273,13 +274,13 @@ func TestMonthSpend(t *testing.T) {
 func TestMonthSpendByKey(t *testing.T) {
 	s, _ := openTestStore(t)
 	ctx := context.Background()
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", Usage{CostUSD: 1}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", "anthropic", Usage{CostUSD: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m2", Usage{CostUSD: 2}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m2", "anthropic", Usage{CostUSD: 2}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddUsage(ctx, "2026-08", "k2", "m1", Usage{CostUSD: 10}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k2", "m1", "anthropic", Usage{CostUSD: 10}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.MonthSpendByKey(ctx, "2026-08", "k1")
@@ -294,10 +295,10 @@ func TestMonthSpendByKey(t *testing.T) {
 func TestMonthUsageAggregatesModels(t *testing.T) {
 	s, _ := openTestStore(t)
 	ctx := context.Background()
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", Usage{Requests: 1, InputTokens: 100, CostUSD: 1}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m1", "anthropic", Usage{Requests: 1, InputTokens: 100, CostUSD: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddUsage(ctx, "2026-08", "k1", "m2", Usage{Requests: 2, OutputTokens: 50, CostUSD: 2}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "k1", "m2", "anthropic", Usage{Requests: 2, OutputTokens: 50, CostUSD: 2}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.MonthUsage(ctx, "2026-08")
@@ -315,7 +316,7 @@ func TestMonthUsageAggregatesModels(t *testing.T) {
 
 func TestReopenPersists(t *testing.T) {
 	dir := t.TempDir()
-	s, err := Open(dir)
+	s, err := Open(dir, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -324,13 +325,13 @@ func TestReopenPersists(t *testing.T) {
 	if err := s.InsertKey(ctx, k); err != nil {
 		t.Fatalf("InsertKey: %v", err)
 	}
-	if err := s.AddUsage(ctx, "2026-08", "persist", "m", Usage{Requests: 7, CostUSD: 1.25}); err != nil {
+	if err := s.AddUsage(ctx, "2026-08", "persist", "m", "anthropic", Usage{Requests: 7, CostUSD: 1.25}); err != nil {
 		t.Fatalf("AddUsage: %v", err)
 	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	s2, err := Open(dir)
+	s2, err := Open(dir, nil)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -345,5 +346,42 @@ func TestReopenPersists(t *testing.T) {
 	}
 	if math.Abs(spend-1.25) > 1e-9 {
 		t.Errorf("spend = %v, want 1.25", spend)
+	}
+}
+
+func TestUsageIsAttributedToTheProviderThatServedIt(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := context.Background()
+	bookings := []struct {
+		month, key, model, provider string
+		cost                        float64
+	}{
+		{"2026-10", "k1", "shared-id", "anthropic", 1},
+		{"2026-10", "k1", "shared-id", "openai", 2},
+		{"2026-10", "k2", "shared-id", "openai", 4},
+		{"2026-10", "k1", "shared-id", "anthropic", 8},
+		{"2026-09", "k1", "shared-id", "openai", 100},
+	}
+	for _, b := range bookings {
+		if err := s.AddUsage(ctx, b.month, b.key, b.model, b.provider, Usage{Requests: 1, CostUSD: b.cost}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for provider, want := range map[string]float64{"anthropic": 9, "openai": 6, "absent": 0} {
+		got, err := s.MonthSpendByProvider(ctx, "2026-10", provider)
+		if err != nil || got != want {
+			t.Errorf("MonthSpendByProvider(%s) = %v, %v; want %v", provider, got, err, want)
+		}
+	}
+	per, err := s.MonthSpendPerProvider(ctx, "2026-10")
+	if err != nil || !maps.Equal(per, map[string]float64{"anthropic": 9, "openai": 6}) {
+		t.Errorf("MonthSpendPerProvider = %v, %v", per, err)
+	}
+	if total, err := s.MonthSpend(ctx, "2026-10"); err != nil || total != 15 {
+		t.Errorf("MonthSpend = %v, %v; want 15", total, err)
+	}
+	usage, err := s.MonthUsage(ctx, "2026-10")
+	if err != nil || usage["k1"].Requests != 3 || usage["k1"].CostUSD != 11 {
+		t.Errorf("MonthUsage[k1] = %+v, %v; want 3 requests and USD 11", usage["k1"], err)
 	}
 }

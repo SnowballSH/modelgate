@@ -16,6 +16,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
+	"github.com/SnowballSH/modelgate/internal/config"
 )
 
 func openaiClient(gw gateway, apiKey string) openai.Client {
@@ -192,6 +193,37 @@ func TestBudgetHardStop(t *testing.T) {
 	}
 	if code := decodeErrorCode(t, res); code != "insufficient_quota" {
 		t.Errorf("over-budget error code: got %q, want %q", code, "insufficient_quota")
+	}
+}
+
+func TestProviderCeilingHardStop(t *testing.T) {
+	gw := startGatewayWith(t, 20, defaultTable, func(cfg *config.Config) {
+		cfg.ProviderBudgetsUSD = map[string]float64{"anthropic": 0.001}
+	})
+	fullKey := adminCreateKey(t, gw.AdminAddr, "ceiling")
+
+	res := chatCompletionRaw(t, gw.PublicAddr, fullKey)
+	_, _ = io.Copy(io.Discard, res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("first request under the anthropic ceiling: got %d, want 200", res.StatusCode)
+	}
+
+	res = chatCompletionRaw(t, gw.PublicAddr, fullKey)
+	if res.StatusCode != http.StatusTooManyRequests {
+		_, _ = io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		t.Fatalf("second request over the anthropic ceiling: got %d, want 429", res.StatusCode)
+	}
+	if code := decodeErrorCode(t, res); code != "insufficient_quota" {
+		t.Errorf("over-ceiling error code: got %q, want %q", code, "insufficient_quota")
+	}
+	if got := metricValue(t, gw.MetricsAddr, `modelgate_provider_budget_usd{provider="anthropic"}`); got != 0.001 {
+		t.Errorf("anthropic ceiling gauge = %v, want 0.001", got)
+	}
+	spend := metricValue(t, gw.MetricsAddr, `modelgate_provider_month_spend_usd{provider="anthropic"}`)
+	if total := metricValue(t, gw.MetricsAddr, "modelgate_month_spend_usd"); spend < 0.001 || spend != total {
+		t.Errorf("anthropic spend gauge = %v, total %v; want the whole booked spend, at least the ceiling", spend, total)
 	}
 }
 

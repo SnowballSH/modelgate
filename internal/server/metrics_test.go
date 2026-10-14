@@ -37,7 +37,7 @@ func TestMonthSpendGaugeFollowsTheCalendar(t *testing.T) {
 	s := testStore(t)
 	clk := &clock{t: time.Date(2026, 8, 31, 23, 59, 0, 0, time.UTC)}
 	pricing := models.Pricing{InputUSDPerMTok: 1}
-	if err := accounting.New(s, 100).Record(t.Context(), clk.t, "k", "m", store.Usage{InputTokens: 2_000_000}, pricing); err != nil {
+	if err := accounting.New(s, 100, nil).Record(t.Context(), clk.t, "k", "m", models.ProviderAnthropic, store.Usage{InputTokens: 2_000_000}, pricing); err != nil {
 		t.Fatal(err)
 	}
 	m := NewMetrics(100)

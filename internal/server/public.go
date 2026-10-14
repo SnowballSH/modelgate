@@ -198,7 +198,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 	}
 	refuse := func(refusal Refusal) {
 		observe(refusal.Code)
-		writeRefusal(w, refusal, messageForCode(refusal.Code))
+		writeRefusal(w, refusal, refusal.message())
 	}
 	model, refusal := h.guards.ResolveModel(key, req.Model)
 	if refusal != nil {

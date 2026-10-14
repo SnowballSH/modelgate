@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.8.0 — unreleased
+
+A deployment that sets neither new variable admits, refuses, reserves
+and books every request as v0.7.1 did; the store migrates on first start.
+
+### Added
+
+- Optional per-provider monthly ceilings, `BUDGET_MONTHLY_USD_ANTHROPIC`
+  and `BUDGET_MONTHLY_USD_OPENAI`, alongside the global
+  `BUDGET_MONTHLY_USD`. A request's worst-case reservation counts against
+  its key quota, the global budget and its provider's ceiling at once,
+  under the rule the budget already used: admitted while spend plus
+  reservations stay below each cap, so a burst overshoots a ceiling by at
+  most one request's bound. A spent ceiling answers 429
+  `insufficient_quota` with `x-should-retry: false`, as the budget does,
+  with the message `monthly <provider> spend ceiling exhausted`, and
+  counts as outcome `provider_budget_exhausted`; a ceiling held only by
+  requests in flight answers the retryable `cap_reserved`. Refusal order:
+  key quota, global budget, provider ceiling.
+- Every booking records the provider of the row that served it, so
+  per-provider month-to-date spend survives restarts and model-table
+  changes.
+- Metrics `modelgate_provider_budget_usd{provider}` (providers with a
+  ceiling) and `modelgate_provider_month_spend_usd{provider}` (providers
+  with a ceiling or with spend this month). `modelgate_budget_usd` and
+  `modelgate_month_spend_usd` are unchanged.
+- `GET /api/usage` gains `providers: [{provider, spend_usd, budget_usd}]`,
+  and the admin UI shows per-provider spend, with a bar against each
+  ceiling.
+
+### Upgrading
+
+- The store migrates to schema version 3 at startup: the usage table is
+  rebuilt keyed by provider in one transaction, and existing rows are
+  attributed by the model table v0.8.0 starts with. A row for a model
+  that table no longer lists stays unattributed: it counts against the
+  global budget and no provider's ceiling. Back up `DATA_DIR` first;
+  v0.7.1 refuses a version 3 database, so a rollback restores that
+  backup.
+- Both new variables are optional; set neither and nothing changes.
+- Keep each provider's own console spend limit at or above its ceiling
+  here, so the gateway's refusal, not a provider's, is what stops spend,
+  and a provider limit below the ceiling does not turn into upstream
+  errors.
+
 ## v0.7.1 — 2026-10-14
 
 A v0.7.0 model table loads unchanged, and a row without the new field

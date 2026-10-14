@@ -15,7 +15,10 @@ type Store struct {
 	db *sql.DB
 }
 
-func Open(dir string) (*Store, error) {
+// Open opens the store in dir, migrating its schema. modelProviders maps
+// each model id to the provider serving it; it is read only by the upgrade
+// that first attributes usage to providers.
+func Open(dir string, modelProviders map[string]string) (*Store, error) {
 	path := filepath.Join(dir, "modelgate.db")
 	dsn := fmt.Sprintf(
 		"file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)",
@@ -25,7 +28,7 @@ func Open(dir string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	if err := migrate(context.Background(), db); err != nil {
+	if err := migrate(context.Background(), db, modelProviders); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}

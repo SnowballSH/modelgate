@@ -39,11 +39,18 @@ export interface UsageKey {
   quota_usd: number | null;
 }
 
+export interface UsageProvider {
+  provider: string;
+  spend_usd: number;
+  budget_usd: number | null;
+}
+
 export interface UsageResponse {
   month: string;
   budget_usd: number;
   spend_usd: number;
   keys: UsageKey[];
+  providers: UsageProvider[];
 }
 
 export interface ConfiguredModel {

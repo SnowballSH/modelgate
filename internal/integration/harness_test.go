@@ -287,6 +287,11 @@ type gateway struct {
 
 func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 	t.Helper()
+	return startGatewayWith(t, budgetUSD, table, func(*config.Config) {})
+}
+
+func startGatewayWith(t *testing.T, budgetUSD float64, table string, configure func(*config.Config)) gateway {
+	t.Helper()
 	upstream, anthropicSeen := fakeAnthropic(t)
 	openaiUpstream, openaiSeen := fakeOpenAI(t)
 
@@ -331,6 +336,7 @@ func startGateway(t *testing.T, budgetUSD float64, table string) gateway {
 		cfg.OpenAIAPIKeyFile = openaiKeyFile
 		cfg.OpenAIBaseURL = openaiUpstream.URL
 	}
+	configure(&cfg)
 
 	s, err := server.New(cfg, nil)
 	if err != nil {
