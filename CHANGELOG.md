@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.7.1 — unreleased
+## v0.7.1 — 2026-10-14
 
 A v0.7.0 model table loads unchanged, and a row without the new field
 reserves, estimates and books exactly as before.
