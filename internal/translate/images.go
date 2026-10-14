@@ -24,14 +24,18 @@ const (
 )
 
 var (
-	imageMediaTypes = []string{"image/jpeg", "image/png", "image/gif", "image/webp"}
-	imageDetails    = []string{"auto", "low", "high"}
-	pricedPartKeys  = map[string][]string{
-		"text":        {"type", "text", "cache_control"},
-		imagePartType: {"type", imagePartType},
-		"refusal":     {"type", "refusal"},
+	imageMediaTypes   = []string{"image/jpeg", "image/png", "image/gif", "image/webp"}
+	imageDetails      = []string{"auto", "low", "high"}
+	pricedPayloadKeys = map[string][]string{
+		"text":        {"text", "cache_control"},
+		imagePartType: {imagePartType},
+		"refusal":     {"refusal"},
 	}
 )
+
+func allowedPartKeys(partType string) []string {
+	return append([]string{"type"}, pricedPayloadKeys[partType]...)
+}
 
 // echoed bounds a client string quoted back in an error message.
 func echoed(value string) string {
@@ -184,15 +188,20 @@ func unsupportedPartType(partType string) error {
 }
 
 func unallowedPartKey(partType, key string) error {
-	return fmt.Errorf("invalid message content: a %s content part may not carry a %q key; it allows only %s", partType, echoed(key), strings.Join(pricedPartKeys[partType], ", "))
+	return fmt.Errorf("invalid message content: a content part of type %s may not carry a %q key; it allows only %s", partType, echoed(key), strings.Join(allowedPartKeys(partType), ", "))
+}
+
+func partKeySpelling(key string) error {
+	return fmt.Errorf("invalid message content: a content part's %q key must be spelled exactly, without escapes", echoed(key))
 }
 
 func duplicatePartKey(key string) error {
 	return fmt.Errorf("invalid message content: a content part has more than one %q key", key)
 }
 
-// CountImageParts counts the parts a provider could read as images from
-// content forwarded verbatim. It reads tokens rather than decoding into a
+// CountImageParts counts the image_url parts of content forwarded unparsed
+// (compacted, semantically identical JSON), and refuses any part that is not
+// exactly a text, image_url or refusal part. It reads tokens rather than decoding into a
 // struct because a struct decode lets a duplicate or re-cased key hide a part.
 func CountImageParts(messages []oai.Message) (int, error) {
 	total := 0
@@ -245,6 +254,9 @@ func countContentImages(content json.RawMessage) (int, error) {
 	return count, nil
 }
 
+// The decoder's offset sits just past the closing quote, so a string spelled
+// without escapes ends exactly len(decoded)+1 bytes after its opening quote;
+// an escape makes the source longer than the decoded text and the check fail.
 func isPlainSpelling(content []byte, end int64, decoded string) bool {
 	start := end - int64(len(decoded)) - 2
 	return start >= 0 && content[start] == '"' && string(content[start+1:end-1]) == decoded
@@ -262,7 +274,7 @@ func readPartType(dec *json.Decoder, content []byte) (string, error) {
 	if !isPlainSpelling(content, dec.InputOffset(), value) {
 		return "", errTypeValueForm
 	}
-	if _, priced := pricedPartKeys[value]; !priced {
+	if _, priced := pricedPayloadKeys[value]; !priced {
 		return "", unsupportedPartType(value)
 	}
 	return value, nil
@@ -310,8 +322,8 @@ type partKey struct {
 }
 
 func checkPartKeys(partType string, keys []partKey) error {
-	allowed := pricedPartKeys[partType]
-	for _, payload := range allowed[1:] {
+	allowed := allowedPartKeys(partType)
+	for _, payload := range pricedPayloadKeys[partType] {
 		spelledAsPayload := func(key partKey) bool { return strings.EqualFold(key.name, payload) }
 		first := slices.IndexFunc(keys, spelledAsPayload)
 		if first >= 0 && slices.ContainsFunc(keys[first+1:], spelledAsPayload) {
@@ -319,8 +331,11 @@ func checkPartKeys(partType string, keys []partKey) error {
 		}
 	}
 	for _, key := range keys {
-		if !key.plain || !slices.Contains(allowed, key.name) {
+		switch {
+		case !slices.Contains(allowed, key.name):
 			return unallowedPartKey(partType, key.name)
+		case !key.plain:
+			return partKeySpelling(key.name)
 		}
 	}
 	return nil

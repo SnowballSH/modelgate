@@ -142,15 +142,16 @@ as the translator decodes it: a text part that also carries an
 a fixed number of prompt tokens, inline or remote, on all three
 upstreams. On the translated upstreams the image's base64 also stops
 counting toward the prompt's byte bound. The `chat_completions`
-passthrough forwards content parts unread, so it counts what a provider
-could read as an image by walking the top-level keys of every part: a
+passthrough walks the top-level keys of every part before forwarding
+it, so it counts the image parts: a
 part counts exactly when its `type` is `image_url`, whether or not its
 `image_url` value is null or malformed, and its bytes stay counted as
 text (over-counting is the safe side). The passthrough refuses, with a
 400 `invalid message content: ...` before admission, a message whose
 `content` is neither a string, `null` nor an array of JSON objects;
-v0.6.0 forwarded such content unread. Because it forwards the bytes
-verbatim, it admits only parts with one reading: a passthrough content
+v0.6.0 forwarded such content unread. Because it forwards the content
+unparsed (compacted, semantically identical JSON, not the client's exact
+bytes), it admits only parts with one reading: a passthrough content
 part must be an object with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`). A part with no `type`, a second key
 folding to `type`, a `type` key or value not spelled exactly in
 lowercase (escaped spellings included), a value other than the three, a
@@ -159,7 +160,12 @@ any casing), or a second key folding to the type's own payload key is
 refused with a 400 before admission, reserving nothing. This keeps `file`
 parts (billed per page as images), `input_audio` parts (audio tokens
 inside `prompt_tokens`) and any payload key a provider might read, now or
-later, out of the byte-bounded path. Values are not inspected: a `type`
+later, out of the byte-bounded path. Commonly sent shapes that this
+refuses include a `text` part carrying `annotations` or `citations`,
+`cache_control` on an `image_url` part, a top-level `detail` beside
+`image_url` (it belongs inside the `image_url` object), and `input_audio`,
+`file`, `input_text`, `output_text` and `input_image` parts; `[]` and an
+absent or `null` `content` are admitted. Values are not inspected: a `type`
 nested inside a value does not discriminate. An echoed type or key, like
 an echoed `detail` or media type, is cut to 64 bytes. The number follows the row's upstream:
 

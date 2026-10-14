@@ -403,7 +403,8 @@ also charged a fixed allowance, whether it arrives inline or as an
 `https://` URL: 4,784 tokens on an Anthropic row and 36,000 on an OpenAI
 row. On the translated upstreams a part is an image when its `type` says
 so, and an inline image's base64 is then not counted as text; on a
-`chat_completions` row, whose content parts are forwarded verbatim, a
+`chat_completions` row, whose content parts are forwarded unparsed (compacted,
+semantically identical JSON), a
 part is an image exactly when its `type` is `image_url`, and the bytes
 stay counted. The bound assumes a provider bills an image block by its
 dimensions, never by tokenising its bytes as text, and rejects a payload

@@ -323,7 +323,11 @@ const (
 
 func errExtraKey(partType, key string) string {
 	allowed := map[string]string{"text": allowedKeysOfText, "image_url": allowedKeysOfImage, "refusal": allowedKeysOfRefuse}[partType]
-	return "invalid message content: a " + partType + " content part may not carry a \"" + key + "\" key; it allows only " + allowed
+	return "invalid message content: a content part of type " + partType + " may not carry a \"" + key + "\" key; it allows only " + allowed
+}
+
+func errKeySpelling(key string) string {
+	return "invalid message content: a content part's \"" + key + "\" key must be spelled exactly, without escapes"
 }
 
 func errDuplicateKey(key string) string {
@@ -334,7 +338,7 @@ func errUnsupportedType(partType string) string {
 	return "invalid message content: unsupported content part type \"" + partType + "\"; a passthrough row forwards only text, image_url and refusal parts"
 }
 
-func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
+func TestPassthroughPartsAreExactlyTextImageOrRefusal(t *testing.T) {
 	const image = `{"url":"https://example.com/a.png"}`
 	cases := []struct {
 		name    string
@@ -382,7 +386,10 @@ func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 		{"text carrying a re-cased Image_URL", `[{"type":"text","Image_URL":` + image + `}]`, 0, errExtraKey("text", "Image_URL")},
 		{"text carrying a re-cased Text key", `[{"type":"text","Text":"hi"}]`, 0, errExtraKey("text", "Text")},
 		{"text carrying a re-cased Cache_Control key", `[{"type":"text","Cache_Control":{}}]`, 0, errExtraKey("text", "Cache_Control")},
-		{"text carrying an escaped text key", `[{"type":"text","\u0074ext":"hi"}]`, 0, errExtraKey("text", "text")},
+		{"text carrying an escaped text key", `[{"type":"text","\u0074ext":"hi"}]`, 0, errKeySpelling("text")},
+		{"text carrying an escaped cache_control key", `[{"type":"text","\u0063ache_control":{}}]`, 0, errKeySpelling("cache_control")},
+		{"image carrying an escaped image_url key", `[{"type":"image_url","\u0069mage_url":{}}]`, 0, errKeySpelling("image_url")},
+		{"refusal carrying an escaped refusal key", `[{"type":"refusal","\u0072efusal":"no"}]`, 0, errKeySpelling("refusal")},
 		{"image carrying text", `[{"type":"image_url","image_url":` + image + `,"text":"hi"}]`, 0, errExtraKey("image_url", "text")},
 		{"image carrying a file", `[{"type":"image_url","image_url":` + image + `,"file":"f"}]`, 0, errExtraKey("image_url", "file")},
 		{"image carrying cache_control", `[{"type":"image_url","image_url":` + image + `,"cache_control":{}}]`, 0, errExtraKey("image_url", "cache_control")},
