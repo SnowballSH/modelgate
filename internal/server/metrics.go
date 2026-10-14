@@ -29,6 +29,8 @@ type Metrics struct {
 	bookingFailures prometheus.Counter
 	inFlight        prometheus.Gauge
 	keyCount        prometheus.Gauge
+	bodies          prometheus.Gauge
+	bodyRefusals    prometheus.Counter
 }
 
 func NewMetrics(budgetUSD float64) *Metrics {
@@ -67,10 +69,19 @@ func NewMetrics(budgetUSD float64) *Metrics {
 			Name: "modelgate_keys",
 			Help: "Number of API keys in the store.",
 		}),
+		bodies: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "modelgate_request_bodies_in_flight",
+			Help: "Request bodies being read or held before admission.",
+		}),
+		bodyRefusals: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "modelgate_request_body_refusals_total",
+			Help: "Requests refused unread because every body slot was taken.",
+		}),
 	}
 	m.registry.MustRegister(
 		m.requests, m.requestDuration, m.tokens, m.budget,
 		m.providerErrors, m.bookingFailures, m.inFlight, m.keyCount,
+		m.bodies, m.bodyRefusals,
 	)
 	m.budget.Set(budgetUSD)
 	return m
@@ -183,6 +194,10 @@ func (m *Metrics) BookingFailed() { m.bookingFailures.Inc() }
 
 func (m *Metrics) IncInFlight() { m.inFlight.Inc() }
 func (m *Metrics) DecInFlight() { m.inFlight.Dec() }
+
+func (m *Metrics) IncBodies()   { m.bodies.Inc() }
+func (m *Metrics) DecBodies()   { m.bodies.Dec() }
+func (m *Metrics) BodyRefused() { m.bodyRefusals.Inc() }
 
 func (m *Metrics) SetKeyCount(n float64) {
 	m.keyCount.Set(n)

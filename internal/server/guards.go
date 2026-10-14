@@ -90,12 +90,17 @@ func (g *Guards) Authenticate(ctx context.Context, authorization string) (store.
 	return key, true, nil
 }
 
-// ResolveModel runs the guards that need only the key and the model name:
-// the key's rate limit, then the model table and the key's allowlist.
-func (g *Guards) ResolveModel(key store.KeyRecord, requestedModel string) (models.Model, *Refusal) {
+// Throttle spends one of the key's rate tokens, which needs only the key,
+// so a refused request is answered before its body is read.
+func (g *Guards) Throttle(key store.KeyRecord) *Refusal {
 	if wait, ok := g.takeToken(key.ID, g.now()); !ok {
-		return models.Model{}, &Refusal{Code: CodeRateLimited, RetryAfter: wait}
+		return &Refusal{Code: CodeRateLimited, RetryAfter: wait}
 	}
+	return nil
+}
+
+// ResolveModel checks the model table and the key's allowlist.
+func (g *Guards) ResolveModel(key store.KeyRecord, requestedModel string) (models.Model, *Refusal) {
 	model, resolved := g.table.Resolve(requestedModel)
 	if !resolved || (key.Models != nil && !slices.Contains(key.Models, requestedModel)) {
 		return models.Model{}, &Refusal{Code: CodeModelNotFound}

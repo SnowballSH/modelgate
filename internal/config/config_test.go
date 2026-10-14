@@ -73,6 +73,7 @@ func TestLoadDefaults(t *testing.T) {
 		MaxBodyBytes:          1 << 20,
 		RateLimitPerKeyRPM:    60,
 		MaxConcurrentRequests: 8,
+		MaxConcurrentBodies:   8,
 		RequestDeadline:       10 * time.Minute,
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -102,6 +103,9 @@ func TestLoadRejectsGarbage(t *testing.T) {
 		{"zero rpm", "RATE_LIMIT_PER_KEY_RPM", "0"},
 		{"bad concurrency", "MAX_CONCURRENT_REQUESTS", "lots"},
 		{"zero concurrency", "MAX_CONCURRENT_REQUESTS", "0"},
+		{"bad body concurrency", "MAX_CONCURRENT_BODIES", "lots"},
+		{"zero body concurrency", "MAX_CONCURRENT_BODIES", "0"},
+		{"negative body concurrency", "MAX_CONCURRENT_BODIES", "-2"},
 		{"bad duration", "REQUEST_DEADLINE", "soon"},
 		{"zero duration", "REQUEST_DEADLINE", "0s"},
 		{"negative duration", "REQUEST_DEADLINE", "-1m"},
@@ -144,6 +148,7 @@ func TestLoadFullEnv(t *testing.T) {
 		"MAX_BODY_BYTES":          "5242880",
 		"RATE_LIMIT_PER_KEY_RPM":  "120",
 		"MAX_CONCURRENT_REQUESTS": "16",
+		"MAX_CONCURRENT_BODIES":   "4",
 		"REQUEST_DEADLINE":        "2m30s",
 	}
 	cfg, err := Load(getenvFrom(env))
@@ -169,6 +174,7 @@ func TestLoadFullEnv(t *testing.T) {
 		MaxBodyBytes:          5242880,
 		RateLimitPerKeyRPM:    120,
 		MaxConcurrentRequests: 16,
+		MaxConcurrentBodies:   4,
 		RequestDeadline:       2*time.Minute + 30*time.Second,
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -214,5 +220,17 @@ func TestLoadRejectsInvalidProviderBudgets(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestMaxConcurrentBodiesDefaultsToTheRequestConcurrency(t *testing.T) {
+	env := validEnv()
+	env["MAX_CONCURRENT_REQUESTS"] = "12"
+	cfg, err := Load(getenvFrom(env))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.MaxConcurrentBodies != 12 {
+		t.Fatalf("MaxConcurrentBodies = %d, want MAX_CONCURRENT_REQUESTS 12", cfg.MaxConcurrentBodies)
 	}
 }

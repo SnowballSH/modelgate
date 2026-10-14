@@ -2,8 +2,11 @@
 
 ## v0.8.0 — unreleased
 
-A deployment that sets neither new variable admits, refuses, reserves
-and books every request as v0.7.1 did; the store migrates on first start.
+A deployment that sets neither ceiling variable reserves and books every
+request as v0.7.1 did, and admits and refuses it the same way except
+that the rate limit and the new bound on bodies in flight now apply
+before the body is read (see Changed). The store migrates on first
+start.
 
 ### Added
 
@@ -29,6 +32,26 @@ and books every request as v0.7.1 did; the store migrates on first start.
 - `GET /api/usage` gains `providers: [{provider, spend_usd, budget_usd}]`,
   and the admin UI shows per-provider spend, with a bar against each
   ceiling.
+- `MAX_CONCURRENT_BODIES`, optional, default `MAX_CONCURRENT_REQUESTS`:
+  at most that many requests gateway-wide read, parse and translate a
+  body at once, each from before the read until it takes a concurrency
+  slot or is refused. A request that finds every body slot taken is
+  answered `429 rate_limited` with `Retry-After: 1` without its body
+  being read, so request-body memory is bounded by about
+  `(MAX_CONCURRENT_BODIES + MAX_CONCURRENT_REQUESTS)` requests at
+  `MAX_BODY_BYTES`, however many connections a key opens. Metrics
+  `modelgate_request_bodies_in_flight` and
+  `modelgate_request_body_refusals_total`.
+
+### Changed
+
+- The per-key rate limit is spent before the body is read, and a
+  request it refuses is answered without reading the body. v0.7.1 read
+  and parsed every authenticated body before the rate limit or the
+  concurrency limit applied, so one key could make the gateway hold any
+  number of bodies at once. Client-visible: a rate-limited key now gets
+  429 even for a body that is oversized (v0.7.1: 413), malformed (400)
+  or slow (408), and such a request now spends a rate token.
 
 ### Upgrading
 
@@ -39,7 +62,11 @@ and books every request as v0.7.1 did; the store migrates on first start.
   global budget and no provider's ceiling. Back up `DATA_DIR` first;
   v0.7.1 refuses a version 3 database, so a rollback restores that
   backup.
-- Both new variables are optional; set neither and nothing changes.
+- Both ceiling variables are optional; set neither and nothing changes.
+- `MAX_CONCURRENT_BODIES` defaults to `MAX_CONCURRENT_REQUESTS`. Under a
+  container memory limit, check that `(MAX_CONCURRENT_BODIES +
+  MAX_CONCURRENT_REQUESTS) × 2 × MAX_BODY_BYTES` plus the process's own
+  footprint fits it.
 - Keep each provider's own console spend limit at or above its ceiling
   here, so the gateway's refusal, not a provider's, is what stops spend,
   and a provider limit below the ceiling does not turn into upstream

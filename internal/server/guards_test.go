@@ -91,6 +91,9 @@ func admitBearer(g *Guards, auth, model string, demand accounting.Demand) (Admis
 	case !ok:
 		return Admission{}, &Refusal{Code: CodeInvalidAPIKey}
 	}
+	if refusal := g.Throttle(key); refusal != nil {
+		return Admission{}, refusal
+	}
 	resolved, refusal := g.ResolveModel(key, model)
 	if refusal != nil {
 		return Admission{}, refusal

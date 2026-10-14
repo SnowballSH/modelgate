@@ -141,11 +141,12 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	s.public = httpServer(NewPublicHandler(
 		guards, table, acct, st, up, metrics,
 		PublicConfig{
-			DefaultMaxTokens: cfg.DefaultMaxTokens,
-			MaxOutputTokens:  cfg.MaxOutputTokens,
-			MaxBodyBytes:     cfg.MaxBodyBytes,
-			RequestDeadline:  cfg.RequestDeadline,
-			Version:          version,
+			DefaultMaxTokens:    cfg.DefaultMaxTokens,
+			MaxOutputTokens:     cfg.MaxOutputTokens,
+			MaxBodyBytes:        cfg.MaxBodyBytes,
+			MaxConcurrentBodies: cfg.MaxConcurrentBodies,
+			RequestDeadline:     cfg.RequestDeadline,
+			Version:             version,
 		}, time.Now))
 	s.admin = httpServer(NewAdminHandler(
 		st, acct, table, metrics, boundary,
