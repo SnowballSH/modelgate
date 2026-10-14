@@ -16,9 +16,10 @@ import (
 var (
 	ErrQuotaExhausted  = errors.New("per-key quota exhausted")
 	ErrBudgetExhausted = errors.New("global budget exhausted")
-	// ErrCapReserved refuses a request whose quota or budget is not yet spent
-	// but is fully held by in-flight reservations; it clears as they finish.
-	ErrCapReserved = errors.New("remaining quota or budget held by in-flight requests")
+	// ErrCapReserved refuses a request whose quota, budget or provider ceiling
+	// is not yet spent but is fully held by in-flight reservations; it clears
+	// as they finish.
+	ErrCapReserved = errors.New("remaining quota, budget or provider ceiling held by in-flight requests")
 	// ErrInvalidBound is an invariant violation: a request's worst-case
 	// cost is never negative, so a negative or non-numeric bound means a
 	// size computation upstream of admission is wrong.
@@ -51,8 +52,17 @@ func WorstCaseCost(d Demand, p models.Pricing) float64 {
 	return (float64(d.InputTokens)*inputRate + float64(d.OutputTokens)*p.OutputUSDPerMTok) / 1e6
 }
 
+// spendStore is the part of the store the accountant reads and books.
+type spendStore interface {
+	MonthSpend(ctx context.Context, month string) (float64, error)
+	MonthSpendByKey(ctx context.Context, month, keyID string) (float64, error)
+	MonthSpendByProvider(ctx context.Context, month, provider string) (float64, error)
+	MonthSpendPerProvider(ctx context.Context, month string) (map[string]float64, error)
+	AddUsage(ctx context.Context, month, keyID, model, provider string, u store.Usage) error
+}
+
 type Accountant struct {
-	store           *store.Store
+	store           spendStore
 	budget          float64
 	providerBudgets map[string]float64
 

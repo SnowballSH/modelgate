@@ -20,7 +20,8 @@ start.
   `insufficient_quota` with `x-should-retry: false`, as the budget does,
   with the message `monthly <provider> spend ceiling exhausted`, and
   counts as outcome `provider_budget_exhausted`; a ceiling held only by
-  requests in flight answers the retryable `cap_reserved`. Refusal order:
+  requests in flight answers the retryable `cap_reserved`, whose message
+  now names the provider ceiling alongside the quota and budget. Refusal order:
   key quota, global budget, provider ceiling.
 - Every booking records the provider of the row that served it, so
   per-provider month-to-date spend survives restarts and model-table
@@ -45,7 +46,8 @@ start.
   may hold at once, so a key dripping slow bodies cannot starve the
   others. A request over it is refused the same way, unread, with the
   message `this key's concurrent request limit is reached; retry
-  shortly`. A slot is held at most for the existing 30-second body read
+  shortly`. A value above `MAX_CONCURRENT_BODIES` refuses startup. A
+  request refused by either body bound has already spent a rate token. A slot is held at most for the existing 30-second body read
   deadline, which trickled bytes do not extend.
 - Metrics `modelgate_request_bodies_in_flight` and
   `modelgate_request_body_refusals_total{limit="gateway"|"key"}`.
@@ -66,9 +68,13 @@ start.
   rebuilt keyed by provider in one transaction, and existing rows are
   attributed by the model table v0.8.0 starts with. A row for a model
   that table no longer lists stays unattributed: it counts against the
-  global budget and no provider's ceiling. Back up `DATA_DIR` first;
-  v0.7.1 refuses a version 3 database, so a rollback restores that
-  backup.
+  global budget and no provider's ceiling.
+- v0.7.1 and older refuse a version 3 database at startup, so rolling
+  back the image digest alone (a deploy tool's digest rollback, say)
+  leaves the gateway failing closed and down. Snapshot `DATA_DIR`
+  immediately before deploying v0.8.0. To roll back: stop the gateway,
+  restore `DATA_DIR` from that snapshot, then start the older image.
+  Spend booked since the snapshot is lost from the store.
 - Both ceiling variables are optional; set neither and nothing changes.
 - `MAX_CONCURRENT_BODIES` defaults to `MAX_CONCURRENT_REQUESTS`. Under a
   container memory limit, check that `(MAX_CONCURRENT_BODIES +

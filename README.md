@@ -103,7 +103,7 @@ partial startup — and it refuses before any port opens.
 | `RATE_LIMIT_PER_KEY_RPM` | Per-key request rate (token bucket, burst equal to the rate) | `60`; a positive integer |
 | `MAX_CONCURRENT_REQUESTS` | Global cap on admitted requests in flight | `8`; a positive integer |
 | `MAX_CONCURRENT_BODIES` | Global cap on request bodies being read, parsed and translated before admission; see [Request body memory](#request-body-memory) | `MAX_CONCURRENT_REQUESTS`; a positive integer |
-| `MAX_BODIES_PER_KEY` | Cap on the body slots one key holds at once | A quarter of `MAX_CONCURRENT_BODIES`, rounded up (2 for 8); a positive integer |
+| `MAX_BODIES_PER_KEY` | Cap on the body slots one key holds at once | A quarter of `MAX_CONCURRENT_BODIES`, rounded up (2 for 8); a positive integer no larger than `MAX_CONCURRENT_BODIES` |
 | `REQUEST_DEADLINE` | Hard per-request deadline, streams included (Go duration) | `10m`; positive |
 
 Fixed timings: a public request body must arrive within 30 seconds of the
@@ -268,17 +268,20 @@ and the body is not read until the key checks out. `GET /v1/models` lists
 the table's models the key may use.
 
 A request is admitted in this order: the key, the key's rate limit, a
-body slot, the body (size and read deadline), the JSON, the model and the
-key's allowlist, the model's declared limits, the translation for the model's
-upstream, the output bounds, a concurrency slot, a reservation of the
-request's worst-case cost against the key quota, the monthly budget and
-the monthly ceiling of the model's provider, then the provider's circuit
-breaker. The reservation's refusals come in this order: a spent key quota,
-a spent global budget, a spent provider ceiling, then `cap_reserved` when
-any of the three is reached only by requests in flight. A request the gateway cannot
-translate is therefore refused with a 400 before it holds a concurrency
-slot or reserves any cost, and a request refused for its key, its rate
-or a full set of body slots is answered without its body being read. On a `chat_completions` row that includes a message whose
+body slot, the body (size and read deadline), the JSON, the model and
+the key's allowlist, the model's declared limits, the translation for
+the model's upstream, the output bounds, a concurrency slot, a
+reservation of the request's worst-case cost against the key quota, the
+monthly budget and the monthly ceiling of the model's provider, then the
+provider's circuit breaker. The reservation's refusals come in this
+order: a spent key quota, a spent global budget, a spent provider
+ceiling, then `cap_reserved` when any of the three is reached only by
+requests in flight. A request the gateway cannot translate is therefore
+refused with a 400 before it holds a concurrency slot or reserves any
+cost, and a request refused for its key, its rate or a full set of body
+slots is answered without its body being read. A request refused for
+want of a body slot has already spent one of its key's rate tokens. On
+a `chat_completions` row that includes a message whose
 `content` is neither a string, `null` nor an array of JSON objects, each
 with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`), each key spelled exactly and at most once
 (`invalid message content: ...`), because the gateway counts that row's
@@ -293,11 +296,12 @@ Every response carries `X-Request-ID`: the caller's own value when it is
 `req_<32 hex>`. The request log line carries the same id.
 
 A 429 that waiting will clear carries `Retry-After` in whole seconds: the
-time until the key's rate bucket refills, `1` when every concurrency slot,
-every gateway body slot or every one of the key's body slots is taken, and `5` for `cap_reserved`. A 429 for an exhausted quota,
-budget or provider ceiling carries `x-should-retry: false` instead, which the OpenAI SDKs
-honour; only the next month or an operator clears it. An upstream 429 is
-answered as `rate_limited` without `Retry-After`.
+time until the key's rate bucket refills, `1` when every concurrency
+slot, every gateway body slot or every one of the key's body slots is
+taken, and `5` for `cap_reserved`. A 429 for an exhausted quota, budget
+or provider ceiling carries `x-should-retry: false` instead, which the
+OpenAI SDKs honour; only the next month or an operator clears it. An
+upstream 429 is answered as `rate_limited` without `Retry-After`.
 
 ### Errors
 
@@ -472,7 +476,8 @@ concurrency slot or is refused, whatever the reason, the body read
 timeout and a client that hangs up mid-body included. A request over
 either bound is answered `429 rate_limited` with `Retry-After: 1` at
 once, unread, and the message says which bound refused it; nothing
-queues. Unauthenticated requests are answered before their body is read
+queues. Such a request has already spent one of its key's rate tokens,
+since the rate limit is checked first. Unauthenticated requests are answered before their body is read
 and take no slot.
 
 The per-key bound keeps one key from starving the rest: with the
@@ -566,10 +571,15 @@ version and the added table, so rolling back from v0.6.0 to v0.5.0 keeps
 working; back up `DATA_DIR` before any upgrade regardless. v0.8.0 is
 schema version 3: it rebuilds the usage table with the provider that
 served each row, attributing existing rows by the model table it starts
-with, in one transaction that loses or duplicates no row. v0.6.0 to
-v0.7.1 refuse a version 3 database, so rolling back from v0.8.0 means
-restoring the `DATA_DIR` taken before the upgrade, which drops the spend
-booked since.
+with, in one transaction that loses or duplicates no row.
+
+**Rolling back from v0.8.0.** v0.6.0 to v0.7.1 refuse a version 3
+database at startup. Rolling back the image alone, such as a deploy
+tool's digest rollback, therefore leaves the gateway failing closed and
+down. Snapshot `DATA_DIR` immediately before deploying v0.8.0; to roll
+back, stop the gateway, restore `DATA_DIR` from that snapshot, then start
+the older image. Spend booked between the snapshot and the rollback is
+lost from the store, though not from the providers' bills.
 
 **Single instance.** Reservations, rate buckets and circuit breakers are
 in memory. Run one instance per data directory.

@@ -110,6 +110,9 @@ func Load(getenv func(string) string) (Config, error) {
 	if err := parsePositive(getenv, "MAX_BODIES_PER_KEY", &cfg.MaxBodiesPerKey); err != nil {
 		return Config{}, err
 	}
+	if cfg.MaxBodiesPerKey > cfg.MaxConcurrentBodies {
+		return Config{}, fmt.Errorf("config: MAX_BODIES_PER_KEY: %d exceeds MAX_CONCURRENT_BODIES %d", cfg.MaxBodiesPerKey, cfg.MaxConcurrentBodies)
+	}
 
 	if raw := getenv("REQUEST_DEADLINE"); raw != "" {
 		deadline, err := time.ParseDuration(raw)

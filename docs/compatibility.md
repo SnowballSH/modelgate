@@ -221,10 +221,11 @@ whatever the output cap.
 
 Nothing else trusts the figure. Booking prices the provider's reported
 usage, so a provider that did accept and bill a longer prompt is booked
-in full, and the quota and budget count it from then on; only that one
-request's reservation was too small. A tier is chosen by the reported
-prompt size, so a table whose `price_tiers` threshold is at or above
-`max_input_tokens` declares a tier no prompt can reach and is refused.
+in full, and the quota, the budget and the provider ceiling count it
+from then on; only that one request's reservation was too small. A tier
+is chosen by the reported prompt size, so a table whose `price_tiers`
+threshold is at or above `max_input_tokens` declares a tier no prompt
+can reach and is refused.
 modelgate forwards no field that lets a provider exceed the window on the
 client's behalf, such as Anthropic's server-side compaction.
 

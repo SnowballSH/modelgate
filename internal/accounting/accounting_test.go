@@ -482,3 +482,39 @@ func (p ProviderSpend) equal(q ProviderSpend) bool {
 	sameBudget := (p.BudgetUSD == nil) == (q.BudgetUSD == nil) && (p.BudgetUSD == nil || *p.BudgetUSD == *q.BudgetUSD)
 	return p.Provider == q.Provider && math.Abs(p.SpendUSD-q.SpendUSD) < epsilon && sameBudget
 }
+
+type countingStore struct {
+	spendStore
+	byProvider int
+}
+
+func (c *countingStore) MonthSpendByProvider(ctx context.Context, month, provider string) (float64, error) {
+	c.byProvider++
+	return c.spendStore.MonthSpendByProvider(ctx, month, provider)
+}
+
+func TestOnlyACeilingCostsAProviderSpendQuery(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		ceilings map[string]float64
+		want     int
+	}{
+		"no ceilings":            {want: 0},
+		"anthropic ceiling only": {ceilings: map[string]float64{models.ProviderAnthropic: 175}, want: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := New(newStore(t), 225, tc.ceilings)
+			spy := &countingStore{spendStore: a.store}
+			a.store = spy
+			for _, provider := range models.Providers {
+				if err := admitOn(ctx, a, now, provider); err != nil {
+					t.Fatalf("%s: %v", provider, err)
+				}
+			}
+			if spy.byProvider != tc.want {
+				t.Fatalf("MonthSpendByProvider ran %d times for one request per provider, want %d", spy.byProvider, tc.want)
+			}
+		})
+	}
+}

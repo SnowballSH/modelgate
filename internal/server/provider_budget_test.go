@@ -147,8 +147,12 @@ func TestAHeldProviderCeilingLeavesTheOtherProviderAdmitted(t *testing.T) {
 	if code := <-first; code != http.StatusOK {
 		t.Fatalf("held openai request: status %d", code)
 	}
-	if held.Code != http.StatusTooManyRequests || decodeError(t, held).Code != CodeCapReserved {
+	detail := decodeError(t, held)
+	if held.Code != http.StatusTooManyRequests || detail.Code != CodeCapReserved {
 		t.Errorf("second openai request while the ceiling is held: status %d body %s, want 429 %s", held.Code, held.Body.String(), CodeCapReserved)
+	}
+	if want := "the remaining monthly quota, budget or provider ceiling is held by requests in flight; retry shortly"; detail.Message != want {
+		t.Errorf("cap_reserved message = %q, want %q", detail.Message, want)
 	}
 	if anthropic.Code != http.StatusOK {
 		t.Errorf("anthropic request while openai's ceiling is held: status %d body %s", anthropic.Code, anthropic.Body.String())

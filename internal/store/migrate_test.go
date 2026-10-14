@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -157,28 +158,28 @@ func TestProbeWriteFailsOnAReadOnlyDatabase(t *testing.T) {
 	}
 }
 
-// v071Schema is the schema modelgate v0.6.0 through v0.7.1 left behind:
-// the v0.5.0 tables, the readiness table, and user_version 2.
-const v071Schema = v050Schema + `
-CREATE TABLE readiness (
-	id INTEGER PRIMARY KEY CHECK (id = 1),
-	probed_at TEXT NOT NULL
-);
-PRAGMA user_version = 2;
-`
-
 type legacyRow struct {
 	month, key, model string
 	requests, input   int64
 	cost              float64
 }
 
+// writeV071Database builds the database v0.6.0 through v0.7.1 left
+// behind by running their two migrations, as they did.
 func writeV071Database(t *testing.T, dir string, rows []legacyRow) {
 	t.Helper()
 	legacy := rawDB(t, dir)
 	defer legacy.Close()
-	if _, err := legacy.Exec(v071Schema); err != nil {
+	for _, step := range migrations[:2] {
+		if _, err := legacy.Exec(step); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := legacy.Exec("PRAGMA user_version = 2"); err != nil {
 		t.Fatal(err)
+	}
+	if got := usageColumns(t, legacy); !slices.Equal(got, v071UsageColumns) {
+		t.Fatalf("the v0.7.1 fixture's usage columns = %v, want %v", got, v071UsageColumns)
 	}
 	for _, r := range rows {
 		if _, err := legacy.Exec(
@@ -282,4 +283,24 @@ func TestUpgradedRowsMergeWithNewBookingsOfTheSameProvider(t *testing.T) {
 	if spend, err := s.MonthSpendByProvider(ctx, "2026-10", "anthropic"); err != nil || spend != 2 || rows != 1 {
 		t.Errorf("anthropic spend %v (err %v) over %d rows, want 2 over one row", spend, err, rows)
 	}
+}
+
+var v071UsageColumns = []string{"month", "key_id", "model", "requests", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd"}
+
+func usageColumns(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query("SELECT name FROM pragma_table_info('usage') ORDER BY cid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	return names
 }

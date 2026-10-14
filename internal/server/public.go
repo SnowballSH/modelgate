@@ -725,7 +725,7 @@ func messageForCode(code string) string {
 	case CodeBudgetExhausted:
 		return "monthly budget exhausted"
 	case CodeCapReserved:
-		return "the remaining monthly quota or budget is held by requests in flight; retry shortly"
+		return "the remaining monthly quota, budget or provider ceiling is held by requests in flight; retry shortly"
 	case CodeRequestTooLarge:
 		return "request body too large"
 	case CodeRequestTimeout:

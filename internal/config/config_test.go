@@ -109,6 +109,7 @@ func TestLoadRejectsGarbage(t *testing.T) {
 		{"negative body concurrency", "MAX_CONCURRENT_BODIES", "-2"},
 		{"bad per-key bodies", "MAX_BODIES_PER_KEY", "two"},
 		{"zero per-key bodies", "MAX_BODIES_PER_KEY", "0"},
+		{"per-key bodies above the gateway's", "MAX_BODIES_PER_KEY", "9"},
 		{"bad duration", "REQUEST_DEADLINE", "soon"},
 		{"zero duration", "REQUEST_DEADLINE", "0s"},
 		{"negative duration", "REQUEST_DEADLINE", "-1m"},
