@@ -39,9 +39,16 @@ start.
   answered `429 rate_limited` with `Retry-After: 1` without its body
   being read, so request-body memory is bounded by about
   `(MAX_CONCURRENT_BODIES + MAX_CONCURRENT_REQUESTS)` requests at
-  `MAX_BODY_BYTES`, however many connections a key opens. Metrics
-  `modelgate_request_bodies_in_flight` and
-  `modelgate_request_body_refusals_total`.
+  `MAX_BODY_BYTES`, however many connections a key opens.
+- `MAX_BODIES_PER_KEY`, optional, default a quarter of
+  `MAX_CONCURRENT_BODIES` rounded up (2 for 8): the body slots one key
+  may hold at once, so a key dripping slow bodies cannot starve the
+  others. A request over it is refused the same way, unread, with the
+  message `this key's concurrent request limit is reached; retry
+  shortly`. A slot is held at most for the existing 30-second body read
+  deadline, which trickled bytes do not extend.
+- Metrics `modelgate_request_bodies_in_flight` and
+  `modelgate_request_body_refusals_total{limit="gateway"|"key"}`.
 
 ### Changed
 

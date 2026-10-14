@@ -30,6 +30,7 @@ type Config struct {
 	RateLimitPerKeyRPM                 int
 	MaxConcurrentRequests              int
 	MaxConcurrentBodies                int
+	MaxBodiesPerKey                    int
 	RequestDeadline                    time.Duration
 	Version                            string
 }
@@ -103,6 +104,10 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	cfg.MaxConcurrentBodies = cfg.MaxConcurrentRequests
 	if err := parsePositive(getenv, "MAX_CONCURRENT_BODIES", &cfg.MaxConcurrentBodies); err != nil {
+		return Config{}, err
+	}
+	cfg.MaxBodiesPerKey = (cfg.MaxConcurrentBodies + 3) / 4
+	if err := parsePositive(getenv, "MAX_BODIES_PER_KEY", &cfg.MaxBodiesPerKey); err != nil {
 		return Config{}, err
 	}
 

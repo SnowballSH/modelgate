@@ -145,6 +145,7 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 			MaxOutputTokens:     cfg.MaxOutputTokens,
 			MaxBodyBytes:        cfg.MaxBodyBytes,
 			MaxConcurrentBodies: cfg.MaxConcurrentBodies,
+			MaxBodiesPerKey:     cfg.MaxBodiesPerKey,
 			RequestDeadline:     cfg.RequestDeadline,
 			Version:             version,
 		}, time.Now))

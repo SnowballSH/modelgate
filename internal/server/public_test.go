@@ -92,6 +92,7 @@ type publicEnvOptions struct {
 	bodyReadTimeout time.Duration
 	tableJSON       string
 	maxBodies       int
+	maxBodiesPerKey int
 }
 
 func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes int64) *publicEnv {
@@ -118,7 +119,7 @@ func newPublicEnvWith(t *testing.T, providerHandler http.HandlerFunc, opts publi
 	m := NewMetrics(opts.budgetUSD)
 	m.TrackMonthSpend(s, nowFn)
 	m.TrackBreaker(models.ProviderAnthropic, breaker)
-	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: opts.maxBodyBytes, BodyReadTimeout: opts.bodyReadTimeout, MaxConcurrentBodies: opts.maxBodies, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
+	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: opts.maxBodyBytes, BodyReadTimeout: opts.bodyReadTimeout, MaxConcurrentBodies: opts.maxBodies, MaxBodiesPerKey: opts.maxBodiesPerKey, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
 	return &publicEnv{handler: handler, store: s, acct: acct, metrics: m, now: now}
 }
 

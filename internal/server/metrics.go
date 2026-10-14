@@ -30,7 +30,7 @@ type Metrics struct {
 	inFlight        prometheus.Gauge
 	keyCount        prometheus.Gauge
 	bodies          prometheus.Gauge
-	bodyRefusals    prometheus.Counter
+	bodyRefusals    *prometheus.CounterVec
 }
 
 func NewMetrics(budgetUSD float64) *Metrics {
@@ -73,10 +73,10 @@ func NewMetrics(budgetUSD float64) *Metrics {
 			Name: "modelgate_request_bodies_in_flight",
 			Help: "Request bodies being read or held before admission.",
 		}),
-		bodyRefusals: prometheus.NewCounter(prometheus.CounterOpts{
+		bodyRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "modelgate_request_body_refusals_total",
-			Help: "Requests refused unread because every body slot was taken.",
-		}),
+			Help: "Requests refused unread because the gateway's or the key's body slots were all taken.",
+		}, []string{"limit"}),
 	}
 	m.registry.MustRegister(
 		m.requests, m.requestDuration, m.tokens, m.budget,
@@ -84,6 +84,9 @@ func NewMetrics(budgetUSD float64) *Metrics {
 		m.bodies, m.bodyRefusals,
 	)
 	m.budget.Set(budgetUSD)
+	for _, limit := range []string{bodyLimitGateway, bodyLimitKey} {
+		m.bodyRefusals.WithLabelValues(limit)
+	}
 	return m
 }
 
@@ -195,9 +198,9 @@ func (m *Metrics) BookingFailed() { m.bookingFailures.Inc() }
 func (m *Metrics) IncInFlight() { m.inFlight.Inc() }
 func (m *Metrics) DecInFlight() { m.inFlight.Dec() }
 
-func (m *Metrics) IncBodies()   { m.bodies.Inc() }
-func (m *Metrics) DecBodies()   { m.bodies.Dec() }
-func (m *Metrics) BodyRefused() { m.bodyRefusals.Inc() }
+func (m *Metrics) IncBodies()               { m.bodies.Inc() }
+func (m *Metrics) DecBodies()               { m.bodies.Dec() }
+func (m *Metrics) BodyRefused(limit string) { m.bodyRefusals.WithLabelValues(limit).Inc() }
 
 func (m *Metrics) SetKeyCount(n float64) {
 	m.keyCount.Set(n)

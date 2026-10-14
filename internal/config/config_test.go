@@ -74,6 +74,7 @@ func TestLoadDefaults(t *testing.T) {
 		RateLimitPerKeyRPM:    60,
 		MaxConcurrentRequests: 8,
 		MaxConcurrentBodies:   8,
+		MaxBodiesPerKey:       2,
 		RequestDeadline:       10 * time.Minute,
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -106,6 +107,8 @@ func TestLoadRejectsGarbage(t *testing.T) {
 		{"bad body concurrency", "MAX_CONCURRENT_BODIES", "lots"},
 		{"zero body concurrency", "MAX_CONCURRENT_BODIES", "0"},
 		{"negative body concurrency", "MAX_CONCURRENT_BODIES", "-2"},
+		{"bad per-key bodies", "MAX_BODIES_PER_KEY", "two"},
+		{"zero per-key bodies", "MAX_BODIES_PER_KEY", "0"},
 		{"bad duration", "REQUEST_DEADLINE", "soon"},
 		{"zero duration", "REQUEST_DEADLINE", "0s"},
 		{"negative duration", "REQUEST_DEADLINE", "-1m"},
@@ -149,6 +152,7 @@ func TestLoadFullEnv(t *testing.T) {
 		"RATE_LIMIT_PER_KEY_RPM":  "120",
 		"MAX_CONCURRENT_REQUESTS": "16",
 		"MAX_CONCURRENT_BODIES":   "4",
+		"MAX_BODIES_PER_KEY":      "3",
 		"REQUEST_DEADLINE":        "2m30s",
 	}
 	cfg, err := Load(getenvFrom(env))
@@ -175,6 +179,7 @@ func TestLoadFullEnv(t *testing.T) {
 		RateLimitPerKeyRPM:    120,
 		MaxConcurrentRequests: 16,
 		MaxConcurrentBodies:   4,
+		MaxBodiesPerKey:       3,
 		RequestDeadline:       2*time.Minute + 30*time.Second,
 	}
 	if !reflect.DeepEqual(cfg, want) {
@@ -232,5 +237,21 @@ func TestMaxConcurrentBodiesDefaultsToTheRequestConcurrency(t *testing.T) {
 	}
 	if cfg.MaxConcurrentBodies != 12 {
 		t.Fatalf("MaxConcurrentBodies = %d, want MAX_CONCURRENT_REQUESTS 12", cfg.MaxConcurrentBodies)
+	}
+}
+
+func TestMaxBodiesPerKeyDefaultsToAQuarterOfTheBodies(t *testing.T) {
+	for bodies, want := range map[string]int{"1": 1, "4": 1, "5": 2, "8": 2, "13": 4} {
+		t.Run(bodies, func(t *testing.T) {
+			env := validEnv()
+			env["MAX_CONCURRENT_BODIES"] = bodies
+			cfg, err := Load(getenvFrom(env))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.MaxBodiesPerKey != want {
+				t.Fatalf("MaxBodiesPerKey with %s bodies = %d, want %d", bodies, cfg.MaxBodiesPerKey, want)
+			}
+		})
 	}
 }

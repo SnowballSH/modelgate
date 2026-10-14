@@ -66,8 +66,11 @@ type PublicConfig struct {
 	// MaxConcurrentBodies bounds the request bodies read and held at once;
 	// zero bounds them at the guards' concurrency.
 	MaxConcurrentBodies int
-	RequestDeadline     time.Duration
-	Version             string
+	// MaxBodiesPerKey bounds the body slots one key holds at once; zero
+	// allows a quarter of MaxConcurrentBodies, rounded up.
+	MaxBodiesPerKey int
+	RequestDeadline time.Duration
+	Version         string
 }
 
 const (
@@ -82,9 +85,12 @@ func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountan
 	if cfg.MaxConcurrentBodies <= 0 {
 		cfg.MaxConcurrentBodies = cap(g.slots)
 	}
+	if cfg.MaxBodiesPerKey <= 0 {
+		cfg.MaxBodiesPerKey = (cfg.MaxConcurrentBodies + 3) / 4
+	}
 	return &PublicHandler{
 		guards:           g,
-		bodies:           newBodyGate(cfg.MaxConcurrentBodies, m),
+		bodies:           newBodyGate(cfg.MaxConcurrentBodies, cfg.MaxBodiesPerKey, m),
 		table:            table,
 		acct:             acct,
 		store:            s,
@@ -201,9 +207,9 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		refuse(*refusal)
 		return
 	}
-	releaseBody, ok := h.bodies.enter()
-	if !ok {
-		refuse(Refusal{Code: CodeRateLimited, RetryAfter: slotRetryAfter, Message: "too many request bodies in flight; retry shortly"})
+	releaseBody, refusal := h.bodies.enter(key.ID)
+	if refusal != nil {
+		refuse(*refusal)
 		return
 	}
 	defer releaseBody()

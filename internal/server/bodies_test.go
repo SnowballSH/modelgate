@@ -20,7 +20,8 @@ import (
 
 const (
 	bodiesInFlight = "modelgate_request_bodies_in_flight"
-	bodyRefusals   = "modelgate_request_body_refusals_total"
+	bodyRefusals   = `modelgate_request_body_refusals_total{limit="gateway"}`
+	keyRefusals    = `modelgate_request_body_refusals_total{limit="key"}`
 )
 
 // watchedBody is a request body that records whether the handler read it,
@@ -55,7 +56,7 @@ func largeChatBody(size int) string {
 }
 
 func TestABodyBurstBeyondTheBoundIsRefusedUnread(t *testing.T) {
-	env := newPublicEnvWith(t, fullResponseHandler(), publicEnvOptions{maxBodyBytes: 8 << 20, budgetUSD: 100, rpm: 1000, maxBodies: 2})
+	env := newPublicEnvWith(t, fullResponseHandler(), publicEnvOptions{maxBodyBytes: 8 << 20, budgetUSD: 100, rpm: 1000, maxBodies: 2, maxBodiesPerKey: 100})
 	auth, _ := insertTestKey(t, env.store, nil)
 
 	writers := make([]*io.PipeWriter, 2)
@@ -229,11 +230,13 @@ func TestAnAdmittedRequestHandsItsBodySlotOn(t *testing.T) {
 	t.Cleanup(releaseUpstream)
 
 	codes := make(chan int, 2)
-	for range 2 {
+	for i := range 2 {
 		go func() { codes <- postBody(env, auth, strings.NewReader(chatBody(false))).Code }()
+		eventually(t, func() bool { return int(arrivals.Load())+len(codes) == i+1 },
+			func() string {
+				return fmt.Sprintf("request %d never settled; %d reached the upstream", i, arrivals.Load())
+			})
 	}
-	eventually(t, func() bool { return arrivals.Load()+int32(len(codes)) == 2 },
-		func() string { return fmt.Sprintf("%d requests reached the upstream", arrivals.Load()) })
 	inFlight := scrape(t, env.metrics, bodiesInFlight)
 	releaseUpstream()
 	for range 2 {
@@ -243,5 +246,130 @@ func TestAnAdmittedRequestHandsItsBodySlotOn(t *testing.T) {
 	}
 	if arrivals.Load() != 2 || inFlight != 0 {
 		t.Fatalf("with one body slot, %d of 2 requests reached the upstream and %v bodies were held while both waited on it; want 2 and 0", arrivals.Load(), inFlight)
+	}
+}
+
+// stallBody starts a request whose body never finishes arriving, and
+// returns once the handler is reading it.
+func stallBody(t *testing.T, env *publicEnv, auth string) {
+	t.Helper()
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.CloseWithError(errors.New("test over")) })
+	body := newWatchedBody(pr)
+	go postBody(env, auth, body)
+	waitFor(t, body.started, "a stalled body was never read")
+}
+
+func TestAKeyAtItsBodyLimitIsRefusedWhileAnotherKeyIsAdmitted(t *testing.T) {
+	env := newPublicEnvWith(t, fullResponseHandler(), publicEnvOptions{maxBodyBytes: 1 << 20, budgetUSD: 100, rpm: 1000, maxBodies: 4, maxBodiesPerKey: 2})
+	hog, _ := insertTestKey(t, env.store, nil)
+	other, _ := insertTestKey(t, env.store, nil)
+	stallBody(t, env, hog)
+	stallBody(t, env, hog)
+
+	body := newWatchedBody(strings.NewReader(chatBody(false)))
+	rec := postBody(env, hog, body)
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("a third body from the key: status %d Retry-After %q, want 429 after 1s", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	if detail := decodeError(t, rec); detail.Code != CodeRateLimited || detail.Message != "this key's concurrent request limit is reached; retry shortly" {
+		t.Errorf("refusal = %+v, want %s naming the key's limit", detail, CodeRateLimited)
+	}
+	if body.read.Load() {
+		t.Error("the refused body was read")
+	}
+	if rec := postBody(env, other, strings.NewReader(chatBody(false))); rec.Code != http.StatusOK {
+		t.Fatalf("another key while the first holds its limit: status %d body %s", rec.Code, rec.Body.String())
+	}
+	if got, gateway := scrape(t, env.metrics, keyRefusals), scrape(t, env.metrics, bodyRefusals); got != 1 || gateway != 0 {
+		t.Errorf("refusals: key %v gateway %v, want 1 and 0", got, gateway)
+	}
+}
+
+func TestTheGatewayBodyBoundCapsTheSumAcrossKeys(t *testing.T) {
+	env := newPublicEnvWith(t, fullResponseHandler(), publicEnvOptions{maxBodyBytes: 1 << 20, budgetUSD: 100, rpm: 1000, maxBodies: 3, maxBodiesPerKey: 2})
+	first, _ := insertTestKey(t, env.store, nil)
+	second, _ := insertTestKey(t, env.store, nil)
+	third, _ := insertTestKey(t, env.store, nil)
+	stallBody(t, env, first)
+	stallBody(t, env, first)
+	stallBody(t, env, second)
+
+	body := newWatchedBody(strings.NewReader(chatBody(false)))
+	rec := postBody(env, third, body)
+	if detail := decodeError(t, rec); rec.Code != http.StatusTooManyRequests || detail.Message != "too many request bodies in flight; retry shortly" {
+		t.Fatalf("a fresh key with every gateway slot held: status %d error %+v, want 429 naming the gateway limit", rec.Code, detail)
+	}
+	if body.read.Load() {
+		t.Error("the refused body was read")
+	}
+	if got := scrape(t, env.metrics, bodiesInFlight); got != 3 {
+		t.Errorf("%s = %v, want 3", bodiesInFlight, got)
+	}
+	if got, key := scrape(t, env.metrics, bodyRefusals), scrape(t, env.metrics, keyRefusals); got != 1 || key != 0 {
+		t.Errorf("refusals: gateway %v key %v, want 1 and 0", got, key)
+	}
+}
+
+func TestASlowDripReleasesItsSlotAtTheReadDeadline(t *testing.T) {
+	env := newPublicEnvWith(t, fullResponseHandler(), publicEnvOptions{maxBodyBytes: 1 << 20, budgetUSD: 100, rpm: 1000, bodyReadTimeout: 200 * time.Millisecond, maxBodies: 1, maxBodiesPerKey: 1})
+	auth, _ := insertTestKey(t, env.store, nil)
+	srv := httptest.NewServer(env.handler)
+	t.Cleanup(srv.Close)
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	body := chatBody(false)
+	start := time.Now()
+	fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nAuthorization: %s\r\nContent-Length: %d\r\n\r\n", auth, len(body))
+	go func() {
+		for i := range len(body) - 1 {
+			if _, err := conn.Write([]byte{body[i]}); err != nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}()
+	res, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusRequestTimeout {
+		t.Fatalf("a body dripping a byte every 20 ms: status %d, want 408", res.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("the drip held its slot for %v against a 200 ms read deadline", elapsed)
+	}
+	eventually(t, func() bool { return scrape(t, env.metrics, bodiesInFlight) == 0 },
+		func() string { return "the dripping request kept its body slot" })
+	assertBodySlotFree(t, env, auth)
+}
+
+func TestAGatewayRefusalLeavesTheKeysAllowanceIntact(t *testing.T) {
+	env := newPublicEnvWith(t, fullResponseHandler(), publicEnvOptions{maxBodyBytes: 1 << 20, budgetUSD: 100, rpm: 1000, maxBodies: 1, maxBodiesPerKey: 1})
+	holder, _ := insertTestKey(t, env.store, nil)
+	refused, _ := insertTestKey(t, env.store, nil)
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pw.CloseWithError(errors.New("test over")) })
+	stalled := newWatchedBody(pr)
+	held := make(chan int, 1)
+	go func() { held <- postBody(env, holder, stalled).Code }()
+	waitFor(t, stalled.started, "the stalled body was never read")
+
+	if rec := postBody(env, refused, strings.NewReader(chatBody(false))); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("with the only gateway slot held: status %d, want 429", rec.Code)
+	}
+	fmt.Fprint(pw, chatBody(false))
+	_ = pw.Close()
+	if code := <-held; code != http.StatusOK {
+		t.Fatalf("the held request once its body arrived: status %d", code)
+	}
+	if rec := postBody(env, refused, strings.NewReader(chatBody(false))); rec.Code != http.StatusOK {
+		t.Fatalf("the once-refused key with the gateway free: status %d body %s", rec.Code, rec.Body.String())
 	}
 }
