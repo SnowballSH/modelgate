@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/SnowballSH/modelgate/internal/models"
 )
 
 type Config struct {
@@ -18,6 +20,7 @@ type Config struct {
 	OpenAIBaseURL                      string
 	ModelsConfigFile                   string
 	BudgetMonthlyUSD                   float64
+	ProviderBudgetsUSD                 map[string]float64
 	AdminIdentityHeader                string
 	AdminAllowedUsers                  []string
 	AdminProxySecretFile               string
@@ -26,6 +29,8 @@ type Config struct {
 	MaxBodyBytes                       int64
 	RateLimitPerKeyRPM                 int
 	MaxConcurrentRequests              int
+	MaxConcurrentBodies                int
+	MaxBodiesPerKey                    int
 	RequestDeadline                    time.Duration
 	Version                            string
 }
@@ -70,11 +75,14 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 
-	budget, err := strconv.ParseFloat(getenv("BUDGET_MONTHLY_USD"), 64)
-	if err != nil || math.IsNaN(budget) || math.IsInf(budget, 0) || budget <= 0 {
-		return Config{}, errors.New("config: BUDGET_MONTHLY_USD: must be a positive finite number")
+	budget, err := parseBudget(getenv, "BUDGET_MONTHLY_USD")
+	if err != nil {
+		return Config{}, err
 	}
 	cfg.BudgetMonthlyUSD = budget
+	if cfg.ProviderBudgetsUSD, err = parseProviderBudgets(getenv); err != nil {
+		return Config{}, err
+	}
 
 	if err := parsePositive(getenv, "DEFAULT_MAX_TOKENS", &cfg.DefaultMaxTokens); err != nil {
 		return Config{}, err
@@ -94,6 +102,17 @@ func Load(getenv func(string) string) (Config, error) {
 	if err := parsePositive(getenv, "MAX_CONCURRENT_REQUESTS", &cfg.MaxConcurrentRequests); err != nil {
 		return Config{}, err
 	}
+	cfg.MaxConcurrentBodies = cfg.MaxConcurrentRequests
+	if err := parsePositive(getenv, "MAX_CONCURRENT_BODIES", &cfg.MaxConcurrentBodies); err != nil {
+		return Config{}, err
+	}
+	cfg.MaxBodiesPerKey = (cfg.MaxConcurrentBodies + 3) / 4
+	if err := parsePositive(getenv, "MAX_BODIES_PER_KEY", &cfg.MaxBodiesPerKey); err != nil {
+		return Config{}, err
+	}
+	if cfg.MaxBodiesPerKey > cfg.MaxConcurrentBodies {
+		return Config{}, fmt.Errorf("config: MAX_BODIES_PER_KEY: %d exceeds MAX_CONCURRENT_BODIES %d", cfg.MaxBodiesPerKey, cfg.MaxConcurrentBodies)
+	}
 
 	if raw := getenv("REQUEST_DEADLINE"); raw != "" {
 		deadline, err := time.ParseDuration(raw)
@@ -104,6 +123,41 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseBudget(getenv func(string) string, name string) (float64, error) {
+	budget, err := strconv.ParseFloat(getenv(name), 64)
+	if err != nil || math.IsNaN(budget) || math.IsInf(budget, 0) || budget <= 0 {
+		return 0, fmt.Errorf("config: %s: must be a positive finite number", name)
+	}
+	return budget, nil
+}
+
+// providerBudgetVar names the optional setting that caps one provider's
+// monthly spend, e.g. BUDGET_MONTHLY_USD_ANTHROPIC.
+func providerBudgetVar(provider string) string {
+	return "BUDGET_MONTHLY_USD_" + strings.ToUpper(provider)
+}
+
+// parseProviderBudgets reads a ceiling for each provider that sets one; a
+// provider without its variable is capped only by the global budget.
+func parseProviderBudgets(getenv func(string) string) (map[string]float64, error) {
+	var budgets map[string]float64
+	for _, provider := range models.Providers {
+		name := providerBudgetVar(provider)
+		if getenv(name) == "" {
+			continue
+		}
+		budget, err := parseBudget(getenv, name)
+		if err != nil {
+			return nil, err
+		}
+		if budgets == nil {
+			budgets = map[string]float64{}
+		}
+		budgets[provider] = budget
+	}
+	return budgets, nil
 }
 
 // splitList reads a comma-separated list, dropping blank entries so a

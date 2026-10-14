@@ -77,7 +77,7 @@ func TestBookingRepricesTheWholeRequestAboveATier(t *testing.T) {
 func TestAdmitReservesAtTheTopTier(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	acct := accounting.New(s, 100)
+	acct := accounting.New(s, 100, nil)
 	g := NewGuards(s, acct, tableFrom(t, tieredModelJSON), 60, 4, clk.now)
 	gen := insertKey(t, s, clk.t, nil)
 

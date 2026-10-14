@@ -43,6 +43,7 @@ func (u Upstreams) breakerFor(providerName string) *provider.Breaker {
 
 type PublicHandler struct {
 	guards           *Guards
+	bodies           *bodyGate
 	table            *models.Table
 	acct             *accounting.Accountant
 	store            *store.Store
@@ -62,8 +63,14 @@ type PublicConfig struct {
 	MaxOutputTokens  int
 	MaxBodyBytes     int64
 	BodyReadTimeout  time.Duration
-	RequestDeadline  time.Duration
-	Version          string
+	// MaxConcurrentBodies bounds the request bodies read and held at once;
+	// zero bounds them at the guards' concurrency.
+	MaxConcurrentBodies int
+	// MaxBodiesPerKey bounds the body slots one key holds at once; zero
+	// allows a quarter of MaxConcurrentBodies, rounded up.
+	MaxBodiesPerKey int
+	RequestDeadline time.Duration
+	Version         string
 }
 
 const (
@@ -75,8 +82,15 @@ func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountan
 	if cfg.BodyReadTimeout <= 0 {
 		cfg.BodyReadTimeout = defaultBodyReadTimeout
 	}
+	if cfg.MaxConcurrentBodies <= 0 {
+		cfg.MaxConcurrentBodies = cap(g.slots)
+	}
+	if cfg.MaxBodiesPerKey <= 0 {
+		cfg.MaxBodiesPerKey = (cfg.MaxConcurrentBodies + 3) / 4
+	}
 	return &PublicHandler{
 		guards:           g,
+		bodies:           newBodyGate(cfg.MaxConcurrentBodies, cfg.MaxBodiesPerKey, m),
 		table:            table,
 		acct:             acct,
 		store:            s,
@@ -185,6 +199,20 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		return
 	}
 	record.KeyID = key.ID
+	refuse := func(refusal Refusal) {
+		observe(refusal.Code)
+		writeRefusal(w, refusal, refusal.message())
+	}
+	if refusal := h.guards.Throttle(key); refusal != nil {
+		refuse(*refusal)
+		return
+	}
+	releaseBody, refusal := h.bodies.enter(key.ID)
+	if refusal != nil {
+		refuse(*refusal)
+		return
+	}
+	defer releaseBody()
 
 	body, code := h.readBody(w, r, liftBodyDeadline)
 	if code != "" {
@@ -195,10 +223,6 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 	if err := json.Unmarshal(body, &req); err != nil {
 		fail(CodeInvalidRequest, "invalid JSON body")
 		return
-	}
-	refuse := func(refusal Refusal) {
-		observe(refusal.Code)
-		writeRefusal(w, refusal, messageForCode(refusal.Code))
 	}
 	model, refusal := h.guards.ResolveModel(key, req.Model)
 	if refusal != nil {
@@ -233,6 +257,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		return
 	}
 	adm, refusal := h.guards.Admit(r.Context(), key, model, demand)
+	releaseBody()
 	if refusal != nil {
 		refuse(*refusal)
 		return
@@ -700,7 +725,7 @@ func messageForCode(code string) string {
 	case CodeBudgetExhausted:
 		return "monthly budget exhausted"
 	case CodeCapReserved:
-		return "the remaining monthly quota or budget is held by requests in flight; retry shortly"
+		return "the remaining monthly quota, budget or provider ceiling is held by requests in flight; retry shortly"
 	case CodeRequestTooLarge:
 		return "request body too large"
 	case CodeRequestTimeout:

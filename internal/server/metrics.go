@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
+	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/provider"
 	"github.com/SnowballSH/modelgate/internal/store"
 )
@@ -28,6 +29,8 @@ type Metrics struct {
 	bookingFailures prometheus.Counter
 	inFlight        prometheus.Gauge
 	keyCount        prometheus.Gauge
+	bodies          prometheus.Gauge
+	bodyRefusals    *prometheus.CounterVec
 }
 
 func NewMetrics(budgetUSD float64) *Metrics {
@@ -66,12 +69,24 @@ func NewMetrics(budgetUSD float64) *Metrics {
 			Name: "modelgate_keys",
 			Help: "Number of API keys in the store.",
 		}),
+		bodies: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "modelgate_request_bodies_in_flight",
+			Help: "Request bodies being read or held before admission.",
+		}),
+		bodyRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "modelgate_request_body_refusals_total",
+			Help: "Requests refused unread because the gateway's or the key's body slots were all taken.",
+		}, []string{"limit"}),
 	}
 	m.registry.MustRegister(
 		m.requests, m.requestDuration, m.tokens, m.budget,
 		m.providerErrors, m.bookingFailures, m.inFlight, m.keyCount,
+		m.bodies, m.bodyRefusals,
 	)
 	m.budget.Set(budgetUSD)
+	for _, limit := range []string{bodyLimitGateway, bodyLimitKey} {
+		m.bodyRefusals.WithLabelValues(limit)
+	}
 	return m
 }
 
@@ -91,6 +106,56 @@ func (m *Metrics) TrackMonthSpend(s *store.Store, now func() time.Time) {
 		}
 		return spend
 	}))
+}
+
+// TrackProviderSpend exports each provider's ceiling and the current
+// month's spend attributed to it, for every provider with a ceiling or with
+// spend this month, read at scrape time like the month's total. A failed
+// read exports NaN for every provider with a ceiling.
+func (m *Metrics) TrackProviderSpend(acct *accounting.Accountant, now func() time.Time) {
+	m.registry.MustRegister(&providerSpendCollector{acct: acct, now: now})
+}
+
+var (
+	providerBudgetDesc = prometheus.NewDesc("modelgate_provider_budget_usd",
+		"Configured monthly ceiling of one provider in USD.", []string{"provider"}, nil)
+	providerSpendDesc = prometheus.NewDesc("modelgate_provider_month_spend_usd",
+		"Spend recorded for the current month against one provider in USD.", []string{"provider"}, nil)
+)
+
+type providerSpendCollector struct {
+	acct *accounting.Accountant
+	now  func() time.Time
+}
+
+func (c *providerSpendCollector) Describe(ch chan<- *prometheus.Desc) {
+	ch <- providerBudgetDesc
+	ch <- providerSpendDesc
+}
+
+func (c *providerSpendCollector) Collect(ch chan<- prometheus.Metric) {
+	ctx, cancel := context.WithTimeout(context.Background(), scrapeQueryTimeout)
+	defer cancel()
+	spends, err := c.acct.ProviderSpend(ctx, c.now())
+	if err != nil {
+		spends = c.unreadable()
+	}
+	for _, p := range spends {
+		if p.BudgetUSD != nil {
+			ch <- prometheus.MustNewConstMetric(providerBudgetDesc, prometheus.GaugeValue, *p.BudgetUSD, p.Provider)
+		}
+		ch <- prometheus.MustNewConstMetric(providerSpendDesc, prometheus.GaugeValue, p.SpendUSD, p.Provider)
+	}
+}
+
+func (c *providerSpendCollector) unreadable() []accounting.ProviderSpend {
+	var out []accounting.ProviderSpend
+	for _, provider := range models.Providers {
+		if budget := c.acct.ProviderBudget(provider); budget != nil {
+			out = append(out, accounting.ProviderSpend{Provider: provider, SpendUSD: math.NaN(), BudgetUSD: budget})
+		}
+	}
+	return out
 }
 
 // TrackBreaker exports whether the provider's circuit is refusing calls,
@@ -132,6 +197,10 @@ func (m *Metrics) BookingFailed() { m.bookingFailures.Inc() }
 
 func (m *Metrics) IncInFlight() { m.inFlight.Inc() }
 func (m *Metrics) DecInFlight() { m.inFlight.Dec() }
+
+func (m *Metrics) IncBodies()               { m.bodies.Inc() }
+func (m *Metrics) DecBodies()               { m.bodies.Dec() }
+func (m *Metrics) BodyRefused(limit string) { m.bodyRefusals.WithLabelValues(limit).Inc() }
 
 func (m *Metrics) SetKeyCount(n float64) {
 	m.keyCount.Set(n)

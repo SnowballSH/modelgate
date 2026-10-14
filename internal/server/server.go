@@ -108,17 +108,18 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		return nil, fmt.Errorf("startup: %w", err)
 	}
 
-	st, err := store.Open(cfg.DataDir)
+	st, err := store.Open(cfg.DataDir, table.ProviderByModel())
 	if err != nil {
 		return nil, fmt.Errorf("startup: open store: %w", err)
 	}
 
-	acct := accounting.New(st, cfg.BudgetMonthlyUSD)
+	acct := accounting.New(st, cfg.BudgetMonthlyUSD, cfg.ProviderBudgetsUSD)
 	metrics := NewMetrics(cfg.BudgetMonthlyUSD)
 	if ks, err := st.ListKeys(context.Background()); err == nil {
 		metrics.SetKeyCount(float64(len(ks)))
 	}
 	metrics.TrackMonthSpend(st, time.Now)
+	metrics.TrackProviderSpend(acct, time.Now)
 	var up Upstreams
 	if key, ok := apiKeys[models.ProviderAnthropic]; ok {
 		up.Anthropic = provider.NewClient(cfg.AnthropicBaseURL, key, &http.Client{})
@@ -140,11 +141,13 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	s.public = httpServer(NewPublicHandler(
 		guards, table, acct, st, up, metrics,
 		PublicConfig{
-			DefaultMaxTokens: cfg.DefaultMaxTokens,
-			MaxOutputTokens:  cfg.MaxOutputTokens,
-			MaxBodyBytes:     cfg.MaxBodyBytes,
-			RequestDeadline:  cfg.RequestDeadline,
-			Version:          version,
+			DefaultMaxTokens:    cfg.DefaultMaxTokens,
+			MaxOutputTokens:     cfg.MaxOutputTokens,
+			MaxBodyBytes:        cfg.MaxBodyBytes,
+			MaxConcurrentBodies: cfg.MaxConcurrentBodies,
+			MaxBodiesPerKey:     cfg.MaxBodiesPerKey,
+			RequestDeadline:     cfg.RequestDeadline,
+			Version:             version,
 		}, time.Now))
 	s.admin = httpServer(NewAdminHandler(
 		st, acct, table, metrics, boundary,

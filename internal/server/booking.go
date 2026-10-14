@@ -97,7 +97,7 @@ func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicMo
 	if inputEstimated {
 		pricing = adm.Model.WorstCasePricing()
 	}
-	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, pricing); err != nil {
+	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, adm.Model.Provider, usage, pricing); err != nil {
 		h.metrics.BookingFailed()
 		slog.Error("usage booking failed", "request_id", requestIDFrom(ctx), "key_id", adm.Key.ID,
 			"model", publicModel, "input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens, "err", err)

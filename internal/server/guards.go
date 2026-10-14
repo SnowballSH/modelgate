@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -59,10 +60,19 @@ type Admission struct {
 }
 
 // Refusal is a guard's answer to a request it will not admit. RetryAfter is
-// set when waiting is enough for the same request to succeed.
+// set when waiting is enough for the same request to succeed; Message, when
+// set, replaces the code's standard message.
 type Refusal struct {
 	Code       string
 	RetryAfter time.Duration
+	Message    string
+}
+
+func (r Refusal) message() string {
+	if r.Message != "" {
+		return r.Message
+	}
+	return messageForCode(r.Code)
 }
 
 func (g *Guards) Authenticate(ctx context.Context, authorization string) (store.KeyRecord, bool, error) {
@@ -80,12 +90,17 @@ func (g *Guards) Authenticate(ctx context.Context, authorization string) (store.
 	return key, true, nil
 }
 
-// ResolveModel runs the guards that need only the key and the model name:
-// the key's rate limit, then the model table and the key's allowlist.
-func (g *Guards) ResolveModel(key store.KeyRecord, requestedModel string) (models.Model, *Refusal) {
+// Throttle spends one of the key's rate tokens, which needs only the key,
+// so a refused request is answered before its body is read.
+func (g *Guards) Throttle(key store.KeyRecord) *Refusal {
 	if wait, ok := g.takeToken(key.ID, g.now()); !ok {
-		return models.Model{}, &Refusal{Code: CodeRateLimited, RetryAfter: wait}
+		return &Refusal{Code: CodeRateLimited, RetryAfter: wait}
 	}
+	return nil
+}
+
+// ResolveModel checks the model table and the key's allowlist.
+func (g *Guards) ResolveModel(key store.KeyRecord, requestedModel string) (models.Model, *Refusal) {
 	model, resolved := g.table.Resolve(requestedModel)
 	if !resolved || (key.Models != nil && !slices.Contains(key.Models, requestedModel)) {
 		return models.Model{}, &Refusal{Code: CodeModelNotFound}
@@ -94,8 +109,8 @@ func (g *Guards) ResolveModel(key store.KeyRecord, requestedModel string) (model
 }
 
 // Admit takes the shared capacity a resolved request needs: a concurrency
-// slot, then a reservation of its worst-case cost against the key quota and
-// the budget.
+// slot, then a reservation of its worst-case cost against the key quota,
+// the budget and the ceiling of the model's provider.
 func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, model models.Model, demand accounting.Demand) (Admission, *Refusal) {
 	if demand.InputTokens < 0 || demand.OutputTokens < 0 {
 		return Admission{}, &Refusal{Code: CodeInternal}
@@ -106,7 +121,7 @@ func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, model models.Mo
 	default:
 		return Admission{}, &Refusal{Code: CodeRateLimited, RetryAfter: slotRetryAfter}
 	}
-	reservation, err := g.acct.Reserve(ctx, now, key, accounting.WorstCaseCost(demand, model.WorstCasePricing()))
+	reservation, err := g.acct.Reserve(ctx, now, key, model.Provider, accounting.WorstCaseCost(demand, model.WorstCasePricing()))
 	if err != nil {
 		<-g.slots
 		switch {
@@ -114,6 +129,8 @@ func (g *Guards) Admit(ctx context.Context, key store.KeyRecord, model models.Mo
 			return Admission{}, &Refusal{Code: CodeQuotaExhausted}
 		case errors.Is(err, accounting.ErrBudgetExhausted):
 			return Admission{}, &Refusal{Code: CodeBudgetExhausted}
+		case errors.Is(err, accounting.ErrProviderBudgetExhausted):
+			return Admission{}, &Refusal{Code: CodeProviderBudgetExhausted, Message: fmt.Sprintf("monthly %s spend ceiling exhausted", model.Provider)}
 		case errors.Is(err, accounting.ErrCapReserved):
 			return Admission{}, &Refusal{Code: CodeCapReserved, RetryAfter: capReservedRetryAfter}
 		default:

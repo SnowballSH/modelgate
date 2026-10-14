@@ -48,7 +48,7 @@ func newTestTable(t *testing.T) *models.Table {
 
 func newTestStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(t.TempDir())
+	s, err := store.Open(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,9 @@ func admitBearer(g *Guards, auth, model string, demand accounting.Demand) (Admis
 	case !ok:
 		return Admission{}, &Refusal{Code: CodeInvalidAPIKey}
 	}
+	if refusal := g.Throttle(key); refusal != nil {
+		return Admission{}, refusal
+	}
 	resolved, refusal := g.ResolveModel(key, model)
 	if refusal != nil {
 		return Admission{}, refusal
@@ -123,7 +126,7 @@ func TestAdmitGuardOrder(t *testing.T) {
 	s := newTestStore(t)
 	table := newTestTable(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	acct := accounting.New(s, 100)
+	acct := accounting.New(s, 100, nil)
 	g := NewGuards(s, acct, table, 1, 1, clk.now)
 
 	valid := insertKey(t, s, clk.t, nil)
@@ -164,10 +167,10 @@ func TestAdmitGuardOrder(t *testing.T) {
 
 	usage := store.Usage{InputTokens: 100_000}
 	pricing, _ := table.Resolve(sonnet)
-	if err := acct.Record(context.Background(), clk.t, valid.ID, sonnet, usage, pricing.Pricing); err != nil {
+	if err := acct.Record(context.Background(), clk.t, valid.ID, sonnet, models.ProviderAnthropic, usage, pricing.Pricing); err != nil {
 		t.Fatal(err)
 	}
-	tight := NewGuards(s, accounting.New(s, 0.01), table, 100, 1, clk.now)
+	tight := NewGuards(s, accounting.New(s, 0.01, nil), table, 100, 1, clk.now)
 	mustDeny(t, tight, bearer(fresh.Full), sonnet, CodeBudgetExhausted)
 
 	adm = mustAdmit(t, g, bearer(fresh.Full), sonnet)
@@ -183,7 +186,7 @@ func TestAdmitGuardOrder(t *testing.T) {
 func TestAdmitRateLimitRefill(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1, 4, clk.now)
+	g := NewGuards(s, accounting.New(s, 100, nil), newTestTable(t), 1, 4, clk.now)
 	key := insertKey(t, s, clk.t, nil)
 
 	mustAdmit(t, g, bearer(key.Full), sonnet).Release()
@@ -195,7 +198,7 @@ func TestAdmitRateLimitRefill(t *testing.T) {
 func TestAdmitConcurrency(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 1, clk.now)
+	g := NewGuards(s, accounting.New(s, 100, nil), newTestTable(t), 1000, 1, clk.now)
 	a := insertKey(t, s, clk.t, nil)
 	b := insertKey(t, s, clk.t, nil)
 
@@ -210,7 +213,7 @@ func TestAdmitConcurrency(t *testing.T) {
 func TestReleaseIdempotent(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 1, clk.now)
+	g := NewGuards(s, accounting.New(s, 100, nil), newTestTable(t), 1000, 1, clk.now)
 	a := insertKey(t, s, clk.t, nil)
 	b := insertKey(t, s, clk.t, nil)
 	c := insertKey(t, s, clk.t, nil)
@@ -226,7 +229,7 @@ func TestReleaseIdempotent(t *testing.T) {
 func TestRevokedOverQuotaReportsInvalidKey(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 4, clk.now)
+	g := NewGuards(s, accounting.New(s, 100, nil), newTestTable(t), 1000, 4, clk.now)
 	revokedAt := clk.t
 	zeroQuota := 0.0
 	key := insertKey(t, s, clk.t, func(r *store.KeyRecord) {
@@ -239,7 +242,7 @@ func TestRevokedOverQuotaReportsInvalidKey(t *testing.T) {
 func TestStoreErrorReportsInternal(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	g := NewGuards(s, accounting.New(s, 100), newTestTable(t), 1000, 4, clk.now)
+	g := NewGuards(s, accounting.New(s, 100, nil), newTestTable(t), 1000, 4, clk.now)
 	key := insertKey(t, s, clk.t, nil)
 	s.Close()
 	mustDeny(t, g, bearer(key.Full), sonnet, CodeInternal)
@@ -248,7 +251,7 @@ func TestStoreErrorReportsInternal(t *testing.T) {
 func TestAdmitRefusesANegativeDemandAsInternalAndHoldsNothing(t *testing.T) {
 	s := newTestStore(t)
 	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
-	acct := accounting.New(s, 100)
+	acct := accounting.New(s, 100, nil)
 	g := NewGuards(s, acct, newTestTable(t), 100, 1, clk.now)
 	auth := bearer(insertKey(t, s, clk.t, nil).Full)
 

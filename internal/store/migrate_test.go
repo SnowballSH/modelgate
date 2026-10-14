@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"maps"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -81,7 +83,7 @@ func TestOpenStampsAV050DatabaseWithoutDataLoss(t *testing.T) {
 	}
 	legacy.Close()
 
-	s, err := Open(dir)
+	s, err := Open(dir, nil)
 	if err != nil {
 		t.Fatalf("Open on a v0.5.0 database: %v", err)
 	}
@@ -106,7 +108,7 @@ func TestOpenStampsAV050DatabaseWithoutDataLoss(t *testing.T) {
 func TestOpenIsIdempotentAtTheCurrentVersion(t *testing.T) {
 	dir := t.TempDir()
 	for i := range 3 {
-		s, err := Open(dir)
+		s, err := Open(dir, nil)
 		if err != nil {
 			t.Fatalf("Open #%d: %v", i, err)
 		}
@@ -126,7 +128,7 @@ func TestOpenRefusesADatabaseFromANewerRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	future.Close()
-	if s, err := Open(dir); err == nil {
+	if s, err := Open(dir, nil); err == nil {
 		s.Close()
 		t.Fatal("Open accepted a database stamped by a newer release")
 	}
@@ -154,4 +156,151 @@ func TestProbeWriteFailsOnAReadOnlyDatabase(t *testing.T) {
 	if err := readOnly.ProbeWrite(context.Background(), now); err == nil {
 		t.Fatal("ProbeWrite succeeded on a read-only database")
 	}
+}
+
+type legacyRow struct {
+	month, key, model string
+	requests, input   int64
+	cost              float64
+}
+
+// writeV071Database builds the database v0.6.0 through v0.7.1 left
+// behind by running their two migrations, as they did.
+func writeV071Database(t *testing.T, dir string, rows []legacyRow) {
+	t.Helper()
+	legacy := rawDB(t, dir)
+	defer legacy.Close()
+	for _, step := range migrations[:2] {
+		if _, err := legacy.Exec(step); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := legacy.Exec("PRAGMA user_version = 2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := usageColumns(t, legacy); !slices.Equal(got, v071UsageColumns) {
+		t.Fatalf("the v0.7.1 fixture's usage columns = %v, want %v", got, v071UsageColumns)
+	}
+	for _, r := range rows {
+		if _, err := legacy.Exec(
+			`INSERT INTO usage (month, key_id, model, requests, input_tokens, cost_usd) VALUES (?, ?, ?, ?, ?, ?)`,
+			r.month, r.key, r.model, r.requests, r.input, r.cost); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type spendSnapshot struct {
+	total, keyA, keyB float64
+	perProvider       map[string]float64
+	usage             map[string]Usage
+}
+
+func snapshot(t *testing.T, s *Store, month string) spendSnapshot {
+	t.Helper()
+	ctx := context.Background()
+	var snap spendSnapshot
+	var err error
+	if snap.total, err = s.MonthSpend(ctx, month); err != nil {
+		t.Fatal(err)
+	}
+	if snap.keyA, err = s.MonthSpendByKey(ctx, month, "keyA"); err != nil {
+		t.Fatal(err)
+	}
+	if snap.keyB, err = s.MonthSpendByKey(ctx, month, "keyB"); err != nil {
+		t.Fatal(err)
+	}
+	if snap.perProvider, err = s.MonthSpendPerProvider(ctx, month); err != nil {
+		t.Fatal(err)
+	}
+	if snap.usage, err = s.MonthUsage(ctx, month); err != nil {
+		t.Fatal(err)
+	}
+	return snap
+}
+
+func TestOpenUpgradesAV071DatabaseAttributingSpendByModel(t *testing.T) {
+	dir := t.TempDir()
+	writeV071Database(t, dir, []legacyRow{
+		{"2026-10", "keyA", "claude-sonnet-5", 3, 300, 1.5},
+		{"2026-10", "keyA", "gpt-5", 2, 200, 2},
+		{"2026-10", "keyB", "retired-model", 1, 100, 0.25},
+		{"2026-09", "keyA", "claude-sonnet-5", 9, 900, 10},
+	})
+
+	s, err := Open(dir, map[string]string{"claude-sonnet-5": "anthropic", "gpt-5": "openai"})
+	if err != nil {
+		t.Fatalf("Open on a v0.7.1 database: %v", err)
+	}
+	upgraded := snapshot(t, s, "2026-10")
+	if upgraded.total != 3.75 || upgraded.keyA != 3.5 || upgraded.keyB != 0.25 {
+		t.Errorf("spend after the upgrade = total %v keyA %v keyB %v, want 3.75, 3.5, 0.25", upgraded.total, upgraded.keyA, upgraded.keyB)
+	}
+	wantPerProvider := map[string]float64{"anthropic": 1.5, "openai": 2, Unattributed: 0.25}
+	if !maps.Equal(upgraded.perProvider, wantPerProvider) {
+		t.Errorf("per-provider spend after the upgrade = %v, want %v", upgraded.perProvider, wantPerProvider)
+	}
+	if got := upgraded.usage["keyA"]; got.Requests != 5 || got.InputTokens != 500 {
+		t.Errorf("keyA usage after the upgrade = %+v, want 5 requests and 500 input tokens", got)
+	}
+	if september, err := s.MonthSpendByProvider(context.Background(), "2026-09", "anthropic"); err != nil || september != 10 {
+		t.Errorf("September anthropic spend = %v, %v; want 10", september, err)
+	}
+	s.Close()
+
+	again, err := Open(dir, map[string]string{"claude-sonnet-5": "openai", "retired-model": "openai"})
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer again.Close()
+	if reopened := snapshot(t, again, "2026-10"); !maps.Equal(reopened.perProvider, wantPerProvider) || reopened.total != upgraded.total {
+		t.Errorf("a second Open with a different table re-attributed spend: %v (total %v), want %v (total %v)",
+			reopened.perProvider, reopened.total, wantPerProvider, upgraded.total)
+	}
+	check := rawDB(t, dir)
+	defer check.Close()
+	if got := userVersion(t, check); got != SchemaVersion {
+		t.Fatalf("user_version = %d, want %d", got, SchemaVersion)
+	}
+}
+
+func TestUpgradedRowsMergeWithNewBookingsOfTheSameProvider(t *testing.T) {
+	dir := t.TempDir()
+	writeV071Database(t, dir, []legacyRow{{"2026-10", "keyA", "claude-sonnet-5", 3, 300, 1.5}})
+	s, err := Open(dir, map[string]string{"claude-sonnet-5": "anthropic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	if err := s.AddUsage(ctx, "2026-10", "keyA", "claude-sonnet-5", "anthropic", Usage{Requests: 1, CostUSD: 0.5}); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	if err := s.db.QueryRow("SELECT COUNT(*) FROM usage").Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if spend, err := s.MonthSpendByProvider(ctx, "2026-10", "anthropic"); err != nil || spend != 2 || rows != 1 {
+		t.Errorf("anthropic spend %v (err %v) over %d rows, want 2 over one row", spend, err, rows)
+	}
+}
+
+var v071UsageColumns = []string{"month", "key_id", "model", "requests", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd"}
+
+func usageColumns(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.Query("SELECT name FROM pragma_table_info('usage') ORDER BY cid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	return names
 }

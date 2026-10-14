@@ -48,7 +48,7 @@ func testTable(t *testing.T) *models.Table {
 
 func testStore(t *testing.T) *store.Store {
 	t.Helper()
-	s, err := store.Open(t.TempDir())
+	s, err := store.Open(t.TempDir(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,8 @@ type publicEnvOptions struct {
 	rpm             int
 	bodyReadTimeout time.Duration
 	tableJSON       string
+	maxBodies       int
+	maxBodiesPerKey int
 }
 
 func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes int64) *publicEnv {
@@ -110,14 +112,14 @@ func newPublicEnvWith(t *testing.T, providerHandler http.HandlerFunc, opts publi
 	}
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
-	acct := accounting.New(s, opts.budgetUSD)
+	acct := accounting.New(s, opts.budgetUSD, nil)
 	guards := NewGuards(s, acct, table, opts.rpm, 8, nowFn)
 	client := provider.NewClient(upstream.URL, "test-upstream-key", upstream.Client())
 	breaker := provider.NewBreaker(100, time.Minute, nowFn)
 	m := NewMetrics(opts.budgetUSD)
 	m.TrackMonthSpend(s, nowFn)
 	m.TrackBreaker(models.ProviderAnthropic, breaker)
-	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: opts.maxBodyBytes, BodyReadTimeout: opts.bodyReadTimeout, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
+	handler := NewPublicHandler(guards, table, acct, s, Upstreams{Anthropic: client, AnthropicBreaker: breaker}, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: opts.maxBodyBytes, BodyReadTimeout: opts.bodyReadTimeout, MaxConcurrentBodies: opts.maxBodies, MaxBodiesPerKey: opts.maxBodiesPerKey, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
 	return &publicEnv{handler: handler, store: s, acct: acct, metrics: m, now: now}
 }
 
@@ -480,6 +482,7 @@ type dualEnv struct {
 	store         *store.Store
 	acct          *accounting.Accountant
 	guards        *Guards
+	metrics       *Metrics
 	now           time.Time
 	openaiSeen    *[]oai.ChatRequest
 	openaiCalls   *[]upstreamCall
@@ -493,6 +496,22 @@ func newDualEnv(t *testing.T, openaiHandler, anthropicHandler http.HandlerFunc, 
 
 func newDualEnvWithTable(t *testing.T, tableJSON string, openaiHandler, anthropicHandler http.HandlerFunc, breakerThreshold int) *dualEnv {
 	t.Helper()
+	return newDualEnvWith(t, dualEnvOptions{tableJSON: tableJSON, budgetUSD: 100, breakerThreshold: breakerThreshold}, openaiHandler, anthropicHandler)
+}
+
+type dualEnvOptions struct {
+	tableJSON        string
+	budgetUSD        float64
+	providerBudgets  map[string]float64
+	breakerThreshold int
+}
+
+func newDualEnvWith(t *testing.T, opts dualEnvOptions, openaiHandler, anthropicHandler http.HandlerFunc) *dualEnv {
+	t.Helper()
+	tableJSON, breakerThreshold := opts.tableJSON, opts.breakerThreshold
+	if tableJSON == "" {
+		tableJSON = dualModelJSON
+	}
 	var openaiSeen []oai.ChatRequest
 	var openaiCalls []upstreamCall
 	var anthropicHits int
@@ -529,7 +548,7 @@ func newDualEnvWithTable(t *testing.T, tableJSON string, openaiHandler, anthropi
 	}
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
-	acct := accounting.New(s, 100)
+	acct := accounting.New(s, opts.budgetUSD, opts.providerBudgets)
 	guards := NewGuards(s, acct, table, 1000, 8, nowFn)
 	up := Upstreams{
 		Anthropic:        provider.NewClient(anthropicUpstream.URL, "ant-upstream-key", anthropicUpstream.Client()),
@@ -537,9 +556,11 @@ func newDualEnvWithTable(t *testing.T, tableJSON string, openaiHandler, anthropi
 		OpenAI:           provider.NewOpenAIClient(openaiUpstream.URL, "oai-upstream-key", openaiUpstream.Client()),
 		OpenAIBreaker:    provider.NewBreaker(breakerThreshold, time.Minute, nowFn),
 	}
-	m := NewMetrics(100)
+	m := NewMetrics(opts.budgetUSD)
+	m.TrackMonthSpend(s, nowFn)
+	m.TrackProviderSpend(acct, nowFn)
 	handler := NewPublicHandler(guards, table, acct, s, up, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
-	return &dualEnv{handler: handler, store: s, acct: acct, guards: guards, now: now, openaiSeen: &openaiSeen, openaiCalls: &openaiCalls, anthropicHits: &anthropicHits}
+	return &dualEnv{handler: handler, store: s, acct: acct, guards: guards, metrics: m, now: now, openaiSeen: &openaiSeen, openaiCalls: &openaiCalls, anthropicHits: &anthropicHits}
 }
 
 func openaiChatResponse() http.HandlerFunc {

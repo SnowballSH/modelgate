@@ -88,6 +88,8 @@ partial startup — and it refuses before any port opens.
 | `DATA_DIR` | Directory for the SQLite store; created `0700` if missing | Required, must be writable |
 | `MODELS_CONFIG_FILE` | The [model table](#model-table) | Required, must load |
 | `BUDGET_MONTHLY_USD` | Global hard spend ceiling per UTC calendar month | Required; a positive finite number (`0`, negatives, `NaN` and `Inf` are refused) |
+| `BUDGET_MONTHLY_USD_ANTHROPIC` | Hard spend ceiling per UTC calendar month for the table's `anthropic` models, on top of the global budget | Unset: no ceiling of its own; otherwise validated like `BUDGET_MONTHLY_USD` |
+| `BUDGET_MONTHLY_USD_OPENAI` | The same for the table's `openai` models | Unset: no ceiling of its own; otherwise validated like `BUDGET_MONTHLY_USD` |
 | `ADMIN_ALLOWED_USERS` | Comma-separated identities allowed on the admin listener, matched exactly; blanks are dropped | Required, at least one identity |
 | `ADMIN_PROXY_SECRET_FILE` | File holding the secret the reverse proxy sends as `X-Modelgate-Proxy-Secret`; trailing CR/LF characters are trimmed | Required; the secret must be at least 32 bytes |
 | `ADMIN_IDENTITY_HEADER` | Header carrying the authenticated identity | `Remote-User` |
@@ -100,6 +102,8 @@ partial startup — and it refuses before any port opens.
 | `MAX_BODY_BYTES` | Public request body limit | `1048576` (1 MiB); a positive integer |
 | `RATE_LIMIT_PER_KEY_RPM` | Per-key request rate (token bucket, burst equal to the rate) | `60`; a positive integer |
 | `MAX_CONCURRENT_REQUESTS` | Global cap on admitted requests in flight | `8`; a positive integer |
+| `MAX_CONCURRENT_BODIES` | Global cap on request bodies being read, parsed and translated before admission; see [Request body memory](#request-body-memory) | `MAX_CONCURRENT_REQUESTS`; a positive integer |
+| `MAX_BODIES_PER_KEY` | Cap on the body slots one key holds at once | A quarter of `MAX_CONCURRENT_BODIES`, rounded up (2 for 8); a positive integer no larger than `MAX_CONCURRENT_BODIES` |
 | `REQUEST_DEADLINE` | Hard per-request deadline, streams included (Go duration) | `10m`; positive |
 
 Fixed timings: a public request body must arrive within 30 seconds of the
@@ -263,14 +267,21 @@ malformed, unknown, revoked or expired key gets `401 invalid_api_key`,
 and the body is not read until the key checks out. `GET /v1/models` lists
 the table's models the key may use.
 
-A request is admitted in this order: the key, the body (size and read
-deadline), the JSON, the key's rate limit, the model and the key's
-allowlist, the model's declared limits, the translation for the model's
-upstream, the output bounds, a concurrency slot, a reservation of the
-request's worst-case cost against the key quota and the monthly budget,
-then the provider's circuit breaker. A request the gateway cannot
-translate is therefore refused with a 400 before it holds any shared
-capacity. On a `chat_completions` row that includes a message whose
+A request is admitted in this order: the key, the key's rate limit, a
+body slot, the body (size and read deadline), the JSON, the model and
+the key's allowlist, the model's declared limits, the translation for
+the model's upstream, the output bounds, a concurrency slot, a
+reservation of the request's worst-case cost against the key quota, the
+monthly budget and the monthly ceiling of the model's provider, then the
+provider's circuit breaker. The reservation's refusals come in this
+order: a spent key quota, a spent global budget, a spent provider
+ceiling, then `cap_reserved` when any of the three is reached only by
+requests in flight. A request the gateway cannot translate is therefore
+refused with a 400 before it holds a concurrency slot or reserves any
+cost, and a request refused for its key, its rate or a full set of body
+slots is answered without its body being read. A request refused for
+want of a body slot has already spent one of its key's rate tokens. On
+a `chat_completions` row that includes a message whose
 `content` is neither a string, `null` nor an array of JSON objects, each
 with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`), each key spelled exactly and at most once
 (`invalid message content: ...`), because the gateway counts that row's
@@ -285,11 +296,12 @@ Every response carries `X-Request-ID`: the caller's own value when it is
 `req_<32 hex>`. The request log line carries the same id.
 
 A 429 that waiting will clear carries `Retry-After` in whole seconds: the
-time until the key's rate bucket refills, `1` when every concurrency slot
-is taken, and `5` for `cap_reserved`. A 429 for an exhausted quota or
-budget carries `x-should-retry: false` instead, which the OpenAI SDKs
-honour; only the next month or an operator clears it. An upstream 429 is
-answered as `rate_limited` without `Retry-After`.
+time until the key's rate bucket refills, `1` when every concurrency
+slot, every gateway body slot or every one of the key's body slots is
+taken, and `5` for `cap_reserved`. A 429 for an exhausted quota, budget
+or provider ceiling carries `x-should-retry: false` instead, which the
+OpenAI SDKs honour; only the next month or an operator clears it. An
+upstream 429 is answered as `rate_limited` without `Retry-After`.
 
 ### Errors
 
@@ -306,9 +318,9 @@ is modelgate's own: an upstream's error body never reaches the client.
 | 404 | `invalid_request_error` | `not_found` | Unknown route |
 | 408 | `invalid_request_error` | `request_timeout` | The body did not arrive within 30 seconds |
 | 413 | `invalid_request_error` | `request_too_large` | The body exceeds `MAX_BODY_BYTES` |
-| 429 | `rate_limit_error` | `rate_limited` | The key's rate limit, every concurrency slot taken, or an upstream 429 |
-| 429 | `rate_limit_error` | `cap_reserved` | The key quota or the budget is not spent but is fully held by requests in flight; retry after `Retry-After` |
-| 429 | `insufficient_quota` | `insufficient_quota` | The key's monthly quota or the global monthly budget is spent; the message says which |
+| 429 | `rate_limit_error` | `rate_limited` | The key's rate limit, the key's body slots all taken (`this key's concurrent request limit is reached; retry shortly`), every gateway body slot taken (`too many request bodies in flight; retry shortly`), every concurrency slot taken, or an upstream 429 |
+| 429 | `rate_limit_error` | `cap_reserved` | The key quota, the budget or the provider's ceiling is not spent but is fully held by requests in flight; retry after `Retry-After` |
+| 429 | `insufficient_quota` | `insufficient_quota` | The key's monthly quota, the global monthly budget or the provider's monthly ceiling is spent; the message says which (`monthly anthropic spend ceiling exhausted` for a provider) |
 | 500 | `api_error` | `api_error` | The store failed |
 | 502 | `api_error` | `provider_auth_error` | The upstream refused modelgate's credential |
 | 503 | `api_error` | `provider_unavailable` | Upstream 5xx or transport failure after retries, the provider's circuit is open, or a Responses run reported `failed` |
@@ -332,7 +344,7 @@ All routes are on `ADMIN_ADDR`, JSON in and out.
 | `GET /api/keys` | | `200 {"keys": [key, ...]}` |
 | `POST /api/keys` | `{"label": "ci", "models": ["claude-sonnet-5"], "quota_usd": 10, "expires_at": "2026-12-31T23:59:59Z"}`; only `label` is required | `201 {"key": key, "full_key": "mg_..."}` |
 | `POST /api/keys/{id}/revoke` | | `200 {"key": key}`; `404` for an unknown id |
-| `GET /api/usage` | | `200 {"month", "budget_usd", "spend_usd", "keys": [{"id", "label", "spend_usd", "quota_usd"}]}` |
+| `GET /api/usage` | | `200 {"month", "budget_usd", "spend_usd", "keys": [{"id", "label", "spend_usd", "quota_usd"}], "providers": [{"provider", "spend_usd", "budget_usd"}]}`; `providers` lists, by name, every provider with a ceiling or with spend this month, and `budget_usd` is `null` for one without a ceiling |
 | `GET /api/models` | | `200 {"models": [{"id", "provider"}]}` |
 
 A key object carries `id`, `prefix`, `label`, `models`, `quota_usd`,
@@ -419,6 +431,22 @@ retryable `cap_reserved`. The output bound is the request's own cap when
 it names one, and otherwise the model's `default_max_tokens` (or
 `DEFAULT_MAX_TOKENS`).
 
+A provider ceiling (`BUDGET_MONTHLY_USD_ANTHROPIC`,
+`BUDGET_MONTHLY_USD_OPENAI`) caps the month's spend on the models whose
+row names that provider, under the same rule and from the same
+reservation: a request holds its worst-case cost against its key quota,
+the global budget and its provider's ceiling at once, and releases or
+settles all three together. The global budget still caps the sum, so a
+ceiling above it never binds, and a provider without a ceiling is capped
+only by the budget. Every booking records the provider of the row that
+served it, so a provider's month-to-date spend survives a restart, a
+model leaving the table, and a row moving to another provider. Usage
+booked before v0.8.0 is attributed once, at the upgrade, by the table
+the upgrade starts with; a row for a model that table no longer lists
+stays unattributed and counts against the global budget only. The table
+is read once at startup, so a request is always booked against the
+provider it was admitted against.
+
 A row that declares `max_input_tokens` holds the prompt side of that
 bound — text bytes, image allowances and overhead together — at the
 declared figure, still priced at the dearest input-side rate; the output
@@ -436,21 +464,59 @@ row's `max_input_tokens`. A non-streaming call keeps running when the
 client hangs up, because the provider bills it either way, and its real
 usage is booked.
 
+## Request body memory
+
+A request's body is read whole, parsed and translated before the request
+can take a concurrency slot, so the body stage has bounds of its own: at
+most `MAX_CONCURRENT_BODIES` requests across the gateway, and at most
+`MAX_BODIES_PER_KEY` of them from one key, hold a body slot at once. A
+request takes its slot after its key and its rate limit pass and before
+a byte of its body is read, and gives it back once it takes a
+concurrency slot or is refused, whatever the reason, the body read
+timeout and a client that hangs up mid-body included. A request over
+either bound is answered `429 rate_limited` with `Retry-After: 1` at
+once, unread, and the message says which bound refused it; nothing
+queues. Such a request has already spent one of its key's rate tokens,
+since the rate limit is checked first. Unauthenticated requests are answered before their body is read
+and take no slot.
+
+The per-key bound keeps one key from starving the rest: with the
+defaults, 8 slots and 2 per key, a key that opens requests and drips
+their bodies holds at most 2 slots, so at least 6 stay free unless four
+keys do the same at once. A slot is held at most for the body read
+deadline, 30 seconds from the request's headers, which a slow sender
+cannot extend by trickling bytes; it is not shortened, because a 4 MiB
+body needs about 32 seconds at 1 Mbit/s and 16 at 2 Mbit/s.
+
+Request bodies therefore occupy at most about
+`(MAX_CONCURRENT_BODIES + MAX_CONCURRENT_REQUESTS) × c`, where `c` is the
+memory one request at `MAX_BODY_BYTES` costs through parsing and
+translation, roughly twice the body (about 7–8 MiB measured for a 4 MiB
+body), however many connections or keys clients use. With the defaults,
+8 + 8 slots, that is about 32 MiB at the default 1 MiB `MAX_BODY_BYTES`
+and about 128 MiB at 4 MiB. Size the container's memory limit above that
+plus the process's own footprint, and lower `MAX_CONCURRENT_BODIES`
+before raising `MAX_BODY_BYTES`.
+
 ## Metrics
 
 `GET /metrics` on `METRICS_ADDR`:
 
 | Metric | Type | Labels |
 |---|---|---|
-| `modelgate_requests_total` | counter | `outcome` (`success`, `client_aborted`, or an error code from the table above, with `quota_exhausted`/`budget_exhausted` for the two caps), `model` (`unknown` until admission resolves it) |
+| `modelgate_requests_total` | counter | `outcome` (`success`, `client_aborted`, or an error code from the table above, with `quota_exhausted`/`budget_exhausted`/`provider_budget_exhausted` for the three caps), `model` (`unknown` until admission resolves it) |
 | `modelgate_request_duration_seconds` | histogram | `model` |
 | `modelgate_tokens_total` | counter | `direction` (`input`, `output`, `cache_read`, `cache_write`), `model` |
 | `modelgate_provider_errors_total` | counter | `kind` (`auth`, `rate_limited`, `timeout`, `rejected`, `unavailable`) |
 | `modelgate_usage_booking_failures_total` | counter | none; the provider billed spend the quota and budget do not count |
 | `modelgate_in_flight` | gauge | none; provider calls in flight |
 | `modelgate_keys` | gauge | none |
+| `modelgate_request_bodies_in_flight` | gauge | none; bodies holding a body slot |
+| `modelgate_request_body_refusals_total` | counter | `limit` (`gateway`: every body slot taken; `key`: the key's `MAX_BODIES_PER_KEY` taken); requests refused unread, also counted as outcome `rate_limited` |
 | `modelgate_budget_usd` | gauge | none |
 | `modelgate_month_spend_usd` | gauge, read at scrape | none; `NaN` when the store read fails |
+| `modelgate_provider_budget_usd` | gauge | `provider`; only providers with a ceiling |
+| `modelgate_provider_month_spend_usd` | gauge, read at scrape | `provider`; every provider with a ceiling or with spend this month (unattributed pre-v0.8.0 spend is in `modelgate_month_spend_usd` only); `NaN` for each provider with a ceiling when the store read fails |
 | `modelgate_breaker_open` | gauge, read at scrape | `provider` |
 
 `GET /ready` answers `200 ready` when the store answers a ping, commits a
@@ -502,7 +568,18 @@ per step. v0.6.0 is schema version 2; it stamps a v0.5.0 database as
 version 1 without altering it, then adds version 2. A database stamped by
 a newer release is refused rather than opened. v0.5.0 ignores the
 version and the added table, so rolling back from v0.6.0 to v0.5.0 keeps
-working; back up `DATA_DIR` before any upgrade regardless.
+working; back up `DATA_DIR` before any upgrade regardless. v0.8.0 is
+schema version 3: it rebuilds the usage table with the provider that
+served each row, attributing existing rows by the model table it starts
+with, in one transaction that loses or duplicates no row.
+
+**Rolling back from v0.8.0.** v0.6.0 to v0.7.1 refuse a version 3
+database at startup. Rolling back the image alone, such as a deploy
+tool's digest rollback, therefore leaves the gateway failing closed and
+down. Snapshot `DATA_DIR` immediately before deploying v0.8.0; to roll
+back, stop the gateway, restore `DATA_DIR` from that snapshot, then start
+the older image. Spend booked between the snapshot and the rollback is
+lost from the store, though not from the providers' bills.
 
 **Single instance.** Reservations, rate buckets and circuit breakers are
 in memory. Run one instance per data directory.

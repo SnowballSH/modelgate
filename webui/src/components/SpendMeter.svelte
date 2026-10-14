@@ -33,6 +33,31 @@
       spend={usage.spend_usd}
       limit={usage.budget_usd}
     />
+    {#if usage.providers.length > 0}
+      <div class="flex flex-col gap-3 border-t border-line pt-4">
+        <h3 class="text-sm font-medium text-ink-secondary">Per-provider spend</h3>
+        {#each usage.providers as provider (provider.provider)}
+          <div class="flex flex-col gap-1">
+            <div class="flex items-baseline justify-between gap-4 text-sm">
+              <span class="truncate text-ink">{provider.provider}</span>
+              <span class="shrink-0 font-mono text-xs text-ink-secondary">
+                {formatUsd(provider.spend_usd)}
+                {#if provider.budget_usd !== null}
+                  / {formatUsd(provider.budget_usd)}
+                {/if}
+              </span>
+            </div>
+            {#if provider.budget_usd !== null}
+              <SpendBar
+                label={`Spend for provider ${provider.provider} against its ceiling`}
+                spend={provider.spend_usd}
+                limit={provider.budget_usd}
+              />
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
     {#if quotaKeys.length > 0}
       <div class="flex flex-col gap-3 border-t border-line pt-4">
         <h3 class="text-sm font-medium text-ink-secondary">Per-key quotas</h3>

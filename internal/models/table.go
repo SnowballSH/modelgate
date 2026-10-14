@@ -22,6 +22,9 @@ const (
 	ProviderOpenAI    = "openai"
 )
 
+// Providers lists every provider a model table may name.
+var Providers = []string{ProviderAnthropic, ProviderOpenAI}
+
 const (
 	UpstreamChatCompletions = "chat_completions"
 	UpstreamResponses       = "responses"
@@ -153,7 +156,7 @@ func (e modelEntry) validate() (Model, error) {
 	if provider == "" {
 		provider = ProviderAnthropic
 	}
-	if provider != ProviderAnthropic && provider != ProviderOpenAI {
+	if !slices.Contains(Providers, provider) {
 		return Model{}, fmt.Errorf("unknown provider %q", provider)
 	}
 	upstream := e.UpstreamAPI
@@ -340,6 +343,15 @@ func (t *Table) Providers() []string {
 		seen[m.Provider] = true
 	}
 	return slices.Sorted(maps.Keys(seen))
+}
+
+// ProviderByModel maps each public model id to the provider serving it.
+func (t *Table) ProviderByModel() map[string]string {
+	out := make(map[string]string, len(t.models))
+	for id, m := range t.models {
+		out[id] = m.Provider
+	}
+	return out
 }
 
 func (t *Table) IDs() []string {
