@@ -60,12 +60,10 @@ type Model struct {
 	PriceTiers       []PriceTier
 	Limits           Limits
 	DefaultMaxTokens int
-	// MaxInputTokens is the largest prompt the provider accepts; zero is no
-	// bound.
-	MaxInputTokens int64
-	DropsSampling  bool
-	ImageInput     bool
-	CacheTTL       string
+	MaxInputTokens   int64
+	DropsSampling    bool
+	ImageInput       bool
+	CacheTTL         string
 }
 
 func (m Model) OutputCapDefault(gatewayDefault int) int {

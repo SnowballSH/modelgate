@@ -128,7 +128,7 @@ request can never run.
 | `sampling` | Optional boolean: whether `temperature` and `top_p` are forwarded. `false` removes both before the provider call. Absent means `true` on `anthropic` and `chat_completions` rows and `false` on `responses` rows. |
 | `image_input` | Optional boolean, default `false`. `true` translates `image_url` content parts on `anthropic` and `responses` rows; otherwise such a request gets a 400 naming the model (`model <id> does not support image input`), whichever message role carries the image: the check runs before translation, so the translator's own `unsupported content part: image_url` surfaces only on a row with `image_input: true`, for an image in a `system`, `assistant` or `tool` message. A `chat_completions` row forwards `text`, `image_url` and `refusal` parts unchanged either way and refuses any other part type. |
 | `price_tiers` | Optional list of `{"above_input_tokens", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"}`. When a prompt's input tokens — uncached, cache-read and cache-write together — exceed a threshold, the whole request is booked at that tier's four prices. Thresholds are positive and strictly ascending and every price is positive; `[]` refuses the table. |
-| `max_input_tokens` | Optional positive integer: the largest prompt, in tokens, the provider accepts for the model — its context window, or the provider's maximum input where it states one apart. Admission bounds the request's prompt at this figure (see Spend ceilings); booking does not. A value that is not a positive integer, or a `price_tiers` threshold at or above it (a tier no prompt can reach), refuses the table. Absent, the prompt is bounded by the body alone. |
+| `max_input_tokens` | Optional positive integer, written as a JSON integer (`1e6` and `1000000.0` refuse the table): the largest prompt, in tokens, the provider accepts for the model — its context window, unless the provider documents that it rejects any prompt above a smaller input maximum whatever the output cap. Admission bounds the request's prompt at this figure (see Spend ceilings); booking does not. A value that is not a positive integer, or a `price_tiers` threshold at or above it (a tier no prompt can reach), refuses the table. Absent, the prompt is bounded by the body alone. |
 | `cache_ttl` | Optional, `"5m"` (the default) or `"1h"`, `anthropic` rows only: the lifetime requested on every cache breakpoint. Set `cache_write_usd_per_mtok` to the price of that lifetime (2× input for `"1h"`, 1.25× for `"5m"`). |
 
 The limits are checked after the key's model allowlist and before the
@@ -432,9 +432,9 @@ output of at least one token per four streamed characters, and the whole
 output cap when the call can bill output it never streams (every
 Responses call, and any call with a `reasoning_effort`), and input of one
 token per four bytes of text plus each image's allowance, at most the
-row's `max_input_tokens`. A non-streaming
-call keeps running when the client hangs up, because the provider bills
-it either way, and its real usage is booked.
+row's `max_input_tokens`. A non-streaming call keeps running when the
+client hangs up, because the provider bills it either way, and its real
+usage is booked.
 
 ## Metrics
 

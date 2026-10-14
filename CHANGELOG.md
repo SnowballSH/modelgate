@@ -26,10 +26,10 @@ reserves, estimates and books exactly as before.
 - v0.7.0 ignores `max_input_tokens` silently and keeps reserving one
   token per byte, so deploy v0.7.1 first and the table that uses the
   field second.
-- Declare the provider's maximum input where it states one apart from
-  the context window (OpenAI's model pages do), and never a figure below
-  the largest prompt the provider accepts: the reservation is only a
-  bound while the provider refuses every longer prompt.
+- Declare the model's context window, not a smaller stated maximum
+  input such as OpenAI's, unless the provider documents that it rejects
+  any prompt above that maximum whatever the output cap: the reservation
+  is only a bound while the provider refuses every longer prompt.
 
 ## v0.7.0 — 2026-10-14
 
