@@ -157,8 +157,13 @@ A passthrough row forwards only part types it can price: a part whose
 unsupported content part type ...` before admission, reserving nothing,
 which keeps `file` parts (billed per page as images) and `input_audio`
 parts (audio tokens inside `prompt_tokens`) out of the byte-bounded path.
-A part with no `type` key is forwarded and counted only by its
-`image_url` key. The echoed type, like an echoed `detail` or media type,
+A passthrough content part must carry a `type` of `text`, `image_url`
+or `refusal`, and may not carry a `file`, `file_id` or `input_audio` key
+(any letter case, any occurrence, non-null value): a part with no `type`
+key, or a typed part carrying one of those keys, is refused with a 400
+`invalid message content: ...` before admission, reserving nothing, so
+no payload the gateway cannot price rides in beside a priced type. Other
+keys, such as `cache_control`, are forwarded. The echoed type, like an echoed `detail` or media type,
 is cut to 64 bytes. The number follows the row's upstream:
 
 | Row | Tokens per image | Source |

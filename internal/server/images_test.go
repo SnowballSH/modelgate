@@ -401,13 +401,25 @@ func TestPassthroughImageCountCannotBeShadowedOrZeroed(t *testing.T) {
 		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text",` + image + `}]`, 1, false},
 		{"duplicate type, last is text", `[{"type":"image_url","type":"text",` + image + `}]`, 1, false},
 		{"differently cased type only", `[{"Type":"image_url",` + image + `}]`, 1, false},
-		{"image_url key without type", `[{` + image + `}]`, 1, false},
+		{"image_url key without type", `[{` + image + `}]`, 0, true},
 		{"two images beside text", `[{"type":"text","text":"hi"},{"type":"image_url",` + image + `},{"type":"image_url",` + image + `}]`, 2, false},
 		{"null image_url beside text", `[{"type":"text","text":"hi","image_url":null}]`, 0, false},
 		{"string image_url", `[{"type":"text","image_url":"https://example.com/a.png"}]`, 1, false},
 		{"number beyond float64 range", `[{"type":"text","text":"x","n":1e400}]`, 0, false},
 		{"refusal part", `[{"type":"refusal","refusal":"no"}]`, 0, false},
-		{"part without a type key", `[{"text":"hi"}]`, 0, false},
+		{"part without a type key", `[{"text":"hi"}]`, 0, true},
+		{"empty object part", `[{}]`, 0, true},
+		{"file part without a type", `[{"file":{"file_id":"f"}}]`, 0, true},
+		{"input_audio part without a type", `[{"input_audio":{"data":"AAAA","format":"wav"}}]`, 0, true},
+		{"file_id part without a type", `[{"file_id":"f"}]`, 0, true},
+		{"text carrying a file", `[{"type":"text","file":{"file_id":"f"}}]`, 0, true},
+		{"text carrying a re-cased FILE", `[{"type":"text","FILE":{"file_id":"f"}}]`, 0, true},
+		{"text carrying a file_id", `[{"type":"text","file_id":"f"}]`, 0, true},
+		{"text carrying input_audio", `[{"type":"text","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, true},
+		{"text with a null file", `[{"type":"text","text":"hi","file":null}]`, 0, false},
+		{"text with cache_control", `[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`, 0, false},
+		{"inline image", `[{"type":"image_url","image_url":{"url":"` + tinyImage + `","detail":"low"}}]`, 1, false},
+		{"empty array", `[]`, 0, false},
 		{"file part", `[{"type":"file","file":{"file_id":"f"}}]`, 0, true},
 		{"input_audio part", `[{"type":"text","text":"hi"},{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, true},
 		{"invented type", `[{"type":"hologram"}]`, 0, true},
@@ -447,6 +459,21 @@ func TestPassthroughStringAndNullContentAreUntouched(t *testing.T) {
 		if _, rec, _ := passthroughReservation(t, passthroughChatBody(content)); rec.Code != http.StatusOK {
 			t.Errorf("content %s: status = %d, body %.200s", content, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestPassthroughToolConversationIsAdmittedWithExactReservation(t *testing.T) {
+	body := `{"model":"gpt-pass","max_tokens":1000,"messages":[` +
+		`{"role":"user","content":"weather?"},` +
+		`{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"w","arguments":"{}"}}]},` +
+		`{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"sunny"}]}]}`
+	reserved, rec, _ := passthroughReservation(t, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %.200s", rec.Code, rec.Body.String())
+	}
+	want := (float64(int64(len(body))+promptOverheadTokens) + 1000) / 1e6
+	if math.Abs(reserved-want) > 1e-9 {
+		t.Errorf("reservation = USD %v, want exactly %v", reserved, want)
 	}
 }
 

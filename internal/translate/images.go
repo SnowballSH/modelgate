@@ -169,7 +169,18 @@ var (
 	errContentNotObjects = errors.New("invalid message content: content parts must be objects")
 	errContentPartType   = errors.New("invalid message content: a content part's type must be a string")
 	errContentJSON       = errors.New("invalid message content: content is not valid JSON")
+	errContentPartNoType = errors.New("invalid message content: a content part needs a type")
 )
+
+var unpricedPayloadKeys = []string{"file", "file_id", "input_audio"}
+
+func unpricedPayloadKey(key string) error {
+	return fmt.Errorf("invalid message content: a content part may not carry a %q key; a passthrough row forwards only text, image_url and refusal parts", echoed(key))
+}
+
+func isUnpricedPayloadKey(key string) bool {
+	return slices.ContainsFunc(unpricedPayloadKeys, func(unpriced string) bool { return strings.EqualFold(key, unpriced) })
+}
 
 func unsupportedPartType(partType string) error {
 	return fmt.Errorf("invalid message content: unsupported content part type %q; a passthrough row forwards only text, image_url and refusal parts", echoed(partType))
@@ -234,7 +245,8 @@ func countContentImages(content json.RawMessage) (int, error) {
 }
 
 func scanPart(dec *json.Decoder) (bool, error) {
-	isImage := false
+	isImage, hasType := false, false
+	var unpricedKey string
 	for dec.More() {
 		keyToken, err := dec.Token()
 		if err != nil {
@@ -254,6 +266,7 @@ func scanPart(dec *json.Decoder) (bool, error) {
 			if !isPricedPartType(value) {
 				return false, unsupportedPartType(value)
 			}
+			hasType = true
 			isImage = isImage || strings.EqualFold(value, imagePartType)
 		case strings.EqualFold(key, imagePartType):
 			first, err := skipValue(dec)
@@ -261,6 +274,14 @@ func scanPart(dec *json.Decoder) (bool, error) {
 				return false, err
 			}
 			isImage = isImage || first != nil
+		case isUnpricedPayloadKey(key):
+			first, err := skipValue(dec)
+			if err != nil {
+				return false, err
+			}
+			if first != nil && unpricedKey == "" {
+				unpricedKey = key
+			}
 		default:
 			if _, err := skipValue(dec); err != nil {
 				return false, err
@@ -269,6 +290,12 @@ func scanPart(dec *json.Decoder) (bool, error) {
 	}
 	if _, err := dec.Token(); err != nil {
 		return false, errContentJSON
+	}
+	if !hasType {
+		return false, errContentPartNoType
+	}
+	if unpricedKey != "" {
+		return false, unpricedPayloadKey(unpricedKey)
 	}
 	return isImage, nil
 }

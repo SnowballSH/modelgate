@@ -311,6 +311,12 @@ func TestStandardBase64WithTrailingPaddingIsAccepted(t *testing.T) {
 	}
 }
 
+const errNeedsType = "invalid message content: a content part needs a type"
+
+func errForbiddenKey(key string) string {
+	return "invalid message content: a content part may not carry a \"" + key + "\" key; a passthrough row forwards only text, image_url and refusal parts"
+}
+
 func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 	const image = `{"url":"https://example.com/a.png"}`
 	cases := []struct {
@@ -330,7 +336,7 @@ func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 		{"duplicate type, last is text", `[{"type":"image_url","type":"text","image_url":` + image + `}]`, 1, ""},
 		{"escaped type value", `[{"type":"image\u005furl"}]`, 1, ""},
 		{"only a differently cased type key", `[{"Type":"image_url"}]`, 1, ""},
-		{"image_url key without type", `[{"image_url":` + image + `}]`, 1, ""},
+		{"image_url key without type", `[{"image_url":` + image + `}]`, 0, "invalid message content: a content part needs a type"},
 		{"differently cased image_url key", `[{"type":"text","Image_URL":` + image + `}]`, 1, ""},
 		{"null image_url counts nothing", `[{"type":"text","text":"hi","image_url":null}]`, 0, ""},
 		{"empty object image_url", `[{"type":"text","image_url":{}}]`, 1, ""},
@@ -342,7 +348,24 @@ func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 		{"image_url nested in another key is not a part", `[{"type":"text","meta":{"image_url":1}}]`, 0, ""},
 		{"two images", `[{"type":"image_url"},{"type":"text"},{"type":"image_url"}]`, 2, ""},
 		{"refusal part", `[{"type":"refusal","refusal":"no"}]`, 0, ""},
-		{"part without a type key", `[{"text":"hi"}]`, 0, ""},
+		{"part without a type key", `[{"text":"hi"}]`, 0, errNeedsType},
+		{"empty object part", `[{}]`, 0, errNeedsType},
+		{"file part without a type", `[{"file":{"file_id":"f"}}]`, 0, errNeedsType},
+		{"input_audio part without a type", `[{"input_audio":{"data":"AAAA","format":"wav"}}]`, 0, errNeedsType},
+		{"file_id part without a type", `[{"file_id":"f"}]`, 0, errNeedsType},
+		{"typeless part beside a typed one", `[{"type":"text","text":"hi"},{"text":"hi"}]`, 0, errNeedsType},
+		{"empty array", `[]`, 0, ""},
+		{"text with cache_control", `[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`, 0, ""},
+		{"inline image", `[{"type":"image_url","image_url":{"url":"` + pngDataURI + `","detail":"low"}}]`, 1, ""},
+		{"text carrying a file", `[{"type":"text","file":{"file_id":"f"}}]`, 0, errForbiddenKey("file")},
+		{"text carrying a re-cased FILE", `[{"type":"text","FILE":{"file_id":"f"}}]`, 0, errForbiddenKey("FILE")},
+		{"text carrying a file_id", `[{"type":"text","file_id":"f"}]`, 0, errForbiddenKey("file_id")},
+		{"text carrying input_audio", `[{"type":"text","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, errForbiddenKey("input_audio")},
+		{"image carrying a file", `[{"type":"image_url","image_url":` + image + `,"file":"f"}]`, 0, errForbiddenKey("file")},
+		{"file key spelled with an escape", `[{"type":"text","\u0066ile":1}]`, 0, errForbiddenKey("file")},
+		{"second file key is the non-null one", `[{"type":"text","file":null,"File":1}]`, 0, errForbiddenKey("File")},
+		{"text with a null file", `[{"type":"text","file":null}]`, 0, ""},
+		{"file nested in another key is not a part", `[{"type":"text","meta":{"file":1}}]`, 0, ""},
 		{"file part", `[{"type":"file","file":{"file_id":"f"}}]`, 0, "invalid message content: unsupported content part type \"file\"; a passthrough row forwards only text, image_url and refusal parts"},
 		{"input_audio part", `[{"type":"text"},{"type":"input_audio"}]`, 0, "invalid message content: unsupported content part type \"input_audio\"; a passthrough row forwards only text, image_url and refusal parts"},
 		{"invented type", `[{"type":"hologram"}]`, 0, "invalid message content: unsupported content part type \"hologram\"; a passthrough row forwards only text, image_url and refusal parts"},

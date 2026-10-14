@@ -270,8 +270,10 @@ request's worst-case cost against the key quota and the monthly budget,
 then the provider's circuit breaker. A request the gateway cannot
 translate is therefore refused with a 400 before it holds any shared
 capacity. On a `chat_completions` row that includes a message whose
-`content` is neither a string, `null` nor an array of JSON objects with
-string `type` fields of a type it can price (`text`, `image_url`, `refusal`) (`invalid message content: ...`), because the
+`content` is neither a string, `null` nor an array of JSON objects, each
+carrying a string `type` of `text`, `image_url` or `refusal` and none
+carrying a `file`, `file_id` or `input_audio` key
+(`invalid message content: ...`), because the
 gateway counts that row's image parts before forwarding them; v0.6.0
 forwarded such content unread.
 
@@ -408,9 +410,9 @@ is counted when any `type` key of any letter case says `image_url` or an
 `image_url` key holds a non-null value, and the bytes stay counted. The
 bound assumes a provider bills an image block by its dimensions, never
 by tokenising its bytes as text, and rejects a payload that is not an
-image; a `chat_completions` row forwards only the content-part types it
-can price (`text`, `image_url`, `refusal`) and refuses any other with a
-400. A request is admitted
+image; a `chat_completions` row forwards only content parts that carry
+a `type` of `text`, `image_url` or `refusal` and no `file`, `file_id` or
+`input_audio` key, and refuses any other with a 400. A request is admitted
 only while recorded spend plus every reservation stays below the key
 quota and the budget, so concurrent requests can overshoot a cap by at
 most one request's bound. Recorded spend at a cap answers
