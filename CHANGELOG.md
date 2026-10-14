@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.8.0 — unreleased
+## v0.8.0 — 2026-10-14
 
 A deployment that sets neither ceiling variable reserves and books every
 request as v0.7.1 did, and admits and refuses it the same way except
