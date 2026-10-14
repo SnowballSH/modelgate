@@ -74,6 +74,15 @@ type AnthropicOptions struct {
 	ProviderModel        string
 	DefaultMaxTokens     int
 	DisablePromptCaching bool
+	DropSampling         bool
+	ImageInput           bool
+	CacheTTL             string
+}
+
+// Models that accept output_config.effort reject any temperature other than
+// 1.0 and any top_p below 0.99, so effort displaces both.
+func (o AnthropicOptions) dropsSampling(req oai.ChatRequest) bool {
+	return o.DropSampling || req.ReasoningEffort != ""
 }
 
 // ToAnthropic translates with prompt caching on, the default for every model.
@@ -83,10 +92,7 @@ func ToAnthropic(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 
 func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.MessagesRequest, error) {
 	if err := refuseUnsupported(req, "for anthropic models", map[string]bool{
-		"response_format":   req.ResponseFormat != nil,
-		"frequency_penalty": req.FrequencyPenalty != nil,
-		"presence_penalty":  req.PresencePenalty != nil,
-		"seed":              req.Seed != nil,
+		"response_format": req.ResponseFormat != nil,
 	}); err != nil {
 		return anthro.MessagesRequest{}, err
 	}
@@ -99,11 +105,10 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 		MaxTokens: maxOutputTokens(req, opts.DefaultMaxTokens),
 		Stream:    req.Stream,
 	}
-	// Models that accept output_config.effort reject any temperature other
-	// than 1.0 and any top_p below 0.99, so effort displaces both.
 	if effort != "" {
 		out.OutputConfig = &anthro.OutputConfig{Effort: effort}
-	} else {
+	}
+	if !opts.dropsSampling(req) {
 		out.Temperature = req.Temperature
 		out.TopP = req.TopP
 	}
@@ -129,7 +134,7 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 	}
 	out.ToolChoice = withParallelToolCalls(choice, req.ParallelToolCalls, len(tools) > 0)
 
-	system, messages, err := convertMessages(req.Messages)
+	system, messages, err := convertMessages(req.Messages, opts.ImageInput)
 	if err != nil {
 		return anthro.MessagesRequest{}, err
 	}
@@ -141,25 +146,20 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 	}
 	out.Messages = messages
 	if !opts.DisablePromptCaching {
-		markCacheBreakpoints(&out)
+		markCacheBreakpoints(&out, opts.CacheTTL)
 	}
 	return out, nil
 }
 
-// refuseUnsupported names the first field, in a fixed order, that the
-// upstream cannot honour, together with the fields both translated upstreams
-// refuse: more than one choice and token log probabilities.
+// refuseUnsupported names the first field, in alphabetical order, that the
+// upstream cannot honour and that dropping would change the answer's shape:
+// more than one choice, plus whatever the caller lists.
 func refuseUnsupported(req oai.ChatRequest, where string, specific map[string]bool) error {
-	common := map[string]bool{
-		"n other than 1": req.N != nil && *req.N != 1,
-		"logprobs":       req.Logprobs != nil && *req.Logprobs,
-		"top_logprobs":   req.TopLogprobs != nil && *req.TopLogprobs > 0,
-	}
-	for _, fields := range []map[string]bool{common, specific} {
-		for _, name := range slices.Sorted(maps.Keys(fields)) {
-			if fields[name] {
-				return fmt.Errorf("%s is not supported %s", name, where)
-			}
+	fields := map[string]bool{"n other than 1": req.N != nil && *req.N != 1}
+	maps.Copy(fields, specific)
+	for _, name := range slices.Sorted(maps.Keys(fields)) {
+		if fields[name] {
+			return fmt.Errorf("%s is not supported %s", name, where)
 		}
 	}
 	return nil
@@ -197,19 +197,20 @@ func withParallelToolCalls(choice *anthro.ToolChoice, parallel *bool, hasTools b
 // markCacheBreakpoints puts one explicit breakpoint at the end of the static
 // prefix (tools render before system, so the last system block covers both)
 // and turns on the request-level automatic breakpoint, which follows the end
-// of the conversation turn by turn. Prefixes under the model's minimum are
-// not cached and cost nothing extra.
-func markCacheBreakpoints(req *anthro.MessagesRequest) {
+// of the conversation turn by turn. Every breakpoint carries the same
+// lifetime: the API refuses a longer one placed after a shorter one. Prefixes
+// under the model's minimum are not cached and cost nothing extra.
+func markCacheBreakpoints(req *anthro.MessagesRequest, ttl string) {
 	switch {
 	case len(req.System) > 0:
-		req.System[len(req.System)-1].CacheControl = anthro.Ephemeral()
+		req.System[len(req.System)-1].CacheControl = anthro.Ephemeral(ttl)
 	case len(req.Tools) > 0:
-		req.Tools[len(req.Tools)-1].CacheControl = anthro.Ephemeral()
+		req.Tools[len(req.Tools)-1].CacheControl = anthro.Ephemeral(ttl)
 	}
-	req.CacheControl = anthro.Ephemeral()
+	req.CacheControl = anthro.Ephemeral(ttl)
 }
 
-func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
+func convertMessages(messages []oai.Message, imageInput bool) (string, []anthro.Message, error) {
 	var systemParts []string
 	var result []anthro.Message
 	for i := 0; i < len(messages); i++ {
@@ -222,7 +223,7 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 			}
 			systemParts = append(systemParts, text)
 		case "user":
-			blocks, err := contentBlocks(msg.Content)
+			blocks, err := contentBlocks(msg.Content, imageInput)
 			if err != nil {
 				return "", nil, err
 			}
@@ -232,7 +233,9 @@ func convertMessages(messages []oai.Message) (string, []anthro.Message, error) {
 			if err != nil {
 				return "", nil, err
 			}
-			result = append(result, m)
+			if len(m.Content) > 0 {
+				result = append(result, m)
+			}
 		case "tool":
 			var blocks []anthro.ContentBlock
 			for ; i < len(messages) && messages[i].Role == "tool"; i++ {
@@ -276,8 +279,10 @@ func assistantMessage(msg oai.Message) (anthro.Message, error) {
 }
 
 // assistantParts reads an assistant message as the text and the tool calls a
-// history item should carry, refusing one that would render as neither. Both
-// translators build their assistant items from it, so the rules stay one rule.
+// history item should carry. Whitespace-only text is no text: a stopped or
+// regenerated reply leaves one in a chat client's history, and Anthropic
+// refuses the block. Both translators build their assistant items from it, and
+// both skip a turn that yields neither.
 func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
 	var text string
 	if len(msg.Content) > 0 {
@@ -285,7 +290,9 @@ func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
 		if err != nil {
 			return "", nil, err
 		}
-		text = content
+		if strings.TrimSpace(content) != "" {
+			text = content
+		}
 	}
 	calls := make([]oai.ToolCall, len(msg.ToolCalls))
 	for i, call := range msg.ToolCalls {
@@ -294,9 +301,6 @@ func assistantParts(msg oai.Message) (string, []oai.ToolCall, error) {
 			return "", nil, fmt.Errorf("tool call %s: invalid arguments JSON", call.ID)
 		}
 		calls[i] = call
-	}
-	if text == "" && len(calls) == 0 {
-		return "", nil, errors.New("assistant message has neither content nor tool calls")
 	}
 	return text, calls, nil
 }
@@ -310,43 +314,72 @@ func normalizedArguments(arguments string) string {
 	return arguments
 }
 
-func contentBlocks(content json.RawMessage) ([]anthro.ContentBlock, error) {
-	texts, err := nonEmptyTexts(content)
+func contentBlocks(content json.RawMessage, imageInput bool) ([]anthro.ContentBlock, error) {
+	parts, err := userParts(content, imageInput)
 	if err != nil {
 		return nil, err
 	}
-	blocks := make([]anthro.ContentBlock, len(texts))
-	for i, text := range texts {
-		blocks[i] = anthro.ContentBlock{Type: "text", Text: text}
+	blocks := make([]anthro.ContentBlock, len(parts))
+	for i, part := range parts {
+		if part.image != nil {
+			blocks[i] = part.image.anthropicBlock()
+			continue
+		}
+		blocks[i] = anthro.ContentBlock{Type: "text", Text: part.text}
 	}
 	return blocks, nil
 }
 
-// nonEmptyTexts reads a message content field — a plain string or an array of
-// text parts — as the texts a content builder should render, refusing content
-// that carries no text at all. Both translators map over it.
-func nonEmptyTexts(content json.RawMessage) ([]string, error) {
+var errEmptyContent = errors.New("message content is empty")
+
+type userPart struct {
+	text  string
+	image *image
+}
+
+// userParts reads a user message's content — a plain string or an array of
+// text and image parts — as what a content builder should render, in order,
+// refusing content that carries nothing. Both translators map over it.
+func userParts(content json.RawMessage, imageInput bool) ([]userPart, error) {
 	var s string
 	if err := json.Unmarshal(content, &s); err == nil {
 		if s == "" {
-			return nil, errors.New("message content is empty")
+			return nil, errEmptyContent
 		}
-		return []string{s}, nil
+		return []userPart{{text: s}}, nil
 	}
-	parts, err := textParts(content)
-	if err != nil {
-		return nil, err
+	var raw []struct {
+		Type     string       `json:"type"`
+		Text     string       `json:"text"`
+		ImageURL borrowedJSON `json:"image_url"`
 	}
-	texts := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part != "" {
-			texts = append(texts, part)
+	if err := json.Unmarshal(content, &raw); err != nil {
+		return nil, fmt.Errorf("invalid message content: %w", err)
+	}
+	parts := make([]userPart, 0, len(raw))
+	for _, p := range raw {
+		switch {
+		case p.Type == "text" && p.Text != "":
+			parts = append(parts, userPart{text: p.Text})
+		case p.Type == "text":
+		case p.Type == imagePartType && imageInput:
+			ref, err := decodeImageRef(p.ImageURL)
+			if err != nil {
+				return nil, err
+			}
+			img, err := parseImage(ref.URL, ref.Detail)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, userPart{image: &img})
+		default:
+			return nil, fmt.Errorf("unsupported content part: %s", p.Type)
 		}
 	}
-	if len(texts) == 0 {
-		return nil, errors.New("message content is empty")
+	if len(parts) == 0 {
+		return nil, errEmptyContent
 	}
-	return texts, nil
+	return parts, nil
 }
 
 func contentText(content json.RawMessage) (string, error) {

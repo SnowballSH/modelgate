@@ -10,31 +10,40 @@ import (
 	"github.com/SnowballSH/modelgate/internal/oairesp"
 )
 
-// ToResponses builds a Responses API request from a Chat Completions one.
-// temperature and top_p are normalised away rather than refused: this upstream
-// serves reasoning models, which accept only the default value of either.
+type ResponsesOptions struct {
+	ProviderModel    string
+	DefaultMaxTokens int
+	DropSampling     bool
+	ImageInput       bool
+	PromptCacheKey   string
+}
+
+// ToResponses translates for a reasoning model, which accepts only the
+// default temperature and top_p: both are normalised away rather than refused.
 func ToResponses(req oai.ChatRequest, providerModel string, defaultMaxTokens int) (oairesp.Request, error) {
-	stops, err := parseStop(req.Stop)
-	if err != nil {
+	return ToResponsesWith(req, ResponsesOptions{ProviderModel: providerModel, DefaultMaxTokens: defaultMaxTokens, DropSampling: true})
+}
+
+func ToResponsesWith(req oai.ChatRequest, opts ResponsesOptions) (oairesp.Request, error) {
+	if _, err := parseStop(req.Stop); err != nil {
 		return oairesp.Request{}, err
 	}
-	if err := refuseUnsupported(req, "on the responses upstream", map[string]bool{
-		"stop":              len(stops) > 0,
-		"frequency_penalty": req.FrequencyPenalty != nil,
-		"presence_penalty":  req.PresencePenalty != nil,
-		"seed":              req.Seed != nil,
-	}); err != nil {
+	if err := refuseUnsupported(req, "on the responses upstream", nil); err != nil {
 		return oairesp.Request{}, err
 	}
 
-	outputCap := maxOutputTokens(req, defaultMaxTokens)
+	outputCap := maxOutputTokens(req, opts.DefaultMaxTokens)
 	out := oairesp.Request{
-		Model:             providerModel,
+		Model:             opts.ProviderModel,
 		ParallelToolCalls: req.ParallelToolCalls,
 		MaxOutputTokens:   &outputCap,
 		Store:             false,
 		Stream:            req.Stream,
 		User:              req.User,
+		PromptCacheKey:    opts.PromptCacheKey,
+	}
+	if !opts.DropSampling {
+		out.Temperature, out.TopP = req.Temperature, req.TopP
 	}
 
 	if req.ReasoningEffort != "" {
@@ -45,7 +54,7 @@ func ToResponses(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 		out.Reasoning = &oairesp.Reasoning{Effort: level}
 	}
 
-	instructions, items, err := responsesInput(req.Messages)
+	instructions, items, err := responsesInput(req.Messages, opts.ImageInput)
 	if err != nil {
 		return oairesp.Request{}, err
 	}
@@ -77,7 +86,7 @@ func ToResponses(req oai.ChatRequest, providerModel string, defaultMaxTokens int
 // renders the rest as input items. Assistant tool calls go back without their
 // ids: a function_call carrying an id but no paired reasoning item is refused
 // upstream, and a Chat Completions history cannot carry reasoning items.
-func responsesInput(messages []oai.Message) (string, []oairesp.Item, error) {
+func responsesInput(messages []oai.Message, imageInput bool) (string, []oairesp.Item, error) {
 	var instructions []string
 	var items []oairesp.Item
 	for _, msg := range messages {
@@ -89,7 +98,7 @@ func responsesInput(messages []oai.Message) (string, []oairesp.Item, error) {
 			}
 			instructions = append(instructions, text)
 		case "user":
-			parts, err := responsesContentParts(msg.Content)
+			parts, err := responsesContentParts(msg.Content, imageInput)
 			if err != nil {
 				return "", nil, err
 			}
@@ -139,16 +148,20 @@ func responsesAssistantItems(msg oai.Message) ([]oairesp.Item, error) {
 	return items, nil
 }
 
-func responsesContentParts(content json.RawMessage) ([]oairesp.ContentPart, error) {
-	texts, err := nonEmptyTexts(content)
+func responsesContentParts(content json.RawMessage, imageInput bool) ([]oairesp.ContentPart, error) {
+	parts, err := userParts(content, imageInput)
 	if err != nil {
 		return nil, err
 	}
-	parts := make([]oairesp.ContentPart, len(texts))
-	for i, text := range texts {
-		parts[i] = oairesp.ContentPart{Type: "input_text", Text: text}
+	out := make([]oairesp.ContentPart, len(parts))
+	for i, part := range parts {
+		if part.image != nil {
+			out[i] = part.image.responsesPart()
+			continue
+		}
+		out[i] = oairesp.ContentPart{Type: "input_text", Text: part.text}
 	}
-	return parts, nil
+	return out, nil
 }
 
 func responsesTools(tools []oai.Tool) ([]oairesp.Tool, error) {

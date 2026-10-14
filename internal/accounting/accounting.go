@@ -17,6 +17,10 @@ var (
 	// ErrCapReserved refuses a request whose quota or budget is not yet spent
 	// but is fully held by in-flight reservations; it clears as they finish.
 	ErrCapReserved = errors.New("remaining quota or budget held by in-flight requests")
+	// ErrInvalidBound is an invariant violation: a request's worst-case
+	// cost is never negative, so a negative or non-numeric bound means a
+	// size computation upstream of admission is wrong.
+	ErrInvalidBound = errors.New("worst-case bound is negative or not a number")
 )
 
 func Month(t time.Time) string {
@@ -94,6 +98,9 @@ func (r *Reservation) Release() { r.release() }
 // operator clears; a cap reached only by adding reservations is
 // ErrCapReserved, which clears as the requests holding them finish.
 func (a *Accountant) Reserve(ctx context.Context, now time.Time, key store.KeyRecord, bound float64) (*Reservation, error) {
+	if !(bound >= 0) {
+		return nil, ErrInvalidBound
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	month := Month(now)

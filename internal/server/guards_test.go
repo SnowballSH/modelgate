@@ -244,3 +244,26 @@ func TestStoreErrorReportsInternal(t *testing.T) {
 	s.Close()
 	mustDeny(t, g, bearer(key.Full), sonnet, CodeInternal)
 }
+
+func TestAdmitRefusesANegativeDemandAsInternalAndHoldsNothing(t *testing.T) {
+	s := newTestStore(t)
+	clk := &clock{t: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}
+	acct := accounting.New(s, 100)
+	g := NewGuards(s, acct, newTestTable(t), 100, 1, clk.now)
+	auth := bearer(insertKey(t, s, clk.t, nil).Full)
+
+	for name, demand := range map[string]accounting.Demand{
+		"negative input":  {InputTokens: -400_000, OutputTokens: 10},
+		"negative output": {InputTokens: 10, OutputTokens: -1},
+		"negative total":  {InputTokens: -1_000_000, OutputTokens: 4096},
+	} {
+		adm, refusal := admitBearer(g, auth, sonnet, demand)
+		if refusal == nil || refusal.Code != CodeInternal {
+			t.Errorf("%s: admitted or wrong refusal %+v (admission %v), want %s", name, refusal, adm.Key.ID, CodeInternal)
+		}
+		if acct.Reserved() != 0 || len(g.slots) != 0 {
+			t.Errorf("%s: reserved USD %v and %d slots held after the refusal", name, acct.Reserved(), len(g.slots))
+		}
+	}
+	mustAdmit(t, g, auth, sonnet).Release()
+}

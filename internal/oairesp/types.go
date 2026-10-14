@@ -4,8 +4,8 @@ package oairesp
 
 import "encoding/json"
 
-// Request carries no temperature or top_p: this upstream serves reasoning
-// models, which accept only the default value of either.
+// Request carries temperature and top_p only for a model whose table row
+// declares sampling: true; reasoning models accept only the default of either.
 type Request struct {
 	Model             string          `json:"model"`
 	Instructions      string          `json:"instructions,omitempty"`
@@ -15,10 +15,13 @@ type Request struct {
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
 	Reasoning         *Reasoning      `json:"reasoning,omitempty"`
 	MaxOutputTokens   *int            `json:"max_output_tokens,omitempty"`
+	Temperature       *float64        `json:"temperature,omitempty"`
+	TopP              *float64        `json:"top_p,omitempty"`
 	Text              *TextConfig     `json:"text,omitempty"`
 	Store             bool            `json:"store"`
 	Stream            bool            `json:"stream,omitempty"`
 	User              string          `json:"user,omitempty"`
+	PromptCacheKey    string          `json:"prompt_cache_key,omitempty"`
 }
 
 type Reasoning struct {
@@ -58,13 +61,28 @@ func (i Item) MarshalJSON() ([]byte, error) {
 	}{item: item(i), Content: i.Text})
 }
 
-// ContentPart.Type is input_text for user parts, output_text for assistant
-// parts, and refusal for a declined one, which carries its explanation in
-// Refusal and leaves Text empty.
+// ContentPart.Type is input_text or input_image for user parts, output_text
+// for assistant parts, and refusal for a declined one, which carries its
+// explanation in Refusal and leaves Text empty. An input_image carries
+// ImageURL (an https URL or a data: URI) and no text key at all.
 type ContentPart struct {
-	Type    string `json:"type"`
-	Text    string `json:"text"`
-	Refusal string `json:"refusal,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text"`
+	Refusal  string `json:"refusal,omitempty"`
+	ImageURL string `json:"image_url,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+func (p ContentPart) MarshalJSON() ([]byte, error) {
+	if p.Type != "input_image" {
+		type part ContentPart
+		return json.Marshal(part(p))
+	}
+	return json.Marshal(struct {
+		Type     string `json:"type"`
+		ImageURL string `json:"image_url"`
+		Detail   string `json:"detail,omitempty"`
+	}{Type: p.Type, ImageURL: p.ImageURL, Detail: p.Detail})
 }
 
 // Tool.Strict carries no omitempty: the Responses API defaults it to true and

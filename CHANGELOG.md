@@ -1,5 +1,98 @@
 # Changelog
 
+## v0.7.0 — unreleased
+
+A v0.6.0 model table loads unchanged, and a row carrying none of the new
+fields is served as before. What changes for such a row is listed under
+Changed.
+
+### Changed
+
+- `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`,
+  `top_logprobs` and `logit_bias` are dropped on Anthropic and Responses
+  models instead of answering 400, and so is `stop` on Responses models.
+  A chat client sends these by default. The response names what was
+  removed in `X-Modelgate-Dropped-Params`, on JSON and streamed responses
+  and on an upstream error that follows a successful translation, and
+  it also names `temperature` and `top_p` when a row or a
+  `reasoning_effort` displaces them.
+- An assistant message with no text and no tool calls is skipped instead
+  of answering 400, and whitespace-only assistant text is not sent.
+- A request is translated before it takes a concurrency slot or reserves
+  cost, and the output bounds are checked after the rate limit and the
+  model resolve. Client-visible: a request the gateway cannot translate
+  answers 400 even while every slot is taken or a cap is spent, where
+  v0.6.0 answered 429; a request with unusable output bounds for an
+  unknown model answers 404, and for a rate-limited key 429, where
+  v0.6.0 answered 400; and a refused request still holds no shared
+  capacity and books nothing.
+- The gateway's output default is reserved only when a request names
+  neither `max_tokens` nor `max_completion_tokens`; v0.6.0 also reserved
+  it beside a lone `max_completion_tokens`, which now reserves its own
+  cap.
+- A stream cut before the provider reported its prompt size is booked, on
+  the estimated size, at the row's dearest price tier.
+- `logit_bias` and `prompt_cache_key` are forwarded on Chat Completions
+  passthrough models; v0.6.0 discarded both.
+- On a Chat Completions passthrough row, message `content` must be a
+  string, `null` or an array of JSON objects with string `type` fields,
+  and only `text`, `image_url` and `refusal` parts are forwarded; any
+  other part type, such as `file` or `input_audio`, answers `400 invalid
+  message content` before admission. Every part must be an object with
+  exactly one lowercase `type` of `text`, `image_url` or `refusal` and
+  only the keys that type allows (`text`: `type`, `text`,
+  `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`,
+  `refusal`), each spelled exactly and at most once; anything else, such
+  as a part with no `type`, a `file`, `file_id`, `input_audio` or unknown
+  key, or a re-cased `Type`, is refused the same way. A part is an image
+  exactly when its `type` is `image_url`. Image parts are charged the
+  per-image allowance. v0.6.0 forwarded such content unread.
+- A `prompt_cache_key` that is not a string is ignored on every row
+  instead of failing the request.
+
+### Added
+
+- Model-table fields, all optional: `default_max_tokens`, `sampling`,
+  `image_input`, `price_tiers` and `cache_ttl`. See the README's model
+  table section.
+- Tiered prices: a request whose prompt exceeds a tier's
+  `above_input_tokens` — uncached, cache-read and cache-write input
+  together — is booked whole at that tier, and admission reserves at the
+  dearest tier.
+- Images on Anthropic and Responses models whose row declares
+  `image_input: true`: `image_url` parts carrying a `data:` URI or an
+  `https://` URL. An inline image must be standard base64 in whole groups
+  of four, with a media type that is exactly `image/jpeg`, `image/png`,
+  `image/gif` or `image/webp`, in lowercase. Any other image is a 400
+  naming what is wrong, and a row without `image_input` answers `400
+  model <id> does not support image input`.
+- Admission charges each image a fixed allowance instead of counting its
+  bytes: 4,784 tokens on Anthropic rows and 36,000 on OpenAI rows.
+  Inline images still need `MAX_BODY_BYTES` raised to be read at all.
+- `cache_ttl: "1h"` asks Anthropic for the one-hour prompt cache on every
+  breakpoint.
+- `prompt_cache_key` is forwarded to OpenAI as a digest namespaced by the
+  gateway key.
+- Startup refuses a row whose `default_max_tokens` exceeds
+  `MAX_OUTPUT_TOKENS`.
+- Built with Go 1.26.9, which fixes the standard-library vulnerabilities
+  `govulncheck` reported against 1.26.6 and 1.26.8.
+
+### Upgrading
+
+- A v0.6.0 model table loads unchanged. No configuration or schema
+  change.
+- The five new row fields are optional. Absent, `default_max_tokens`
+  falls back to `DEFAULT_MAX_TOKENS`, `sampling` is `true` on Anthropic
+  and Chat Completions rows and `false` on Responses rows,
+  `image_input` is `false`, `price_tiers` is one flat price, and
+  `cache_ttl` is `"5m"`.
+- v0.6.0 ignores those fields silently, so deploy v0.7.0 first and the
+  table that uses them second; a table using them under v0.6.0 would
+  serve without the limits, tiers and cache lifetime it declares.
+- Bodies carrying inline images need `MAX_BODY_BYTES` raised, with the
+  reverse proxy's own limit.
+
 ## v0.6.0 — 2026-09-25
 
 ### BREAKING

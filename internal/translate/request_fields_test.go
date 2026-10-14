@@ -138,13 +138,8 @@ func digestOf(value string) string {
 
 func TestToAnthropicRefusesUnsupportedFields(t *testing.T) {
 	for field, fragment := range map[string]string{
-		"response_format":   `"response_format":{"type":"json_object"}`,
-		"n other than 1":    `"n":2`,
-		"frequency_penalty": `"frequency_penalty":0.5`,
-		"presence_penalty":  `"presence_penalty":0.5`,
-		"seed":              `"seed":7`,
-		"logprobs":          `"logprobs":true`,
-		"top_logprobs":      `"top_logprobs":3`,
+		"response_format": `"response_format":{"type":"json_object"}`,
+		"n other than 1":  `"n":2`,
 	} {
 		t.Run(field, func(t *testing.T) {
 			req := chatRequest(t, `{`+fragment+`,"messages":[{"role":"user","content":"hi"}]}`)
@@ -163,7 +158,7 @@ func TestToAnthropicAcceptsNeutralValues(t *testing.T) {
 	}
 }
 
-func TestToResponsesCarriesUserAndRefusesTopLogprobs(t *testing.T) {
+func TestToResponsesCarriesUser(t *testing.T) {
 	req := chatRequest(t, `{"user":"worker-7","messages":[{"role":"user","content":"hi"}]}`)
 	got, err := ToResponses(req, "gpt-real", 1024)
 	if err != nil {
@@ -171,10 +166,5 @@ func TestToResponsesCarriesUserAndRefusesTopLogprobs(t *testing.T) {
 	}
 	if got.User != "worker-7" {
 		t.Errorf("user = %q, want worker-7", got.User)
-	}
-
-	req = chatRequest(t, `{"top_logprobs":2,"messages":[{"role":"user","content":"hi"}]}`)
-	if _, err := ToResponses(req, "gpt-real", 1024); err == nil || !strings.Contains(err.Error(), "top_logprobs") {
-		t.Fatalf("err = %v, want top_logprobs refused", err)
 	}
 }

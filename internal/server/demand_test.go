@@ -5,6 +5,7 @@ import (
 
 	"github.com/SnowballSH/modelgate/internal/accounting"
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/translate"
 )
 
 func intPtr(v int) *int { return &v }
@@ -19,14 +20,14 @@ func TestWorstCaseDemand(t *testing.T) {
 	}{
 		{"defaults", oai.ChatRequest{}, def},
 		{"max_tokens alone", oai.ChatRequest{MaxTokens: intPtr(100)}, 100},
-		{"max_completion_tokens alone keeps the default in reach", oai.ChatRequest{MaxCompletionTokens: intPtr(100)}, def},
+		{"max_completion_tokens alone", oai.ChatRequest{MaxCompletionTokens: intPtr(100)}, 100},
 		{"max_completion_tokens above the default", oai.ChatRequest{MaxCompletionTokens: intPtr(9000)}, 9000},
 		{"both, larger wins", oai.ChatRequest{MaxTokens: intPtr(100), MaxCompletionTokens: intPtr(700)}, 700},
 		{"n multiplies", oai.ChatRequest{MaxTokens: intPtr(100), N: intPtr(3)}, 300},
 		{"at the ceiling", oai.ChatRequest{MaxTokens: intPtr(ceiling)}, ceiling},
 	}
 	for _, tc := range cases {
-		got, err := worstCaseDemand(tc.req, body, def, ceiling)
+		got, err := worstCaseDemand(tc.req, measurePrompt(body, translate.ImageLoad{}, anthropicImageTokenAllowance), def, ceiling)
 		if err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
@@ -44,7 +45,7 @@ func TestWorstCaseDemand(t *testing.T) {
 		"negative max_completion":    {MaxCompletionTokens: intPtr(-5)},
 		"zero n":                     {N: intPtr(0)},
 	} {
-		if _, err := worstCaseDemand(req, body, def, ceiling); err == nil {
+		if _, err := worstCaseDemand(req, measurePrompt(body, translate.ImageLoad{}, anthropicImageTokenAllowance), def, ceiling); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}

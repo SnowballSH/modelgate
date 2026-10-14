@@ -27,6 +27,13 @@ const (
 	UpstreamResponses       = "responses"
 )
 
+const (
+	CacheTTLFiveMinutes = "5m"
+	CacheTTLOneHour     = "1h"
+)
+
+const MaxDefaultMaxTokens = 128_000
+
 // EffortLevels is the reasoning_effort vocabulary modelgate accepts from
 // clients, in ascending order.
 var EffortLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
@@ -46,11 +53,27 @@ func (l Limits) AllowsEffort(level string) bool {
 }
 
 type Model struct {
-	Provider      string
-	UpstreamAPI   string
-	ProviderModel string
-	Pricing       Pricing
-	Limits        Limits
+	Provider         string
+	UpstreamAPI      string
+	ProviderModel    string
+	Pricing          Pricing
+	PriceTiers       []PriceTier
+	Limits           Limits
+	DefaultMaxTokens int
+	DropsSampling    bool
+	ImageInput       bool
+	CacheTTL         string
+}
+
+func (m Model) OutputCapDefault(gatewayDefault int) int {
+	if m.DefaultMaxTokens > 0 {
+		return m.DefaultMaxTokens
+	}
+	return gatewayDefault
+}
+
+func (m Model) Translated() bool {
+	return m.Provider == ProviderAnthropic || m.UpstreamAPI == UpstreamResponses
 }
 
 type Table struct {
@@ -61,23 +84,38 @@ type modelFile struct {
 	Models map[string]modelEntry `json:"models"`
 }
 
-type modelEntry struct {
-	Provider             string   `json:"provider"`
-	UpstreamAPI          string   `json:"upstream_api"`
-	ProviderModel        string   `json:"provider_model"`
+type priceEntry struct {
 	InputUSDPerMTok      *float64 `json:"input_usd_per_mtok"`
 	OutputUSDPerMTok     *float64 `json:"output_usd_per_mtok"`
 	CacheReadUSDPerMTok  *float64 `json:"cache_read_usd_per_mtok"`
 	CacheWriteUSDPerMTok *float64 `json:"cache_write_usd_per_mtok"`
-	ForcedToolChoice     *bool    `json:"forced_tool_choice"`
-	ReasoningEfforts     []string `json:"reasoning_efforts"`
+}
+
+type tierEntry struct {
+	AboveInputTokens *int64 `json:"above_input_tokens"`
+	priceEntry
+}
+
+type modelEntry struct {
+	Provider      string `json:"provider"`
+	UpstreamAPI   string `json:"upstream_api"`
+	ProviderModel string `json:"provider_model"`
+	priceEntry
+	ForcedToolChoice *bool       `json:"forced_tool_choice"`
+	ReasoningEfforts []string    `json:"reasoning_efforts"`
+	DefaultMaxTokens *int        `json:"default_max_tokens"`
+	Sampling         *bool       `json:"sampling"`
+	ImageInput       *bool       `json:"image_input"`
+	PriceTiers       []tierEntry `json:"price_tiers"`
+	CacheTTL         *string     `json:"cache_ttl"`
 }
 
 // LoadTable reads the model pricing table at path. Cost accounting fails
 // closed by construction — nothing unpriced can run — so any unreadable
 // file, invalid JSON, empty table, empty provider_model, unknown provider,
 // unusable upstream_api, absent, zero, or negative price field, or empty or
-// unknown reasoning_efforts yields an error and no table. An omitted provider
+// unknown reasoning_efforts, or an out-of-range default_max_tokens, unusable
+// price_tiers or cache_ttl yields an error and no table. An omitted provider
 // means anthropic, an omitted upstream_api means chat_completions on openai
 // models and nothing on anthropic ones, and omitted limits refuse nothing.
 // Fields this build does not know are ignored, so a newer table still loads.
@@ -125,6 +163,41 @@ func (e modelEntry) validate() (Model, error) {
 	case upstream != UpstreamChatCompletions && upstream != UpstreamResponses:
 		return Model{}, fmt.Errorf("unknown upstream_api %q", upstream)
 	}
+	pricing, err := e.pricing()
+	if err != nil {
+		return Model{}, err
+	}
+	limits, err := e.limits()
+	if err != nil {
+		return Model{}, err
+	}
+	tiers, err := e.tiers()
+	if err != nil {
+		return Model{}, err
+	}
+	defaultMaxTokens, err := e.defaultMaxTokens()
+	if err != nil {
+		return Model{}, err
+	}
+	cacheTTL, err := e.cacheTTL(provider)
+	if err != nil {
+		return Model{}, err
+	}
+	return Model{
+		Provider:         provider,
+		UpstreamAPI:      upstream,
+		ProviderModel:    e.ProviderModel,
+		Pricing:          pricing,
+		PriceTiers:       tiers,
+		Limits:           limits,
+		DefaultMaxTokens: defaultMaxTokens,
+		DropsSampling:    dropsSampling(e.Sampling, upstream),
+		ImageInput:       e.ImageInput != nil && *e.ImageInput,
+		CacheTTL:         cacheTTL,
+	}, nil
+}
+
+func (e priceEntry) pricing() (Pricing, error) {
 	prices := []struct {
 		field string
 		value *float64
@@ -136,27 +209,17 @@ func (e modelEntry) validate() (Model, error) {
 	}
 	for _, p := range prices {
 		if p.value == nil {
-			return Model{}, fmt.Errorf("%s absent", p.field)
+			return Pricing{}, fmt.Errorf("%s absent", p.field)
 		}
 		if *p.value <= 0 {
-			return Model{}, fmt.Errorf("%s must be positive, got %v", p.field, *p.value)
+			return Pricing{}, fmt.Errorf("%s must be positive, got %v", p.field, *p.value)
 		}
 	}
-	limits, err := e.limits()
-	if err != nil {
-		return Model{}, err
-	}
-	return Model{
-		Provider:      provider,
-		UpstreamAPI:   upstream,
-		ProviderModel: e.ProviderModel,
-		Limits:        limits,
-		Pricing: Pricing{
-			InputUSDPerMTok:      *e.InputUSDPerMTok,
-			OutputUSDPerMTok:     *e.OutputUSDPerMTok,
-			CacheReadUSDPerMTok:  *e.CacheReadUSDPerMTok,
-			CacheWriteUSDPerMTok: *e.CacheWriteUSDPerMTok,
-		},
+	return Pricing{
+		InputUSDPerMTok:      *e.InputUSDPerMTok,
+		OutputUSDPerMTok:     *e.OutputUSDPerMTok,
+		CacheReadUSDPerMTok:  *e.CacheReadUSDPerMTok,
+		CacheWriteUSDPerMTok: *e.CacheWriteUSDPerMTok,
 	}, nil
 }
 
@@ -175,6 +238,67 @@ func (e modelEntry) limits() (Limits, error) {
 	}
 	limits.ReasoningEfforts = slices.Clone(e.ReasoningEfforts)
 	return limits, nil
+}
+
+func (e modelEntry) tiers() ([]PriceTier, error) {
+	if e.PriceTiers == nil {
+		return nil, nil
+	}
+	if len(e.PriceTiers) == 0 {
+		return nil, errors.New("price_tiers is empty; omit it for one price")
+	}
+	tiers := make([]PriceTier, len(e.PriceTiers))
+	var previous int64
+	for i, entry := range e.PriceTiers {
+		switch {
+		case entry.AboveInputTokens == nil:
+			return nil, fmt.Errorf("price_tiers[%d]: above_input_tokens absent", i)
+		case *entry.AboveInputTokens <= 0:
+			return nil, fmt.Errorf("price_tiers[%d]: above_input_tokens must be positive, got %d", i, *entry.AboveInputTokens)
+		case *entry.AboveInputTokens <= previous:
+			return nil, fmt.Errorf("price_tiers[%d]: above_input_tokens %d must exceed the previous tier's %d", i, *entry.AboveInputTokens, previous)
+		}
+		pricing, err := entry.pricing()
+		if err != nil {
+			return nil, fmt.Errorf("price_tiers[%d]: %w", i, err)
+		}
+		previous = *entry.AboveInputTokens
+		tiers[i] = PriceTier{AboveInputTokens: previous, Pricing: pricing}
+	}
+	return tiers, nil
+}
+
+func (e modelEntry) defaultMaxTokens() (int, error) {
+	if e.DefaultMaxTokens == nil {
+		return 0, nil
+	}
+	if *e.DefaultMaxTokens < 1 || *e.DefaultMaxTokens > MaxDefaultMaxTokens {
+		return 0, fmt.Errorf("default_max_tokens must be between 1 and %d, got %d", MaxDefaultMaxTokens, *e.DefaultMaxTokens)
+	}
+	return *e.DefaultMaxTokens, nil
+}
+
+func (e modelEntry) cacheTTL(provider string) (string, error) {
+	if e.CacheTTL == nil {
+		return "", nil
+	}
+	if provider != ProviderAnthropic {
+		return "", errors.New("cache_ttl is only valid for anthropic models")
+	}
+	switch *e.CacheTTL {
+	case CacheTTLFiveMinutes:
+		return "", nil
+	case CacheTTLOneHour:
+		return CacheTTLOneHour, nil
+	}
+	return "", fmt.Errorf("cache_ttl %q is not one of %s, %s", *e.CacheTTL, CacheTTLFiveMinutes, CacheTTLOneHour)
+}
+
+func dropsSampling(sampling *bool, upstream string) bool {
+	if sampling != nil {
+		return !*sampling
+	}
+	return upstream == UpstreamResponses
 }
 
 func (t *Table) Resolve(publicID string) (Model, bool) {

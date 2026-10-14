@@ -70,3 +70,31 @@ func TestForcesToolCall(t *testing.T) {
 		}
 	}
 }
+
+func TestChatRequestDecodesLogitBias(t *testing.T) {
+	var req ChatRequest
+	body := `{"model":"m","messages":[],"logit_bias":{"50256":-100}}`
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if string(req.LogitBias) != `{"50256":-100}` {
+		t.Errorf("LogitBias = %s, want the client's object", req.LogitBias)
+	}
+}
+
+func TestChatRequestRoundTripKeepsLogitBiasAndCacheKey(t *testing.T) {
+	var req ChatRequest
+	body := `{"model":"m","messages":[],"logit_bias":{"50256":-100},"prompt_cache_key":"thread-1"}`
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatal(err)
+	}
+	out, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"logit_bias":{"50256":-100}`, `"prompt_cache_key":"thread-1"`} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("re-encoded request lost %s: %s", want, out)
+		}
+	}
+}

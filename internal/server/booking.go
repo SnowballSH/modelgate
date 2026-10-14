@@ -16,7 +16,7 @@ type streamMeter struct {
 	started     bool
 	finalUsage  bool
 	outputChars int
-	promptBytes int
+	prompt      promptSize
 	// hiddenOutputCap is the output cap of a call that can bill output its
 	// stream never shows, which a cut stream books in full.
 	hiddenOutputCap int64
@@ -43,45 +43,61 @@ func (m *streamMeter) count(chunk oai.ChatChunk) {
 	}
 }
 
+// bookedUsage is the usage a stream is booked at, and whether any of it is
+// a guess: estimated when the stream was cut before its final usage,
+// inputEstimated when the provider had reported no input count, which also
+// decides the price tier the booking is priced at.
+type bookedUsage struct {
+	usage          store.Usage
+	estimated      bool
+	inputEstimated bool
+}
+
 // bookable is the usage to book: the reported usage once the final event
 // arrived, otherwise the reported usage with output raised to a
 // four-characters-per-token estimate of what streamed, or to the whole
 // output cap when the call can hide output, and input estimated from the
 // prompt when the provider had reported none.
-func (m streamMeter) bookable(reported store.Usage) (store.Usage, bool) {
+func (m streamMeter) bookable(reported store.Usage) bookedUsage {
 	if m.finalUsage || !m.started {
-		return reported, false
+		return bookedUsage{usage: reported}
 	}
-	estimate := reported
-	estimate.OutputTokens = max(reported.OutputTokens, int64((m.outputChars+3)/4), m.hiddenOutputCap)
-	if reported.InputTokens+reported.CacheReadTokens+reported.CacheWriteTokens == 0 {
-		estimate.InputTokens = int64((m.promptBytes + 3) / 4)
+	booked := bookedUsage{usage: reported, estimated: true, inputEstimated: reported.PromptTokens() == 0}
+	booked.usage.OutputTokens = max(reported.OutputTokens, int64((m.outputChars+3)/4), m.hiddenOutputCap)
+	if booked.inputEstimated {
+		booked.usage.InputTokens = m.prompt.estimatedTokens()
 	}
-	return estimate, true
+	return booked
 }
 
 // bookStreamUsage books what a stream billed, on every exit path, and marks
 // an estimate as one in the log.
 func (h *PublicHandler) bookStreamUsage(ctx context.Context, adm Admission, publicModel string, meter streamMeter, reported store.Usage) {
-	usage, estimated := meter.bookable(reported)
-	if !usage.HasTokens() {
+	booked := meter.bookable(reported)
+	if !booked.usage.HasTokens() {
 		return
 	}
-	if estimated {
+	if booked.estimated {
 		slog.Warn("stream ended before its final usage; booking an estimate",
 			"request_id", requestIDFrom(ctx), "key_id", adm.Key.ID, "model", publicModel,
-			"input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens)
+			"input_tokens", booked.usage.InputTokens, "output_tokens", booked.usage.OutputTokens)
 	}
-	h.recordUsage(ctx, adm, publicModel, usage)
+	h.recordUsage(ctx, adm, publicModel, booked.usage, booked.inputEstimated)
 }
 
 // recordUsage runs on a context detached from the request: spend the
-// provider billed must be booked even when the caller is already gone.
-func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage) {
+// provider billed must be booked even when the caller is already gone. An
+// estimated prompt size cannot prove which price tier the request crossed,
+// so it is booked at the dearest.
+func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicModel string, usage store.Usage, inputEstimated bool) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookingTimeout)
 	defer cancel()
 	now := h.now()
-	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, adm.Model.Pricing); err != nil {
+	pricing := adm.Model.PricingFor(usage.PromptTokens())
+	if inputEstimated {
+		pricing = adm.Model.WorstCasePricing()
+	}
+	if err := h.acct.Record(ctx, now, adm.Key.ID, publicModel, usage, pricing); err != nil {
 		h.metrics.BookingFailed()
 		slog.Error("usage booking failed", "request_id", requestIDFrom(ctx), "key_id", adm.Key.ID,
 			"model", publicModel, "input_tokens", usage.InputTokens, "output_tokens", usage.OutputTokens, "err", err)

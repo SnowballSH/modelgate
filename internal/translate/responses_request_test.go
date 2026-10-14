@@ -80,18 +80,10 @@ func TestToResponsesNeverEchoesItemIDs(t *testing.T) {
 func TestToResponsesRejects(t *testing.T) {
 	base := loadChatRequest(t, filepath.Join("testdata", "responses_plain.input.json"))
 	n := 2
-	half := 0.5
-	seed := int64(7)
 	for name, mutate := range map[string]func(*oai.ChatRequest){
 		"n":                 func(r *oai.ChatRequest) { r.N = &n },
-		"logprobs":          func(r *oai.ChatRequest) { v := true; r.Logprobs = &v },
 		"effort":            func(r *oai.ChatRequest) { r.ReasoningEffort = "ultra" },
-		"stop":              func(r *oai.ChatRequest) { r.Stop = json.RawMessage(`"END"`) },
-		"stop_list":         func(r *oai.ChatRequest) { r.Stop = json.RawMessage(`["END","STOP"]`) },
 		"stop_not_a_string": func(r *oai.ChatRequest) { r.Stop = json.RawMessage(`42`) },
-		"frequency_penalty": func(r *oai.ChatRequest) { r.FrequencyPenalty = &half },
-		"presence_penalty":  func(r *oai.ChatRequest) { r.PresencePenalty = &half },
-		"seed":              func(r *oai.ChatRequest) { r.Seed = &seed },
 		"tool_role_without_id": func(r *oai.ChatRequest) {
 			r.Messages = append(r.Messages, oai.Message{Role: "tool", Content: json.RawMessage(`"x"`)})
 		},
@@ -100,9 +92,6 @@ func TestToResponsesRejects(t *testing.T) {
 		},
 		"empty_user_content": func(r *oai.ChatRequest) {
 			r.Messages = append(r.Messages, oai.Message{Role: "user", Content: json.RawMessage(`""`)})
-		},
-		"assistant_without_content_or_tool_calls": func(r *oai.ChatRequest) {
-			r.Messages = append(r.Messages, oai.Message{Role: "assistant", Content: json.RawMessage(`null`)})
 		},
 		"invalid_tool_arguments": func(r *oai.ChatRequest) {
 			r.Messages = append(r.Messages, oai.Message{Role: "assistant", ToolCalls: []oai.ToolCall{{

@@ -90,6 +90,7 @@ type publicEnvOptions struct {
 	budgetUSD       float64
 	rpm             int
 	bodyReadTimeout time.Duration
+	tableJSON       string
 }
 
 func newPublicEnv(t *testing.T, providerHandler http.HandlerFunc, maxBodyBytes int64) *publicEnv {
@@ -104,6 +105,9 @@ func newPublicEnvWith(t *testing.T, providerHandler http.HandlerFunc, opts publi
 
 	s := testStore(t)
 	table := testTable(t)
+	if opts.tableJSON != "" {
+		table = tableFrom(t, opts.tableJSON)
+	}
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
 	acct := accounting.New(s, opts.budgetUSD)
@@ -474,6 +478,8 @@ func upstreamPaths(calls []upstreamCall) []string {
 type dualEnv struct {
 	handler       http.Handler
 	store         *store.Store
+	acct          *accounting.Accountant
+	guards        *Guards
 	now           time.Time
 	openaiSeen    *[]oai.ChatRequest
 	openaiCalls   *[]upstreamCall
@@ -533,7 +539,7 @@ func newDualEnvWithTable(t *testing.T, tableJSON string, openaiHandler, anthropi
 	}
 	m := NewMetrics(100)
 	handler := NewPublicHandler(guards, table, acct, s, up, m, PublicConfig{DefaultMaxTokens: 4096, MaxOutputTokens: 128_000, MaxBodyBytes: 1 << 20, RequestDeadline: 5 * time.Second, Version: "test-build"}, nowFn)
-	return &dualEnv{handler: handler, store: s, now: now, openaiSeen: &openaiSeen, openaiCalls: &openaiCalls, anthropicHits: &anthropicHits}
+	return &dualEnv{handler: handler, store: s, acct: acct, guards: guards, now: now, openaiSeen: &openaiSeen, openaiCalls: &openaiCalls, anthropicHits: &anthropicHits}
 }
 
 func openaiChatResponse() http.HandlerFunc {

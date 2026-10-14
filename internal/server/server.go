@@ -94,6 +94,11 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 	if cfg.MaxOutputTokens <= 0 || cfg.DefaultMaxTokens > cfg.MaxOutputTokens {
 		return nil, fmt.Errorf("startup: MAX_OUTPUT_TOKENS %d must be positive and at least DEFAULT_MAX_TOKENS %d", cfg.MaxOutputTokens, cfg.DefaultMaxTokens)
 	}
+	for _, id := range table.IDs() {
+		if model, _ := table.Resolve(id); model.DefaultMaxTokens > cfg.MaxOutputTokens {
+			return nil, fmt.Errorf("startup: MODELS_CONFIG_FILE: model %q: default_max_tokens %d exceeds MAX_OUTPUT_TOKENS %d", id, model.DefaultMaxTokens, cfg.MaxOutputTokens)
+		}
+	}
 	proxySecret, err := LoadProxySecret(cfg.AdminProxySecretFile)
 	if err != nil {
 		return nil, fmt.Errorf("startup: ADMIN_PROXY_SECRET_FILE: %w", err)

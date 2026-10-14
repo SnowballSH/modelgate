@@ -17,6 +17,7 @@ type ChatRequest struct {
 	N                   *int            `json:"n,omitempty"`
 	Logprobs            *bool           `json:"logprobs,omitempty"`
 	TopLogprobs         *int            `json:"top_logprobs,omitempty"`
+	LogitBias           json.RawMessage `json:"logit_bias,omitempty"`
 	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
 	ResponseFormat      json.RawMessage `json:"response_format,omitempty"`
@@ -26,6 +27,20 @@ type ChatRequest struct {
 	Tools               []Tool          `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
 	User                string          `json:"user,omitempty"`
+	PromptCacheKey      CacheKey        `json:"prompt_cache_key,omitempty"`
+}
+
+// CacheKey is a client's prompt_cache_key. A value that is not a JSON string
+// decodes to the empty key, which is neither forwarded nor an error.
+type CacheKey string
+
+func (k *CacheKey) UnmarshalJSON(data []byte) error {
+	var key string
+	if json.Unmarshal(data, &key) != nil {
+		key = ""
+	}
+	*k = CacheKey(key)
+	return nil
 }
 
 // ForcesToolCall reports whether tool_choice obliges the model to call a

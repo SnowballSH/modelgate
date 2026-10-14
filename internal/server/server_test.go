@@ -226,3 +226,17 @@ func TestNewAnthropicKeyNotRequiredForOpenAIOnlyTable(t *testing.T) {
 	}
 	s.closeAll()
 }
+
+func TestNewRefusesARowDefaultAboveTheOutputCeiling(t *testing.T) {
+	cfg := assemblyConfig(t)
+	cfg.MaxOutputTokens = 8000
+	table := `{"models":{"claude-chat":{"provider_model":"claude-chat","default_max_tokens":16000,
+		"input_usd_per_mtok":2,"output_usd_per_mtok":10,"cache_read_usd_per_mtok":0.1,"cache_write_usd_per_mtok":4}}}`
+	if err := os.WriteFile(cfg.ModelsConfigFile, []byte(table), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := `model "claude-chat": default_max_tokens 16000 exceeds MAX_OUTPUT_TOKENS 8000`
+	if _, err := New(cfg, nil); err == nil || !contains(err.Error(), want) {
+		t.Fatalf("New = %v, want a startup refusal carrying %q", err, want)
+	}
+}

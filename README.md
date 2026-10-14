@@ -95,7 +95,7 @@ partial startup — and it refuses before any port opens.
 | `ANTHROPIC_BASE_URL` | Anthropic origin | `https://api.anthropic.com` |
 | `OPENAI_API_KEY_FILE` | OpenAI credential file | Required when the table has an OpenAI model; must be non-empty |
 | `OPENAI_BASE_URL` | OpenAI origin | `https://api.openai.com` |
-| `DEFAULT_MAX_TOKENS` | Output cap sent when a request names none | `4096`; a positive integer no larger than `MAX_OUTPUT_TOKENS` |
+| `DEFAULT_MAX_TOKENS` | Output cap sent when a request names none and the model's row sets no `default_max_tokens` | `4096`; a positive integer no larger than `MAX_OUTPUT_TOKENS` |
 | `MAX_OUTPUT_TOKENS` | Largest output (`n` × the cap) a request may ask for; larger requests get a 400 | `128000`; a positive integer |
 | `MAX_BODY_BYTES` | Public request body limit | `1048576` (1 MiB); a positive integer |
 | `RATE_LIMIT_PER_KEY_RPM` | Per-key request rate (token bucket, burst equal to the rate) | `60`; a positive integer |
@@ -124,6 +124,11 @@ request can never run.
 | `input_usd_per_mtok`, `output_usd_per_mtok`, `cache_read_usd_per_mtok`, `cache_write_usd_per_mtok` | All four required, all positive. |
 | `forced_tool_choice` | Optional boolean, default `true`. `false` declares that the model refuses forced tool use, and modelgate answers a request whose `tool_choice` is `"required"`, a named function or custom tool, or an `allowed_tools` set in `required` mode with a 400 of its own. |
 | `reasoning_efforts` | Optional list of the `reasoning_effort` levels the model accepts, compared against the request's `reasoning_effort` before translation and drawn from `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (exact, lowercase). A request naming any other level gets a 400 of its own. Omitted or `null` accepts every level; an empty list or an unknown level refuses the table. |
+| `default_max_tokens` | Optional integer, 1–128000: the output cap sent when a request names neither `max_completion_tokens` nor `max_tokens`. Absent, the gateway's `DEFAULT_MAX_TOKENS` applies. A value above `MAX_OUTPUT_TOKENS` refuses startup. |
+| `sampling` | Optional boolean: whether `temperature` and `top_p` are forwarded. `false` removes both before the provider call. Absent means `true` on `anthropic` and `chat_completions` rows and `false` on `responses` rows. |
+| `image_input` | Optional boolean, default `false`. `true` translates `image_url` content parts on `anthropic` and `responses` rows; otherwise such a request gets a 400 naming the model (`model <id> does not support image input`), whichever message role carries the image: the check runs before translation, so the translator's own `unsupported content part: image_url` surfaces only on a row with `image_input: true`, for an image in a `system`, `assistant` or `tool` message. A `chat_completions` row forwards `text`, `image_url` and `refusal` parts unchanged either way and refuses any other part type. |
+| `price_tiers` | Optional list of `{"above_input_tokens", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"}`. When a prompt's input tokens — uncached, cache-read and cache-write together — exceed a threshold, the whole request is booked at that tier's four prices. Thresholds are positive and strictly ascending and every price is positive; `[]` refuses the table. |
+| `cache_ttl` | Optional, `"5m"` (the default) or `"1h"`, `anthropic` rows only: the lifetime requested on every cache breakpoint. Set `cache_write_usd_per_mtok` to the price of that lifetime (2× input for `"1h"`, 1.25× for `"5m"`). |
 
 The limits are checked after the key's model allowlist and before the
 request takes a concurrency slot or reserves any cost, so a refused
@@ -136,8 +141,9 @@ provider. The 400 names the model and the rule:
 ```
 
 Fields the running build does not know are ignored, so a table written
-for a newer release loads in an older one (without the newer checks),
-and a v0.5.0 table loads unchanged in v0.6.0.
+for a newer release loads in an older one (without the newer rules: v0.6.0
+serves a v0.7.0 table with none of the five fields above), and a v0.6.0
+table loads unchanged in v0.7.0.
 
 OpenAI bills no separate cache write, so for OpenAI models set
 `cache_write_usd_per_mtok` to the input price; the gateway never
@@ -206,20 +212,21 @@ A current table, at the providers' published prices:
 ```
 
 Claude Opus 5.5 and Claude Fable 5.1 refuse forced tool use; GPT-6 Sol
-and Luna have no `minimal` effort. Anthropic cache writes are the
-five-minute rate, 1.25× input. A table cannot express tiered prices
-(GPT-6 bills prompts over 272K input tokens at a higher rate), so such a
-prompt is booked at the table's rate.
+and Luna have no `minimal` effort. Anthropic cache writes above are the
+five-minute rate, 1.25× input; a row with `cache_ttl: "1h"` carries the
+one-hour rate, 2× input. A model whose price changes with prompt size
+declares `price_tiers`, and admission reserves at the dearest tier.
 
 ## Request parameters on Anthropic models
 
 | Request field | Handling |
 |---|---|
 | `reasoning_effort` | Translated to `output_config.effort`. `none` and `minimal` map to `low`; `low`, `medium`, `high`, `xhigh` and `max` pass through; anything else is a 400. Omitting it leaves the model's default (`medium` on Claude Opus 5.5, `high` on most others). |
-| `temperature`, `top_p` | Forwarded, unless `reasoning_effort` is set: models that accept effort reject a temperature other than 1.0 and a `top_p` below 0.99, so effort displaces both. |
+| `temperature`, `top_p` | Forwarded, unless the row declares `sampling: false` or `reasoning_effort` is set: models that accept effort reject a temperature other than 1.0 and a `top_p` below 0.99, so effort displaces both. |
+| `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `logit_bias` | Dropped, and named in `X-Modelgate-Dropped-Params`. |
 | `stop` | Forwarded as `stop_sequences`. A `null`, an empty string, and a list with no non-empty entry all mean unset. |
 | `system`, `developer` messages | Folded into the `system` prompt, which carries a prompt-cache breakpoint. |
-| `response_format`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `n` other than 1 | Rejected with a 400. |
+| `response_format`, `n` other than 1 | Rejected with a 400. |
 
 Anthropic's list of effort-supporting models does not name
 `claude-haiku-4-5`, so a `reasoning_effort` on that model is refused
@@ -234,12 +241,12 @@ not reuse Anthropic's cached prefixes from earlier turns.
 | Request field | Handling |
 |---|---|
 | `reasoning_effort` | Sent as `reasoning.effort` unchanged; anything outside `none`, `minimal`, `low`, `medium`, `high`, `xhigh` and `max` is a 400. Declare a model's accepted levels with `reasoning_efforts` to have modelgate refuse the rest; otherwise an unsupported level is refused upstream. |
-| `temperature`, `top_p` | Dropped: this upstream serves reasoning models, which accept only the default of either. |
+| `temperature`, `top_p` | Dropped unless the row declares `sampling: true`: this upstream serves reasoning models, which accept only the default of either. |
 | `max_completion_tokens`, `max_tokens` | Sent as `max_output_tokens`, which caps reasoning and visible output together. |
 | `system`, `developer` messages | Folded into `instructions`. |
 | `response_format` | Translated to `text.format`. |
-| `stop` | Rejected with a 400 when it names a stop sequence; `null`, `""` and a list with no non-empty entry are accepted as unset. |
-| `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `n` other than 1 | Rejected with a 400. |
+| `stop`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`, `top_logprobs`, `logit_bias` | Dropped, and named in `X-Modelgate-Dropped-Params`. |
+| `n` other than 1 | Rejected with a 400. |
 
 Requests are sent with `store: false`, so nothing is retained upstream.
 The known cost of that: a Chat Completions history carries no reasoning
@@ -256,11 +263,21 @@ and the body is not read until the key checks out. `GET /v1/models` lists
 the table's models the key may use.
 
 A request is admitted in this order: the key, the body (size and read
-deadline), the JSON and its output bounds, the key's rate limit, the
-model and the key's allowlist, the model's declared limits, a
-concurrency slot, a reservation of the request's worst-case cost against
-the key quota and the monthly budget, then the provider's circuit
-breaker.
+deadline), the JSON, the key's rate limit, the model and the key's
+allowlist, the model's declared limits, the translation for the model's
+upstream, the output bounds, a concurrency slot, a reservation of the
+request's worst-case cost against the key quota and the monthly budget,
+then the provider's circuit breaker. A request the gateway cannot
+translate is therefore refused with a 400 before it holds any shared
+capacity. On a `chat_completions` row that includes a message whose
+`content` is neither a string, `null` nor an array of JSON objects, each
+with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`), each key spelled exactly and at most once
+(`invalid message content: ...`), because the gateway counts that row's
+image parts before forwarding them; v0.6.0 forwarded such content unread.
+
+A response whose request carried parameters the upstream cannot honour
+or the row drops names every one of them in `X-Modelgate-Dropped-Params`; see
+[docs/compatibility.md](docs/compatibility.md).
 
 Every response carries `X-Request-ID`: the caller's own value when it is
 1–128 characters of `A-Z a-z 0-9 - _ . :`, otherwise a minted
@@ -368,19 +385,38 @@ monthly USD quota, and an expiry.
 ## Spend ceilings
 
 Every completed request's token usage is priced from the model table and
-accumulated per key and globally by UTC calendar month. Reasoning tokens
-are part of the output count and are billed as output tokens; when the
-upstream reports them separately they are passed on in
+accumulated per key and globally by UTC calendar month. A model with
+`price_tiers` is priced by the prompt's total input tokens — uncached,
+cache-read and cache-write together: above a threshold the whole
+request, output and cache tokens included, is booked at that tier. A
+stream cut before the provider reported its prompt size is booked, on
+the estimated size, at the dearest tier. Reasoning tokens are part of
+the output count and are billed as output tokens; when the upstream
+reports them separately they are passed on in
 `usage.completion_tokens_details.reasoning_tokens`.
 
 Admission reserves each request's worst-case cost — the body's bytes
-plus 2,048 tokens of overhead at the dearest input-side price, plus the
-largest output the request allows at the output price — and holds it
-until the real usage is booked. A request is admitted only while
-recorded spend plus every reservation stays below the key quota and the
-budget, so concurrent requests can overshoot a cap by at most one
-request's bound. Recorded spend at a cap answers `insufficient_quota`; a
-cap held only by reservations answers the retryable `cap_reserved`.
+plus 2,048 tokens of overhead at the dearest input-side price of any
+tier, plus the largest output the request allows at the dearest output
+price — and holds it until the real usage is booked. Every image part is
+also charged a fixed allowance, whether it arrives inline or as an
+`https://` URL: 4,784 tokens on an Anthropic row and 36,000 on an OpenAI
+row. On the translated upstreams a part is an image when its `type` says
+so, and an inline image's base64 is then not counted as text; on a
+`chat_completions` row, whose content parts are forwarded unparsed (compacted,
+semantically identical JSON), a
+part is an image exactly when its `type` is `image_url`, and the bytes
+stay counted. The bound assumes a provider bills an image block by its
+dimensions, never by tokenising its bytes as text, and rejects a payload
+that is not an image; a `chat_completions` row forwards only content
+parts with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`), and refuses any other with a 400. A request is admitted
+only while recorded spend plus every reservation stays below the key
+quota and the budget, so concurrent requests can overshoot a cap by at
+most one request's bound. Recorded spend at a cap answers
+`insufficient_quota`; a cap held only by reservations answers the
+retryable `cap_reserved`. The output bound is the request's own cap when
+it names one, and otherwise the model's `default_max_tokens` (or
+`DEFAULT_MAX_TOKENS`).
 
 A stream cut before its final usage event is booked from an estimate:
 output of at least one token per four streamed characters, and the whole
