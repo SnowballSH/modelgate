@@ -29,9 +29,12 @@ func imageAllowance(model models.Model) int64 {
 	return openAIImageTokenAllowance
 }
 
+// promptSize sizes a prompt from its body. maxTokens, when positive, bounds
+// both figures: a provider rejects, and does not bill, a longer prompt.
 type promptSize struct {
 	textBytes   int
 	imageTokens int64
+	maxTokens   int64
 }
 
 func measurePrompt(bodyBytes int, images translate.ImageLoad, perImageTokens int64) promptSize {
@@ -41,20 +44,33 @@ func measurePrompt(bodyBytes int, images translate.ImageLoad, perImageTokens int
 	}
 }
 
+func (p promptSize) cappedAt(maxTokens int64) promptSize {
+	p.maxTokens = maxTokens
+	return p
+}
+
 func (p promptSize) worstCaseTokens() int64 {
-	return int64(p.textBytes) + p.imageTokens + promptOverheadTokens
+	return p.capped(int64(p.textBytes) + p.imageTokens + promptOverheadTokens)
 }
 
 func (p promptSize) estimatedTokens() int64 {
-	return int64((p.textBytes+3)/4) + p.imageTokens
+	return p.capped(int64((p.textBytes+3)/4) + p.imageTokens)
+}
+
+func (p promptSize) capped(tokens int64) int64 {
+	if p.maxTokens > 0 {
+		return min(tokens, p.maxTokens)
+	}
+	return tokens
 }
 
 // worstCaseDemand bounds what a request can consume. Every prompt token is
-// at least one byte of the body's text, and an image is its allowance. The
-// output bound is the largest output cap any upstream path could apply: the
-// translators send max_completion_tokens when it is set and max_tokens
-// otherwise, the passthrough sends both, the model's default applies only
-// when the request names neither, and n multiplies the choices generated.
+// at least one byte of the body's text, an image is its allowance, and no
+// prompt exceeds the model's max_input_tokens. The output bound is the
+// largest output cap any upstream path could apply: the translators send
+// max_completion_tokens when it is set and max_tokens otherwise, the
+// passthrough sends both, the model's default applies only when the
+// request names neither, and n multiplies the choices generated.
 func worstCaseDemand(req oai.ChatRequest, prompt promptSize, defaultMaxTokens, ceiling int) (accounting.Demand, error) {
 	var caps []int
 	for _, field := range []struct {

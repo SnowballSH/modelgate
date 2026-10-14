@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.7.1 — unreleased
+
+A v0.7.0 model table loads unchanged, and a row without the new field
+reserves, estimates and books exactly as before.
+
+### Added
+
+- Model-table field `max_input_tokens`, optional: the largest prompt the
+  provider accepts for the model. Admission holds the prompt side of a
+  request's worst-case reservation — text bytes, image allowances and
+  overhead together — at that figure, still priced at the row's dearest
+  input-side rate, so a large text request no longer reserves one token
+  per byte past the context window. A stream cut before the provider
+  reported its prompt size is estimated at most at the same figure.
+  Booking is unchanged: reported usage is booked in full, whatever the
+  field says.
+- The table is refused when `max_input_tokens` is not a positive
+  integer, or when a `price_tiers` threshold is at or above it, since no
+  prompt could reach that tier.
+
+### Upgrading
+
+- No configuration or schema change; the field is optional.
+- v0.7.0 ignores `max_input_tokens` silently and keeps reserving one
+  token per byte, so deploy v0.7.1 first and the table that uses the
+  field second.
+- Declare the provider's maximum input where it states one apart from
+  the context window (OpenAI's model pages do), and never a figure below
+  the largest prompt the provider accepts: the reservation is only a
+  bound while the provider refuses every longer prompt.
+
 ## v0.7.0 — 2026-10-14
 
 A v0.6.0 model table loads unchanged, and a row carrying none of the new

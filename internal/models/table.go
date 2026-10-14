@@ -60,9 +60,12 @@ type Model struct {
 	PriceTiers       []PriceTier
 	Limits           Limits
 	DefaultMaxTokens int
-	DropsSampling    bool
-	ImageInput       bool
-	CacheTTL         string
+	// MaxInputTokens is the largest prompt the provider accepts; zero is no
+	// bound.
+	MaxInputTokens int64
+	DropsSampling  bool
+	ImageInput     bool
+	CacheTTL       string
 }
 
 func (m Model) OutputCapDefault(gatewayDefault int) int {
@@ -108,6 +111,7 @@ type modelEntry struct {
 	ImageInput       *bool       `json:"image_input"`
 	PriceTiers       []tierEntry `json:"price_tiers"`
 	CacheTTL         *string     `json:"cache_ttl"`
+	MaxInputTokens   *int64      `json:"max_input_tokens"`
 }
 
 // LoadTable reads the model pricing table at path. Cost accounting fails
@@ -115,7 +119,8 @@ type modelEntry struct {
 // file, invalid JSON, empty table, empty provider_model, unknown provider,
 // unusable upstream_api, absent, zero, or negative price field, or empty or
 // unknown reasoning_efforts, or an out-of-range default_max_tokens, unusable
-// price_tiers or cache_ttl yields an error and no table. An omitted provider
+// price_tiers or cache_ttl, or a non-positive max_input_tokens or one at or
+// below a tier threshold yields an error and no table. An omitted provider
 // means anthropic, an omitted upstream_api means chat_completions on openai
 // models and nothing on anthropic ones, and omitted limits refuse nothing.
 // Fields this build does not know are ignored, so a newer table still loads.
@@ -183,6 +188,10 @@ func (e modelEntry) validate() (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
+	maxInputTokens, err := e.maxInputTokens(tiers)
+	if err != nil {
+		return Model{}, err
+	}
 	return Model{
 		Provider:         provider,
 		UpstreamAPI:      upstream,
@@ -191,6 +200,7 @@ func (e modelEntry) validate() (Model, error) {
 		PriceTiers:       tiers,
 		Limits:           limits,
 		DefaultMaxTokens: defaultMaxTokens,
+		MaxInputTokens:   maxInputTokens,
 		DropsSampling:    dropsSampling(e.Sampling, upstream),
 		ImageInput:       e.ImageInput != nil && *e.ImageInput,
 		CacheTTL:         cacheTTL,
@@ -276,6 +286,24 @@ func (e modelEntry) defaultMaxTokens() (int, error) {
 		return 0, fmt.Errorf("default_max_tokens must be between 1 and %d, got %d", MaxDefaultMaxTokens, *e.DefaultMaxTokens)
 	}
 	return *e.DefaultMaxTokens, nil
+}
+
+// maxInputTokens refuses a tier no prompt can reach: a tier applies above
+// its threshold, and the provider accepts no prompt above the cap.
+func (e modelEntry) maxInputTokens(tiers []PriceTier) (int64, error) {
+	if e.MaxInputTokens == nil {
+		return 0, nil
+	}
+	limit := *e.MaxInputTokens
+	if limit <= 0 {
+		return 0, fmt.Errorf("max_input_tokens must be positive, got %d", limit)
+	}
+	for i, tier := range tiers {
+		if tier.AboveInputTokens >= limit {
+			return 0, fmt.Errorf("price_tiers[%d]: above_input_tokens %d can never apply: no prompt exceeds max_input_tokens %d", i, tier.AboveInputTokens, limit)
+		}
+	}
+	return limit, nil
 }
 
 func (e modelEntry) cacheTTL(provider string) (string, error) {
