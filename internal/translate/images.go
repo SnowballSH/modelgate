@@ -26,7 +26,11 @@ const (
 var (
 	imageMediaTypes = []string{"image/jpeg", "image/png", "image/gif", "image/webp"}
 	imageDetails    = []string{"auto", "low", "high"}
-	pricedPartTypes = []string{"text", imagePartType, "refusal"}
+	pricedPartKeys  = map[string][]string{
+		"text":        {"type", "text", "cache_control"},
+		imagePartType: {"type", imagePartType},
+		"refusal":     {"type", "refusal"},
+	}
 )
 
 // echoed bounds a client string quoted back in an error message.
@@ -170,24 +174,21 @@ var (
 	errContentPartType   = errors.New("invalid message content: a content part's type must be a string")
 	errContentJSON       = errors.New("invalid message content: content is not valid JSON")
 	errContentPartNoType = errors.New("invalid message content: a content part needs a type")
+	errPartTypeRepeated  = errors.New("invalid message content: a content part has more than one type")
+	errTypeKeyForm       = errors.New(`invalid message content: a content part's type key must be spelled exactly "type"`)
+	errTypeValueForm     = errors.New("invalid message content: a content part's type must be spelled exactly text, image_url or refusal")
 )
-
-var unpricedPayloadKeys = []string{"file", "file_id", "input_audio"}
-
-func unpricedPayloadKey(key string) error {
-	return fmt.Errorf("invalid message content: a content part may not carry a %q key; a passthrough row forwards only text, image_url and refusal parts", echoed(key))
-}
-
-func isUnpricedPayloadKey(key string) bool {
-	return slices.ContainsFunc(unpricedPayloadKeys, func(unpriced string) bool { return strings.EqualFold(key, unpriced) })
-}
 
 func unsupportedPartType(partType string) error {
 	return fmt.Errorf("invalid message content: unsupported content part type %q; a passthrough row forwards only text, image_url and refusal parts", echoed(partType))
 }
 
-func isPricedPartType(partType string) bool {
-	return slices.ContainsFunc(pricedPartTypes, func(priced string) bool { return strings.EqualFold(partType, priced) })
+func unallowedPartKey(partType, key string) error {
+	return fmt.Errorf("invalid message content: a %s content part may not carry a %q key; it allows only %s", partType, echoed(key), strings.Join(pricedPartKeys[partType], ", "))
+}
+
+func duplicatePartKey(key string) error {
+	return fmt.Errorf("invalid message content: a content part has more than one %q key", key)
 }
 
 // CountImageParts counts the parts a provider could read as images from
@@ -227,7 +228,7 @@ func countContentImages(content json.RawMessage) (int, error) {
 		if delim, ok := open.(json.Delim); !ok || delim != '{' {
 			return 0, errContentNotObjects
 		}
-		isImage, err := scanPart(dec)
+		isImage, err := scanPart(dec, content)
 		if err != nil {
 			return 0, err
 		}
@@ -244,75 +245,100 @@ func countContentImages(content json.RawMessage) (int, error) {
 	return count, nil
 }
 
-func scanPart(dec *json.Decoder) (bool, error) {
-	isImage, hasType := false, false
-	var unpricedKey string
+func isPlainSpelling(content []byte, end int64, decoded string) bool {
+	start := end - int64(len(decoded)) - 2
+	return start >= 0 && content[start] == '"' && string(content[start+1:end-1]) == decoded
+}
+
+func readPartType(dec *json.Decoder, content []byte) (string, error) {
+	valueToken, err := dec.Token()
+	if err != nil {
+		return "", errContentJSON
+	}
+	value, ok := valueToken.(string)
+	if !ok {
+		return "", errContentPartType
+	}
+	if !isPlainSpelling(content, dec.InputOffset(), value) {
+		return "", errTypeValueForm
+	}
+	if _, priced := pricedPartKeys[value]; !priced {
+		return "", unsupportedPartType(value)
+	}
+	return value, nil
+}
+
+func scanPart(dec *json.Decoder, content []byte) (bool, error) {
+	partType := ""
+	var keys []partKey
 	for dec.More() {
 		keyToken, err := dec.Token()
 		if err != nil {
 			return false, errContentJSON
 		}
 		key, _ := keyToken.(string)
-		switch {
-		case strings.EqualFold(key, "type"):
-			valueToken, err := dec.Token()
-			if err != nil {
-				return false, errContentJSON
-			}
-			value, ok := valueToken.(string)
-			if !ok {
-				return false, errContentPartType
-			}
-			if !isPricedPartType(value) {
-				return false, unsupportedPartType(value)
-			}
-			hasType = true
-			isImage = isImage || strings.EqualFold(value, imagePartType)
-		case strings.EqualFold(key, imagePartType):
-			first, err := skipValue(dec)
-			if err != nil {
+		plain := isPlainSpelling(content, dec.InputOffset(), key)
+		if !strings.EqualFold(key, "type") {
+			keys = append(keys, partKey{name: key, plain: plain})
+			if err := skipValue(dec); err != nil {
 				return false, err
 			}
-			isImage = isImage || first != nil
-		case isUnpricedPayloadKey(key):
-			first, err := skipValue(dec)
-			if err != nil {
-				return false, err
-			}
-			if first != nil && unpricedKey == "" {
-				unpricedKey = key
-			}
-		default:
-			if _, err := skipValue(dec); err != nil {
-				return false, err
-			}
+			continue
+		}
+		if partType != "" {
+			return false, errPartTypeRepeated
+		}
+		if !plain || key != "type" {
+			return false, errTypeKeyForm
+		}
+		if partType, err = readPartType(dec, content); err != nil {
+			return false, err
 		}
 	}
 	if _, err := dec.Token(); err != nil {
 		return false, errContentJSON
 	}
-	if !hasType {
+	if partType == "" {
 		return false, errContentPartNoType
 	}
-	if unpricedKey != "" {
-		return false, unpricedPayloadKey(unpricedKey)
-	}
-	return isImage, nil
+	return partType == imagePartType, checkPartKeys(partType, keys)
 }
 
-// skipValue consumes one value and returns its first token, nil for JSON null.
-func skipValue(dec *json.Decoder) (json.Token, error) {
+type partKey struct {
+	name  string
+	plain bool
+}
+
+func checkPartKeys(partType string, keys []partKey) error {
+	allowed := pricedPartKeys[partType]
+	for _, payload := range allowed[1:] {
+		spelledAsPayload := func(key partKey) bool { return strings.EqualFold(key.name, payload) }
+		first := slices.IndexFunc(keys, spelledAsPayload)
+		if first >= 0 && slices.ContainsFunc(keys[first+1:], spelledAsPayload) {
+			return duplicatePartKey(payload)
+		}
+	}
+	for _, key := range keys {
+		if !key.plain || !slices.Contains(allowed, key.name) {
+			return unallowedPartKey(partType, key.name)
+		}
+	}
+	return nil
+}
+
+// skipValue consumes one value, nested values included, without recursion.
+func skipValue(dec *json.Decoder) error {
 	first, err := dec.Token()
 	if err != nil {
-		return nil, errContentJSON
+		return errContentJSON
 	}
 	if delim, ok := first.(json.Delim); !ok || delim == '}' || delim == ']' {
-		return first, nil
+		return nil
 	}
 	for depth := 1; depth > 0; {
 		token, err := dec.Token()
 		if err != nil {
-			return nil, errContentJSON
+			return errContentJSON
 		}
 		if delim, ok := token.(json.Delim); ok {
 			if delim == '{' || delim == '[' {
@@ -322,7 +348,7 @@ func skipValue(dec *json.Decoder) (json.Token, error) {
 			}
 		}
 	}
-	return first, nil
+	return nil
 }
 
 type typedPart struct {

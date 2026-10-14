@@ -311,10 +311,27 @@ func TestStandardBase64WithTrailingPaddingIsAccepted(t *testing.T) {
 	}
 }
 
-const errNeedsType = "invalid message content: a content part needs a type"
+const (
+	errNeedsType        = "invalid message content: a content part needs a type"
+	errMoreThanOneType  = "invalid message content: a content part has more than one type"
+	errTypeKeySpelling  = `invalid message content: a content part's type key must be spelled exactly "type"`
+	errTypeValueSpell   = "invalid message content: a content part's type must be spelled exactly text, image_url or refusal"
+	allowedKeysOfText   = "type, text, cache_control"
+	allowedKeysOfImage  = "type, image_url"
+	allowedKeysOfRefuse = "type, refusal"
+)
 
-func errForbiddenKey(key string) string {
-	return "invalid message content: a content part may not carry a \"" + key + "\" key; a passthrough row forwards only text, image_url and refusal parts"
+func errExtraKey(partType, key string) string {
+	allowed := map[string]string{"text": allowedKeysOfText, "image_url": allowedKeysOfImage, "refusal": allowedKeysOfRefuse}[partType]
+	return "invalid message content: a " + partType + " content part may not carry a \"" + key + "\" key; it allows only " + allowed
+}
+
+func errDuplicateKey(key string) string {
+	return "invalid message content: a content part has more than one \"" + key + "\" key"
+}
+
+func errUnsupportedType(partType string) string {
+	return "invalid message content: unsupported content part type \"" + partType + "\"; a passthrough row forwards only text, image_url and refusal parts"
 }
 
 func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
@@ -326,53 +343,76 @@ func TestCountImagePartsSeesEveryKeyOccurrence(t *testing.T) {
 		refused string
 	}{
 		{"plain image", `[{"type":"image_url","image_url":` + image + `}]`, 1, ""},
+		{"image with detail inside image_url", `[{"type":"image_url","image_url":{"url":"` + pngDataURI + `","detail":"low"}}]`, 1, ""},
+		{"image with a null image_url still counts", `[{"type":"image_url","image_url":null}]`, 1, ""},
+		{"image with a malformed image_url still counts", `[{"type":"image_url","image_url":5}]`, 1, ""},
+		{"image without an image_url key still counts", `[{"type":"image_url"}]`, 1, ""},
 		{"text only", `[{"type":"text","text":"hi"}]`, 0, ""},
+		{"text without a text key", `[{"type":"text"}]`, 0, ""},
+		{"text with cache_control", `[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`, 0, ""},
+		{"refusal part", `[{"type":"refusal","refusal":"no"}]`, 0, ""},
+		{"text and refusal parts", `[{"type":"text","text":"a"},{"type":"refusal","refusal":"no"}]`, 0, ""},
+		{"empty array", `[]`, 0, ""},
 		{"string content", `"an image_url in prose"`, 0, ""},
 		{"no content", ``, 0, ""},
 		{"null content", `null`, 0, ""},
-		{"shadowing Type key", `[{"type":"image_url","Type":"text","image_url":` + image + `}]`, 1, ""},
-		{"shadowing TYPE after the real key", `[{"type":"image_url","TYPE":"text","image_url":` + image + `}]`, 1, ""},
-		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text","image_url":` + image + `}]`, 1, ""},
-		{"duplicate type, last is text", `[{"type":"image_url","type":"text","image_url":` + image + `}]`, 1, ""},
-		{"escaped type value", `[{"type":"image\u005furl"}]`, 1, ""},
-		{"only a differently cased type key", `[{"Type":"image_url"}]`, 1, ""},
-		{"image_url key without type", `[{"image_url":` + image + `}]`, 0, "invalid message content: a content part needs a type"},
-		{"differently cased image_url key", `[{"type":"text","Image_URL":` + image + `}]`, 1, ""},
-		{"null image_url counts nothing", `[{"type":"text","text":"hi","image_url":null}]`, 0, ""},
-		{"empty object image_url", `[{"type":"text","image_url":{}}]`, 1, ""},
-		{"empty string image_url", `[{"type":"text","image_url":""}]`, 1, ""},
-		{"string image_url", `[{"type":"text","image_url":"https://example.com/a.png"}]`, 1, ""},
-		{"re-cased null image_url counts nothing", `[{"type":"text","Image_URL":null}]`, 0, ""},
-		{"number beyond float64 range", `[{"type":"text","text":"x","n":1e400}]`, 0, ""},
-		{"image beside a part with a huge number", `[{"type":"image_url"},{"type":"text","text":"x","n":1e400}]`, 1, ""},
-		{"image_url nested in another key is not a part", `[{"type":"text","meta":{"image_url":1}}]`, 0, ""},
+		{"number beyond float64 range in a value", `[{"type":"text","text":1e400}]`, 0, ""},
+		{"image beside a part with a huge number", `[{"type":"image_url"},{"type":"text","text":1e400}]`, 1, ""},
+		{"type and image_url nested in a value do not discriminate", `[{"type":"text","text":{"type":"image_url","image_url":1}}]`, 0, ""},
 		{"two images", `[{"type":"image_url"},{"type":"text"},{"type":"image_url"}]`, 2, ""},
-		{"refusal part", `[{"type":"refusal","refusal":"no"}]`, 0, ""},
 		{"part without a type key", `[{"text":"hi"}]`, 0, errNeedsType},
 		{"empty object part", `[{}]`, 0, errNeedsType},
+		{"image_url key without type", `[{"image_url":` + image + `}]`, 0, errNeedsType},
 		{"file part without a type", `[{"file":{"file_id":"f"}}]`, 0, errNeedsType},
 		{"input_audio part without a type", `[{"input_audio":{"data":"AAAA","format":"wav"}}]`, 0, errNeedsType},
 		{"file_id part without a type", `[{"file_id":"f"}]`, 0, errNeedsType},
 		{"typeless part beside a typed one", `[{"type":"text","text":"hi"},{"text":"hi"}]`, 0, errNeedsType},
-		{"empty array", `[]`, 0, ""},
-		{"text with cache_control", `[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`, 0, ""},
-		{"inline image", `[{"type":"image_url","image_url":{"url":"` + pngDataURI + `","detail":"low"}}]`, 1, ""},
-		{"text carrying a file", `[{"type":"text","file":{"file_id":"f"}}]`, 0, errForbiddenKey("file")},
-		{"text carrying a re-cased FILE", `[{"type":"text","FILE":{"file_id":"f"}}]`, 0, errForbiddenKey("FILE")},
-		{"text carrying a file_id", `[{"type":"text","file_id":"f"}]`, 0, errForbiddenKey("file_id")},
-		{"text carrying input_audio", `[{"type":"text","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, errForbiddenKey("input_audio")},
-		{"image carrying a file", `[{"type":"image_url","image_url":` + image + `,"file":"f"}]`, 0, errForbiddenKey("file")},
-		{"file key spelled with an escape", `[{"type":"text","\u0066ile":1}]`, 0, errForbiddenKey("file")},
-		{"second file key is the non-null one", `[{"type":"text","file":null,"File":1}]`, 0, errForbiddenKey("File")},
-		{"text with a null file", `[{"type":"text","file":null}]`, 0, ""},
-		{"file nested in another key is not a part", `[{"type":"text","meta":{"file":1}}]`, 0, ""},
-		{"file part", `[{"type":"file","file":{"file_id":"f"}}]`, 0, "invalid message content: unsupported content part type \"file\"; a passthrough row forwards only text, image_url and refusal parts"},
-		{"input_audio part", `[{"type":"text"},{"type":"input_audio"}]`, 0, "invalid message content: unsupported content part type \"input_audio\"; a passthrough row forwards only text, image_url and refusal parts"},
-		{"invented type", `[{"type":"hologram"}]`, 0, "invalid message content: unsupported content part type \"hologram\"; a passthrough row forwards only text, image_url and refusal parts"},
-		{"unsupported type shadowed by a later text type", `[{"type":"file","TYPE":"text"}]`, 0, "invalid message content: unsupported content part type \"file\"; a passthrough row forwards only text, image_url and refusal parts"},
-		{"unsupported type beside an image", `[{"type":"image_url","Type":"x"}]`, 0, "invalid message content: unsupported content part type \"x\"; a passthrough row forwards only text, image_url and refusal parts"},
-		{"long unsupported type is truncated", `[{"type":"` + strings.Repeat("y", 1<<16) + `"}]`, 0, "invalid message content: unsupported content part type \"" + strings.Repeat("y", echoLimit) + "…\"; a passthrough row forwards only text, image_url and refusal parts"},
-		{"non-string type", `[{"type":"image_url","Type":5}]`, 0, "invalid message content: a content part's type must be a string"},
+		{"text carrying a file", `[{"type":"text","file":{"file_id":"f"}}]`, 0, errExtraKey("text", "file")},
+		{"text carrying FILE", `[{"type":"text","FILE":{"file_id":"f"}}]`, 0, errExtraKey("text", "FILE")},
+		{"text carrying file_id", `[{"type":"text","file_id":"f"}]`, 0, errExtraKey("text", "file_id")},
+		{"text carrying input_audio", `[{"type":"text","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, errExtraKey("text", "input_audio")},
+		{"text carrying audio", `[{"type":"text","audio":{"id":"a"}}]`, 0, errExtraKey("text", "audio")},
+		{"text carrying video_url", `[{"type":"text","video_url":{"url":"https://example.com/v.mp4"}}]`, 0, errExtraKey("text", "video_url")},
+		{"text carrying input_file", `[{"type":"text","input_file":"f"}]`, 0, errExtraKey("text", "input_file")},
+		{"text carrying a null file", `[{"type":"text","file":null}]`, 0, errExtraKey("text", "file")},
+		{"text carrying an unknown key", `[{"type":"text","x":1}]`, 0, errExtraKey("text", "x")},
+		{"text carrying an escaped file key", `[{"type":"text","\u0066ile":1}]`, 0, errExtraKey("text", "file")},
+		{"text carrying image_url", `[{"type":"text","text":"hi","image_url":` + image + `}]`, 0, errExtraKey("text", "image_url")},
+		{"text carrying a null image_url", `[{"type":"text","image_url":null}]`, 0, errExtraKey("text", "image_url")},
+		{"text carrying a re-cased Image_URL", `[{"type":"text","Image_URL":` + image + `}]`, 0, errExtraKey("text", "Image_URL")},
+		{"text carrying a re-cased Text key", `[{"type":"text","Text":"hi"}]`, 0, errExtraKey("text", "Text")},
+		{"text carrying a re-cased Cache_Control key", `[{"type":"text","Cache_Control":{}}]`, 0, errExtraKey("text", "Cache_Control")},
+		{"text carrying an escaped text key", `[{"type":"text","\u0074ext":"hi"}]`, 0, errExtraKey("text", "text")},
+		{"image carrying text", `[{"type":"image_url","image_url":` + image + `,"text":"hi"}]`, 0, errExtraKey("image_url", "text")},
+		{"image carrying a file", `[{"type":"image_url","image_url":` + image + `,"file":"f"}]`, 0, errExtraKey("image_url", "file")},
+		{"image carrying cache_control", `[{"type":"image_url","image_url":` + image + `,"cache_control":{}}]`, 0, errExtraKey("image_url", "cache_control")},
+		{"image carrying a re-cased Image_URL", `[{"type":"image_url","Image_URL":` + image + `}]`, 0, errExtraKey("image_url", "Image_URL")},
+		{"refusal carrying text", `[{"type":"refusal","refusal":"no","text":"hi"}]`, 0, errExtraKey("refusal", "text")},
+		{"refusal carrying cache_control", `[{"type":"refusal","refusal":"no","cache_control":{}}]`, 0, errExtraKey("refusal", "cache_control")},
+		{"duplicate text key", `[{"type":"text","text":"a","text":"b"}]`, 0, errDuplicateKey("text")},
+		{"duplicate image_url key", `[{"type":"image_url","image_url":` + image + `,"image_url":` + image + `}]`, 0, errDuplicateKey("image_url")},
+		{"duplicate refusal key", `[{"type":"refusal","refusal":"a","refusal":"b"}]`, 0, errDuplicateKey("refusal")},
+		{"duplicate text key in another case", `[{"type":"text","text":"a","TEXT":"b"}]`, 0, errDuplicateKey("text")},
+		{"duplicate type, text then image_url", `[{"type":"text","type":"image_url"}]`, 0, errMoreThanOneType},
+		{"duplicate type, image_url then text", `[{"type":"image_url","type":"text","image_url":` + image + `}]`, 0, errMoreThanOneType},
+		{"duplicate identical type", `[{"type":"text","type":"text"}]`, 0, errMoreThanOneType},
+		{"shadowing Type key", `[{"type":"image_url","Type":"text","image_url":` + image + `}]`, 0, errMoreThanOneType},
+		{"TYPE key before the real one", `[{"TYPE":"text","type":"image_url","image_url":` + image + `}]`, 0, errTypeKeySpelling},
+		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text","image_url":` + image + `}]`, 0, errMoreThanOneType},
+		{"non-string second type", `[{"type":"image_url","Type":5}]`, 0, errMoreThanOneType},
+		{"only a Type key", `[{"Type":"image_url"}]`, 0, errTypeKeySpelling},
+		{"only a TYPE key", `[{"TYPE":"text","text":"hi"}]`, 0, errTypeKeySpelling},
+		{"only an escaped type key", `[{"\u0074ype":"text"}]`, 0, errTypeKeySpelling},
+		{"type value TEXT", `[{"type":"TEXT","text":"hi"}]`, 0, errUnsupportedType("TEXT")},
+		{"type value Image_Url", `[{"type":"Image_Url"}]`, 0, errUnsupportedType("Image_Url")},
+		{"escaped type value", `[{"type":"image\u005furl"}]`, 0, errTypeValueSpell},
+		{"file part", `[{"type":"file","file":{"file_id":"f"}}]`, 0, errUnsupportedType("file")},
+		{"input_audio part", `[{"type":"text"},{"type":"input_audio"}]`, 0, errUnsupportedType("input_audio")},
+		{"invented type", `[{"type":"hologram"}]`, 0, errUnsupportedType("hologram")},
+		{"unsupported type is refused before a later duplicate", `[{"type":"file","TYPE":"text"}]`, 0, errUnsupportedType("file")},
+		{"long unsupported type is truncated", `[{"type":"` + strings.Repeat("y", 1<<16) + `"}]`, 0, errUnsupportedType(strings.Repeat("y", echoLimit) + "…")},
+		{"non-string type", `[{"type":5}]`, 0, "invalid message content: a content part's type must be a string"},
+		{"null type", `[{"type":null}]`, 0, "invalid message content: a content part's type must be a string"},
 		{"sibling with a non-string type", `[{"type":"image_url"},{"type":5}]`, 0, "invalid message content: a content part's type must be a string"},
 		{"bare string element", `[{"type":"image_url"},"x"]`, 0, "invalid message content: content parts must be objects"},
 		{"nested array element", `[[{"type":"image_url"}]]`, 0, "invalid message content: content parts must be objects"},

@@ -396,34 +396,52 @@ func TestPassthroughImageCountCannotBeShadowedOrZeroed(t *testing.T) {
 		refused bool
 	}{
 		{"plain image", `[{"type":"image_url",` + image + `}]`, 1, false},
-		{"shadowing Type key", `[{"type":"image_url","Type":"text",` + image + `}]`, 1, false},
-		{"shadowing TYPE key", `[{"type":"image_url","TYPE":"text",` + image + `}]`, 1, false},
-		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text",` + image + `}]`, 1, false},
-		{"duplicate type, last is text", `[{"type":"image_url","type":"text",` + image + `}]`, 1, false},
-		{"differently cased type only", `[{"Type":"image_url",` + image + `}]`, 1, false},
-		{"image_url key without type", `[{` + image + `}]`, 0, true},
+		{"inline image with detail inside image_url", `[{"type":"image_url","image_url":{"url":"` + tinyImage + `","detail":"low"}}]`, 1, false},
 		{"two images beside text", `[{"type":"text","text":"hi"},{"type":"image_url",` + image + `},{"type":"image_url",` + image + `}]`, 2, false},
-		{"null image_url beside text", `[{"type":"text","text":"hi","image_url":null}]`, 0, false},
-		{"string image_url", `[{"type":"text","image_url":"https://example.com/a.png"}]`, 1, false},
-		{"number beyond float64 range", `[{"type":"text","text":"x","n":1e400}]`, 0, false},
+		{"image with a null image_url", `[{"type":"image_url","image_url":null}]`, 1, false},
+		{"plain text", `[{"type":"text","text":"hi"}]`, 0, false},
+		{"text with cache_control", `[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`, 0, false},
+		{"number beyond float64 range in a value", `[{"type":"text","text":1e400}]`, 0, false},
 		{"refusal part", `[{"type":"refusal","refusal":"no"}]`, 0, false},
+		{"text and refusal parts", `[{"type":"text","text":"a"},{"type":"refusal","refusal":"no"}]`, 0, false},
+		{"empty array", `[]`, 0, false},
+		{"shadowing Type key", `[{"type":"image_url","Type":"text",` + image + `}]`, 0, true},
+		{"shadowing TYPE key", `[{"type":"image_url","TYPE":"text",` + image + `}]`, 0, true},
+		{"escaped shadowing key", `[{"type":"image_url","\u0054YPE":"text",` + image + `}]`, 0, true},
+		{"duplicate type, last is text", `[{"type":"image_url","type":"text",` + image + `}]`, 0, true},
+		{"duplicate type, first is text", `[{"type":"text","type":"image_url",` + image + `}]`, 0, true},
+		{"differently cased type only", `[{"Type":"image_url",` + image + `}]`, 0, true},
+		{"escaped type key", `[{"\u0074ype":"text"}]`, 0, true},
+		{"type value TEXT", `[{"type":"TEXT","text":"hi"}]`, 0, true},
+		{"type value Image_Url", `[{"type":"Image_Url",` + image + `}]`, 0, true},
+		{"escaped type value", `[{"type":"image\u005furl",` + image + `}]`, 0, true},
+		{"duplicate text key", `[{"type":"text","text":"a","text":"b"}]`, 0, true},
+		{"duplicate image_url key", `[{"type":"image_url",` + image + `,` + image + `}]`, 0, true},
+		{"re-cased Text key", `[{"type":"text","Text":"hi"}]`, 0, true},
+		{"image_url key without type", `[{` + image + `}]`, 0, true},
+		{"null image_url beside text", `[{"type":"text","text":"hi","image_url":null}]`, 0, true},
+		{"string image_url on a text part", `[{"type":"text","image_url":"https://example.com/a.png"}]`, 0, true},
+		{"number beyond float64 range as a key value", `[{"type":"text","text":"x","n":1e400}]`, 0, true},
 		{"part without a type key", `[{"text":"hi"}]`, 0, true},
 		{"empty object part", `[{}]`, 0, true},
 		{"file part without a type", `[{"file":{"file_id":"f"}}]`, 0, true},
 		{"input_audio part without a type", `[{"input_audio":{"data":"AAAA","format":"wav"}}]`, 0, true},
 		{"file_id part without a type", `[{"file_id":"f"}]`, 0, true},
 		{"text carrying a file", `[{"type":"text","file":{"file_id":"f"}}]`, 0, true},
-		{"text carrying a re-cased FILE", `[{"type":"text","FILE":{"file_id":"f"}}]`, 0, true},
-		{"text carrying a file_id", `[{"type":"text","file_id":"f"}]`, 0, true},
+		{"text carrying FILE", `[{"type":"text","FILE":{"file_id":"f"}}]`, 0, true},
+		{"text carrying file_id", `[{"type":"text","file_id":"f"}]`, 0, true},
 		{"text carrying input_audio", `[{"type":"text","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, true},
-		{"text with a null file", `[{"type":"text","text":"hi","file":null}]`, 0, false},
-		{"text with cache_control", `[{"type":"text","text":"hi","cache_control":{"type":"ephemeral"}}]`, 0, false},
-		{"inline image", `[{"type":"image_url","image_url":{"url":"` + tinyImage + `","detail":"low"}}]`, 1, false},
-		{"empty array", `[]`, 0, false},
+		{"text carrying audio", `[{"type":"text","audio":{"id":"a"}}]`, 0, true},
+		{"text carrying video_url", `[{"type":"text","video_url":{"url":"https://example.com/v.mp4"}}]`, 0, true},
+		{"text carrying input_file", `[{"type":"text","input_file":"f"}]`, 0, true},
+		{"text carrying a null file", `[{"type":"text","text":"hi","file":null}]`, 0, true},
+		{"text carrying an unknown key", `[{"type":"text","x":1}]`, 0, true},
+		{"image carrying text", `[{"type":"image_url",` + image + `,"text":"hi"}]`, 0, true},
+		{"image carrying cache_control", `[{"type":"image_url",` + image + `,"cache_control":{}}]`, 0, true},
+		{"refusal carrying text", `[{"type":"refusal","refusal":"no","text":"hi"}]`, 0, true},
 		{"file part", `[{"type":"file","file":{"file_id":"f"}}]`, 0, true},
 		{"input_audio part", `[{"type":"text","text":"hi"},{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]`, 0, true},
 		{"invented type", `[{"type":"hologram"}]`, 0, true},
-		{"unsupported type beside an image", `[{"type":"image_url","Type":"file",` + image + `}]`, 0, true},
 		{"non-string Type key", `[{"type":"image_url","Type":5,` + image + `}]`, 0, true},
 		{"sibling with a non-string type", `[{"type":"image_url",` + image + `},{"type":5}]`, 0, true},
 		{"bare string element", `[{"type":"image_url",` + image + `},"x"]`, 0, true},
@@ -465,6 +483,7 @@ func TestPassthroughStringAndNullContentAreUntouched(t *testing.T) {
 func TestPassthroughToolConversationIsAdmittedWithExactReservation(t *testing.T) {
 	body := `{"model":"gpt-pass","max_tokens":1000,"messages":[` +
 		`{"role":"user","content":"weather?"},` +
+		`{"role":"assistant","content":[{"type":"text","text":"checking"},{"type":"refusal","refusal":"no"}]},` +
 		`{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"w","arguments":"{}"}}]},` +
 		`{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"sunny"}]}]}`
 	reserved, rec, _ := passthroughReservation(t, body)
@@ -486,7 +505,7 @@ func TestPassthroughCutStreamEstimateChargesEachImage(t *testing.T) {
 	auth, _ := insertTestKey(t, env.store, nil)
 	body := `{"model":"gpt-pass","stream":true,"max_tokens":1000,"messages":[{"role":"user","content":[{"type":"text","text":"hi"},` +
 		`{"type":"image_url","image_url":{"url":"` + inlineImagePrefix + strings.Repeat("A", 4000) + `"}},` +
-		`{"type":"image_url","Type":"text","image_url":{"url":"https://example.com/a.png"}}]}]}`
+		`{"type":"image_url","image_url":{"url":"https://example.com/a.png"}}]}]}`
 	doDual(env, auth, body)
 
 	spend, err := env.store.MonthSpend(t.Context(), accounting.Month(env.now))

@@ -271,11 +271,9 @@ then the provider's circuit breaker. A request the gateway cannot
 translate is therefore refused with a 400 before it holds any shared
 capacity. On a `chat_completions` row that includes a message whose
 `content` is neither a string, `null` nor an array of JSON objects, each
-carrying a string `type` of `text`, `image_url` or `refusal` and none
-carrying a `file`, `file_id` or `input_audio` key
-(`invalid message content: ...`), because the
-gateway counts that row's image parts before forwarding them; v0.6.0
-forwarded such content unread.
+with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`), each key spelled exactly and at most once
+(`invalid message content: ...`), because the gateway counts that row's
+image parts before forwarding them; v0.6.0 forwarded such content unread.
 
 A response whose request carried parameters the upstream cannot honour
 or the row drops names every one of them in `X-Modelgate-Dropped-Params`; see
@@ -405,14 +403,12 @@ also charged a fixed allowance, whether it arrives inline or as an
 `https://` URL: 4,784 tokens on an Anthropic row and 36,000 on an OpenAI
 row. On the translated upstreams a part is an image when its `type` says
 so, and an inline image's base64 is then not counted as text; on a
-`chat_completions` row, whose content parts are forwarded unread, a part
-is counted when any `type` key of any letter case says `image_url` or an
-`image_url` key holds a non-null value, and the bytes stay counted. The
-bound assumes a provider bills an image block by its dimensions, never
-by tokenising its bytes as text, and rejects a payload that is not an
-image; a `chat_completions` row forwards only content parts that carry
-a `type` of `text`, `image_url` or `refusal` and no `file`, `file_id` or
-`input_audio` key, and refuses any other with a 400. A request is admitted
+`chat_completions` row, whose content parts are forwarded verbatim, a
+part is an image exactly when its `type` is `image_url`, and the bytes
+stay counted. The bound assumes a provider bills an image block by its
+dimensions, never by tokenising its bytes as text, and rejects a payload
+that is not an image; a `chat_completions` row forwards only content
+parts with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`), and refuses any other with a 400. A request is admitted
 only while recorded spend plus every reservation stays below the key
 quota and the budget, so concurrent requests can overshoot a cap by at
 most one request's bound. Recorded spend at a cap answers

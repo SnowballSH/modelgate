@@ -143,28 +143,25 @@ a fixed number of prompt tokens, inline or remote, on all three
 upstreams. On the translated upstreams the image's base64 also stops
 counting toward the prompt's byte bound. The `chat_completions`
 passthrough forwards content parts unread, so it counts what a provider
-could read as an image by walking every key of every part: a part counts
-when any key spelled `type`, in any letter case, has the value
-`image_url`, or when any key spelled `image_url` holds a value other
-than `null`. It charges the allowance for each, and its bytes stay
-counted as text (over-counting is the safe side). The passthrough
-refuses, with a 400 `invalid message content: ...` before admission, a
-message whose `content` is neither a string, `null` nor an array of JSON
-objects with string `type` fields; v0.6.0 forwarded such content unread.
-A passthrough row forwards only part types it can price: a part whose
-`type` (any key occurrence, any letter case) is anything but `text`,
-`image_url` or `refusal` is refused with a 400 `invalid message content:
-unsupported content part type ...` before admission, reserving nothing,
-which keeps `file` parts (billed per page as images) and `input_audio`
-parts (audio tokens inside `prompt_tokens`) out of the byte-bounded path.
-A passthrough content part must carry a `type` of `text`, `image_url`
-or `refusal`, and may not carry a `file`, `file_id` or `input_audio` key
-(any letter case, any occurrence, non-null value): a part with no `type`
-key, or a typed part carrying one of those keys, is refused with a 400
-`invalid message content: ...` before admission, reserving nothing, so
-no payload the gateway cannot price rides in beside a priced type. Other
-keys, such as `cache_control`, are forwarded. The echoed type, like an echoed `detail` or media type,
-is cut to 64 bytes. The number follows the row's upstream:
+could read as an image by walking the top-level keys of every part: a
+part counts exactly when its `type` is `image_url`, whether or not its
+`image_url` value is null or malformed, and its bytes stay counted as
+text (over-counting is the safe side). The passthrough refuses, with a
+400 `invalid message content: ...` before admission, a message whose
+`content` is neither a string, `null` nor an array of JSON objects;
+v0.6.0 forwarded such content unread. Because it forwards the bytes
+verbatim, it admits only parts with one reading: a passthrough content
+part must be an object with exactly one lowercase `type` of `text`, `image_url` or `refusal`, and only the keys that type allows (`text`: `type`, `text`, `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`, `refusal`). A part with no `type`, a second key
+folding to `type`, a `type` key or value not spelled exactly in
+lowercase (escaped spellings included), a value other than the three, a
+key outside the type's list (whatever its value, null included, and in
+any casing), or a second key folding to the type's own payload key is
+refused with a 400 before admission, reserving nothing. This keeps `file`
+parts (billed per page as images), `input_audio` parts (audio tokens
+inside `prompt_tokens`) and any payload key a provider might read, now or
+later, out of the byte-bounded path. Values are not inspected: a `type`
+nested inside a value does not discriminate. An echoed type or key, like
+an echoed `detail` or media type, is cut to 64 bytes. The number follows the row's upstream:
 
 | Row | Tokens per image | Source |
 |---|---|---|

@@ -38,10 +38,14 @@ Changed.
   string, `null` or an array of JSON objects with string `type` fields,
   and only `text`, `image_url` and `refusal` parts are forwarded; any
   other part type, such as `file` or `input_audio`, answers `400 invalid
-  message content` before admission. Every part must carry a `type` of
-  `text`, `image_url` or `refusal` and may not carry a `file`, `file_id`
-  or `input_audio` key; a part with no `type`, or with such a key, is
-  refused the same way. Image parts are charged the
+  message content` before admission. Every part must be an object with
+  exactly one lowercase `type` of `text`, `image_url` or `refusal` and
+  only the keys that type allows (`text`: `type`, `text`,
+  `cache_control`; `image_url`: `type`, `image_url`; `refusal`: `type`,
+  `refusal`), each spelled exactly and at most once; anything else, such
+  as a part with no `type`, a `file`, `file_id`, `input_audio` or unknown
+  key, or a re-cased `Type`, is refused the same way. A part is an image
+  exactly when its `type` is `image_url`. Image parts are charged the
   per-image allowance. v0.6.0 forwarded such content unread.
 - A `prompt_cache_key` that is not a string is ignored on every row
   instead of failing the request.
