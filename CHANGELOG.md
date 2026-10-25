@@ -59,7 +59,9 @@ first start.
   part of `input_tokens`) were booked as plain input; they are now
   booked at the row's `cache_write_usd_per_mtok`. Set that to OpenAI's
   cache-write rate (1.25× input for the default lifetime); a row that
-  sets it to the input price books as before.
+  sets it to the input price books as before. A table whose OpenAI rows
+  already carry 1.25× input there, as the SnowSys table v7 does, now
+  books OpenAI cache writes 25% higher than v0.8.0 did.
 
 ### Security
 
@@ -78,6 +80,10 @@ first start.
   stop the gateway, restore `DATA_DIR` from that snapshot, then start
   the older image. Spend booked since the snapshot is lost from the
   store, and so are key web search flags set since.
+- OpenAI cache writes are booked at the row's `cache_write_usd_per_mtok`
+  from this release on. With table v7's 1.25×-input values that is 25%
+  more per written token than v0.8.0 booked; quotas and ceilings feel it
+  from the first cache-writing Responses request.
 - Nothing searches until `WEB_SEARCH_ENABLED=true`, a key's flag is on
   and a row carries a block. v0.8.0 ignores `web_search` blocks, so
   deploy v0.9.0 first and the table with blocks second; a table with
