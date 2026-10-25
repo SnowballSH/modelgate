@@ -1,0 +1,149 @@
+{
+  "models": {
+    "claude-fable-5-1": {
+      "provider_model": "claude-fable-5-1",
+      "input_usd_per_mtok": 10.0,
+      "output_usd_per_mtok": 50.0,
+      "cache_read_usd_per_mtok": 0.25,
+      "cache_write_usd_per_mtok": 20.0,
+      "cache_ttl": "1h",
+      "forced_tool_choice": false,
+      "sampling": false,
+      "image_input": true,
+      "default_max_tokens": 32000,
+      "max_input_tokens": 1048576
+    },
+    "claude-opus-5-5": {
+      "provider_model": "claude-opus-5-5",
+      "input_usd_per_mtok": 4.0,
+      "output_usd_per_mtok": 20.0,
+      "cache_read_usd_per_mtok": 0.2,
+      "cache_write_usd_per_mtok": 8.0,
+      "cache_ttl": "1h",
+      "forced_tool_choice": false,
+      "sampling": false,
+      "image_input": true,
+      "default_max_tokens": 32000,
+      "max_input_tokens": 1048576
+    },
+    "claude-sonnet-5-5": {
+      "provider_model": "claude-sonnet-5-5",
+      "input_usd_per_mtok": 2.0,
+      "output_usd_per_mtok": 10.0,
+      "cache_read_usd_per_mtok": 0.1,
+      "cache_write_usd_per_mtok": 4.0,
+      "cache_ttl": "1h",
+      "forced_tool_choice": false,
+      "sampling": false,
+      "image_input": true,
+      "default_max_tokens": 16000,
+      "max_input_tokens": 1048576
+    },
+    "claude-haiku-5-5": {
+      "provider_model": "claude-haiku-5-5",
+      "input_usd_per_mtok": 0.1,
+      "output_usd_per_mtok": 0.5,
+      "cache_read_usd_per_mtok": 0.01,
+      "cache_write_usd_per_mtok": 0.2,
+      "cache_ttl": "1h",
+      "sampling": false,
+      "image_input": true,
+      "default_max_tokens": 16000,
+      "max_input_tokens": 1048576,
+      "price_tiers": [
+        {
+          "above_input_tokens": 100000,
+          "input_usd_per_mtok": 0.5,
+          "output_usd_per_mtok": 2.5,
+          "cache_read_usd_per_mtok": 0.05,
+          "cache_write_usd_per_mtok": 1.0
+        }
+      ]
+    },
+    "gpt-6-astra": {
+      "provider": "openai",
+      "upstream_api": "responses",
+      "provider_model": "gpt-6-astra",
+      "input_usd_per_mtok": 10.0,
+      "output_usd_per_mtok": 50.0,
+      "cache_read_usd_per_mtok": 1.0,
+      "cache_write_usd_per_mtok": 12.5,
+      "reasoning_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "image_input": true,
+      "default_max_tokens": 32000,
+      "max_input_tokens": 1050000,
+      "price_tiers": [
+        {
+          "above_input_tokens": 272000,
+          "input_usd_per_mtok": 20.0,
+          "output_usd_per_mtok": 75.0,
+          "cache_read_usd_per_mtok": 2.0,
+          "cache_write_usd_per_mtok": 25.0
+        }
+      ]
+    },
+    "gpt-6.1-sol": {
+      "provider": "openai",
+      "upstream_api": "responses",
+      "provider_model": "gpt-6.1-sol",
+      "input_usd_per_mtok": 2.0,
+      "output_usd_per_mtok": 10.0,
+      "cache_read_usd_per_mtok": 0.1,
+      "cache_write_usd_per_mtok": 2.5,
+      "reasoning_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "image_input": true,
+      "default_max_tokens": 16000,
+      "max_input_tokens": 1050000,
+      "price_tiers": [
+        {
+          "above_input_tokens": 272000,
+          "input_usd_per_mtok": 4.0,
+          "output_usd_per_mtok": 15.0,
+          "cache_read_usd_per_mtok": 0.2,
+          "cache_write_usd_per_mtok": 5.0
+        }
+      ]
+    },
+    "gpt-6-luna": {
+      "provider": "openai",
+      "upstream_api": "responses",
+      "provider_model": "gpt-6-luna",
+      "input_usd_per_mtok": 0.1,
+      "output_usd_per_mtok": 0.5,
+      "cache_read_usd_per_mtok": 0.01,
+      "cache_write_usd_per_mtok": 0.125,
+      "reasoning_efforts": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "image_input": true,
+      "default_max_tokens": 16000,
+      "max_input_tokens": 1050000,
+      "price_tiers": [
+        {
+          "above_input_tokens": 272000,
+          "input_usd_per_mtok": 0.2,
+          "output_usd_per_mtok": 0.75,
+          "cache_read_usd_per_mtok": 0.02,
+          "cache_write_usd_per_mtok": 0.25
+        }
+      ]
+    }
+  }
+}
