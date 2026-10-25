@@ -323,6 +323,25 @@ func TestSearchIsBookedWithItsFee(t *testing.T) {
 // A stream cut before its final usage still bills the searches it ran: the
 // second sampling re-read the prompt, the search's results and the one
 // output token the first sampling had reported.
+// Claude can issue several searches in one sampling, so every later sampling
+// re-reads all of them: two parallel searches cut before the final usage book
+// as three samplings, each after the first reading both results and the one
+// output token reported.
+func TestCutParallelSearchStreamBooksEveryResultOnEveryLaterSampling(t *testing.T) {
+	env := newSearchEnv(t, searchEnvOptions{enabled: true, anthropic: fixtureHandler(t, "anthropic_parallel_cut.sse")})
+	auth, id := env.key(t, true, nil)
+	env.post(auth, searchRequest("claude-search", true, `{}`))
+	usage, err := env.store.MonthUsage(t.Context(), accounting.Month(env.now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := usage[id]
+	wantInput := int64(3*1000 + 25_000*2*2 + 2*1)
+	if got.WebSearchRequests != 2 || got.InputTokens != wantInput {
+		t.Errorf("cut parallel stream booked %+v; want 2 searches and %d input tokens", got, wantInput)
+	}
+}
+
 func TestCutSearchStreamBooksTheSearchesSeen(t *testing.T) {
 	events := []string{
 		`{"type":"message_start","message":{"type":"message","role":"assistant","usage":{"input_tokens":1000,"output_tokens":1}}}`,
@@ -380,7 +399,7 @@ func TestSearchReservationCoversTheWholeLoop(t *testing.T) {
 			prompt := float64(len(body) + promptOverheadTokens)
 			input := prompt
 			if tc.searches > 0 {
-				input = 10*prompt + 25_000*24 + 9*4096
+				input = 10*prompt + 25_000*3*9 + 9*4096
 			}
 			want := (input*8+4096*20)/1e6 + float64(tc.searches)*0.01
 			if got := env.acct.Reserved(); math.Abs(got-want) > 1e-12 {

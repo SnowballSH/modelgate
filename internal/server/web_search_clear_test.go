@@ -73,10 +73,11 @@ func TestSearchDemandBoundsTheProvidersLoop(t *testing.T) {
 		want   accounting.Demand
 	}{
 		{"no search", nil, base},
-		// 10·P + A·(0+1+2+3·7) + 9·O
-		{"anthropic", anthropic, accounting.Demand{InputTokens: 100_000 + 25_000*24 + 9*32_000, OutputTokens: 32_000, WebSearches: 3}},
-		// (U+1)·P + A·U(U+1)/2
-		{"responses", responses, accounting.Demand{InputTokens: 40_000 + 25_000*6, OutputTokens: 32_000, WebSearches: 3}},
+		// 10·P + A·U·9 + 9·O: all U searches can run in parallel in the
+		// first sampling and be re-read by the nine after it.
+		{"anthropic", anthropic, accounting.Demand{InputTokens: 100_000 + 25_000*3*9 + 9*32_000, OutputTokens: 32_000, WebSearches: 3}},
+		// (U+1)·P + A·U·U
+		{"responses", responses, accounting.Demand{InputTokens: 40_000 + 25_000*3*3, OutputTokens: 32_000, WebSearches: 3}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

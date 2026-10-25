@@ -366,8 +366,12 @@ bound (held at `max_input_tokens`), A the row's
 
 | Upstream | Samplings | Input bound |
 |---|---|---|
-| Anthropic | up to 10, Anthropic's documented server-loop limit, whatever U is: past the last search Claude can keep asking and get `max_uses_exceeded` back | `10·P + A·Σ_{k=0..9} min(k, U) + 9·O`: each sampling reads the prompt, the results of the searches before it, and what the earlier samplings wrote |
-| Responses | U + 1: `max_tool_calls` stops built-in calls after U | `(U+1)·P + A·U(U+1)/2` |
+| Anthropic | up to 10, Anthropic's documented server-loop limit, whatever U is: past the last search Claude can keep asking and get `max_uses_exceeded` back | `10·P + 9·(A·U + O)`: each sampling reads the prompt, and each after the first may read all U results (the model can run every search in parallel in the first sampling) and what the earlier samplings wrote |
+| Responses | U + 1: `max_tool_calls` stops built-in calls after U | `(U+1)·P + U·A·U` |
+
+A stream cut before its final usage is estimated with the same bound,
+taking the search calls it showed, failed ones included, plus one as the
+samplings, and the billable searches it showed as U.
 
 The total is not held at `max_input_tokens`. The output side is
 unchanged. Unconfirmed, and assumed: that `max_tokens` (or

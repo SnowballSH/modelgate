@@ -81,23 +81,21 @@ func withWebSearch(d accounting.Demand, search *models.WebSearch) accounting.Dem
 	return d
 }
 
-// loopInput bounds the input a loop of loop.Iterations samplings bills. The
-// k-th sampling (from 0) reads the prompt, the results of the searches run
-// before it, at most uses of them at allowance tokens each, and, on a loop
-// that re-reads output, what the earlier samplings wrote, at most output in
-// all:
+// loopInput bounds the input a loop of loop.Iterations samplings bills.
+// Every sampling reads the prompt. Every sampling after the first may read
+// the results of all uses searches, at allowance tokens each, since the
+// model can run them in parallel in the first sampling. On a loop that
+// re-reads output, every sampling after the first also reads what the
+// earlier ones wrote, at most output in all:
 //
-//	Σ_k (prompt + allowance·min(k, uses)) + (iterations−1)·output
+//	iterations·prompt + (iterations−1)·(allowance·uses + output)
 //
 // Both the reservation and a cut stream's estimate use it.
 func loopInput(prompt, allowance, output, uses int64, loop models.SearchLoop) int64 {
-	var results int64
-	for k := range loop.Iterations {
-		results += min(k, uses)
-	}
-	input := loop.Iterations*prompt + allowance*results
-	if loop.RereadsOutput && loop.Iterations > 1 {
-		input += (loop.Iterations - 1) * output
+	later := max(loop.Iterations-1, 0)
+	input := loop.Iterations*prompt + later*allowance*uses
+	if loop.RereadsOutput {
+		input += later * output
 	}
 	return input
 }
