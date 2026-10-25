@@ -33,31 +33,35 @@ type webSearchRefusal struct {
 	outcome, message string
 }
 
-// planWebSearch reads the request's web_search_options. A gateway or key with
-// search off drops the field unread, so the kill switches never break a chat;
-// with both on, the options are read strictly, and a model without a
-// web_search block or a request that also brings its own tools is refused.
-func planWebSearch(enabled bool, key store.KeyRecord, publicID string, model models.Model, req oai.ChatRequest) (webSearchPlan, *webSearchRefusal) {
+// planWebSearch reads the request's web_search_options and returns the
+// request every upstream path is built from, which never carries the
+// client's object: only the row's own tool reaches a provider. A gateway or
+// key with search off drops the field unread, so the kill switches never
+// break a chat; with both on, the options are read strictly, and a model
+// without a web_search block or a request that also brings its own tools is
+// refused.
+func planWebSearch(enabled bool, key store.KeyRecord, publicID string, model models.Model, req oai.ChatRequest) (webSearchPlan, oai.ChatRequest, *webSearchRefusal) {
 	raw := bytes.TrimSpace(req.WebSearchOptions)
+	req.WebSearchOptions = nil
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
-		return webSearchPlan{}, nil
+		return webSearchPlan{}, req, nil
 	}
 	if !enabled || !key.WebSearch {
-		return webSearchPlan{dropped: true}, nil
+		return webSearchPlan{dropped: true}, req, nil
 	}
 	options, err := oai.ParseWebSearchOptions(raw)
 	switch {
 	case err != nil:
-		return webSearchPlan{}, &webSearchRefusal{outcomeWebSearchInvalid, err.Error()}
+		return webSearchPlan{}, req, &webSearchRefusal{outcomeWebSearchInvalid, err.Error()}
 	case model.WebSearch == nil:
-		return webSearchPlan{}, &webSearchRefusal{outcomeWebSearchUnsupported, fmt.Sprintf("model %s does not support web search", publicID)}
+		return webSearchPlan{}, req, &webSearchRefusal{outcomeWebSearchUnsupported, fmt.Sprintf("model %s does not support web search", publicID)}
 	case len(req.Tools) > 0:
-		return webSearchPlan{}, &webSearchRefusal{outcomeWebSearchWithTools, "web_search_options cannot be combined with tools"}
+		return webSearchPlan{}, req, &webSearchRefusal{outcomeWebSearchWithTools, "web_search_options cannot be combined with tools"}
 	}
 	return webSearchPlan{
 		tool: &translate.WebSearchTool{Tool: model.WebSearch.Tool, MaxUses: model.WebSearch.MaxUses, Options: *options},
 		row:  model.WebSearch,
-	}, nil
+	}, req, nil
 }
 
 // withWebSearch bounds a searching request. The provider's server-side loop

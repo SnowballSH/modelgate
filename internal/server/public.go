@@ -251,14 +251,13 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		failResolved(violation)
 		return
 	}
-	search, searchRefusal := planWebSearch(h.webSearch, key, req.Model, model, req)
+	search, req, searchRefusal := planWebSearch(h.webSearch, key, req.Model, model, req)
 	if searchRefusal != nil {
 		record = resolved
 		observe(searchRefusal.outcome)
 		writeError(w, CodeInvalidRequest, searchRefusal.message)
 		return
 	}
-	req.WebSearchOptions = nil
 	resolved.WebSearch = search.tool != nil
 	plan, err := h.prepare(req, model, key.ID, search.tool)
 	if err != nil {
