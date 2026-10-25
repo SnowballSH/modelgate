@@ -13,6 +13,7 @@ func FromResponses(resp oairesp.Response, publicModel string, created int64, id 
 	var text, refusal strings.Builder
 	hasText, hasRefusal := false, false
 	var toolCalls []oai.ToolCall
+	var cited citationIndex
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
@@ -21,6 +22,8 @@ func FromResponses(resp oairesp.Response, publicModel string, created int64, id 
 				case "output_text":
 					hasText = true
 					text.WriteString(part.Text)
+					markers, _ := cited.cite(responsesSources(part.Annotations))
+					text.WriteString(markers)
 				case "refusal":
 					hasRefusal = true
 					refusal.WriteString(part.Refusal)
@@ -38,7 +41,7 @@ func FromResponses(resp oairesp.Response, publicModel string, created int64, id 
 		}
 	}
 
-	message := oai.ResponseMessage{Role: "assistant", ToolCalls: toolCalls}
+	message := oai.ResponseMessage{Role: "assistant", ToolCalls: toolCalls, Annotations: cited.annotations()}
 	if hasText || len(toolCalls) == 0 {
 		s := text.String()
 		message.Content = &s

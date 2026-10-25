@@ -1,0 +1,21 @@
+{
+  "id": "resp_ws1",
+  "object": "response",
+  "created_at": 1761350400,
+  "status": "completed",
+  "model": "gpt-6-luna",
+  "output": [
+    {"type": "reasoning", "id": "rs_1", "summary": []},
+    {"type": "web_search_call", "id": "ws_1", "status": "completed", "action": {"type": "search", "query": "positive news today", "sources": [{"type": "url", "url": "https://www.example.com/good-news"}]}},
+    {"type": "web_search_call", "id": "ws_2", "status": "completed", "action": {"type": "open_page", "url": "https://www.example.com/good-news"}},
+    {"type": "message", "id": "msg_1", "status": "completed", "role": "assistant", "content": [
+      {"type": "output_text", "text": "A river was restored this week ([example.com](https://www.example.com/good-news)). Volunteers planted trees ([trees.org](https://trees.org/a)).", "annotations": [
+        {"type": "url_citation", "start_index": 32, "end_index": 80, "url": "https://www.example.com/good-news", "title": "Good news"},
+        {"type": "url_citation", "start_index": 110, "end_index": 140, "url": "https://trees.org/a", "title": "Trees"},
+        {"type": "url_citation", "start_index": 110, "end_index": 140, "url": "https://www.example.com/good-news", "title": "Good news"},
+        {"type": "url_citation", "start_index": 1, "end_index": 2, "url": "ftp://files.example/x", "title": "ftp"}
+      ]}
+    ]}
+  ],
+  "usage": {"input_tokens": 9000, "input_tokens_details": {"cached_tokens": 1000, "cache_write_tokens": 2000}, "output_tokens": 300, "output_tokens_details": {"reasoning_tokens": 100}, "total_tokens": 9300}
+}

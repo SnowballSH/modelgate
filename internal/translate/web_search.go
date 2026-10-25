@@ -7,6 +7,7 @@ import (
 
 	"github.com/SnowballSH/modelgate/internal/anthro"
 	"github.com/SnowballSH/modelgate/internal/oai"
+	"github.com/SnowballSH/modelgate/internal/oairesp"
 )
 
 // WebSearchTool is a request's provider-native web search as the model table
@@ -34,6 +35,47 @@ func (w WebSearchTool) anthropicTool() anthro.Tool {
 		}
 	}
 	return tool
+}
+
+func (w WebSearchTool) responsesTool() oairesp.Tool {
+	tool := oairesp.Tool{Type: oairesp.WebSearchToolType, SearchContextSize: w.Options.SearchContextSize}
+	if loc := w.Options.UserLocation; loc != nil {
+		tool.UserLocation = &oairesp.UserLocation{
+			Type:     "approximate",
+			City:     loc.Approximate.City,
+			Region:   loc.Approximate.Region,
+			Country:  loc.Approximate.Country,
+			Timezone: loc.Approximate.Timezone,
+		}
+	}
+	return tool
+}
+
+// ResponsesWebSearches counts a response's web_search_call items. The
+// Responses usage object reports no search count, and OpenAI documents no
+// rule for which calls it bills, so every call is counted, whatever its
+// action or status.
+func ResponsesWebSearches(output []oairesp.Item) int64 {
+	var n int64
+	for _, item := range output {
+		if item.Type == "web_search_call" {
+			n++
+		}
+	}
+	return n
+}
+
+func responsesSources(annotations []oairesp.Annotation) []source {
+	var sources []source
+	for _, a := range annotations {
+		if a.Type != "url_citation" {
+			continue
+		}
+		if s, ok := webSource(a.URL, a.Title); ok {
+			sources = append(sources, s)
+		}
+	}
+	return sources
 }
 
 // source is one web page an answer cites.
