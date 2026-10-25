@@ -58,6 +58,12 @@ first start.
   cache-write rate (1.25× input for the default lifetime); a row that
   sets it to the input price books as before.
 
+### Security
+
+- `go.mod` requires Go 1.26.10, which fixes GO-2026-6809 in
+  `crypto/x509`, reachable from the provider clients' TLS handshakes
+  (govulncheck flags 1.26.9).
+
 ### Upgrading
 
 - The store migrates to schema version 4 at startup, adding a
