@@ -28,6 +28,9 @@ type ChatRequest struct {
 	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
 	User                string          `json:"user,omitempty"`
 	PromptCacheKey      CacheKey        `json:"prompt_cache_key,omitempty"`
+	// WebSearchOptions stays raw so the gateway decides, per key and model,
+	// whether to read it strictly or drop it; see ParseWebSearchOptions.
+	WebSearchOptions json.RawMessage `json:"web_search_options,omitempty"`
 }
 
 // CacheKey is a client's prompt_cache_key. A value that is not a JSON string
@@ -134,10 +137,11 @@ type Choice struct {
 // an empty Content: a completion that drops the refusal reads as a successful
 // blank answer, and the caller retries a request the provider already refused.
 type ResponseMessage struct {
-	Role      string     `json:"role"`
-	Content   *string    `json:"content"`
-	Refusal   *string    `json:"refusal,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Role        string       `json:"role"`
+	Content     *string      `json:"content"`
+	Refusal     *string      `json:"refusal,omitempty"`
+	ToolCalls   []ToolCall   `json:"tool_calls,omitempty"`
+	Annotations []Annotation `json:"annotations,omitempty"`
 }
 
 type Usage struct {
@@ -173,10 +177,11 @@ type ChunkChoice struct {
 }
 
 type Delta struct {
-	Role      string          `json:"role,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	Refusal   *string         `json:"refusal,omitempty"`
-	ToolCalls []ChunkToolCall `json:"tool_calls,omitempty"`
+	Role        string          `json:"role,omitempty"`
+	Content     string          `json:"content,omitempty"`
+	Refusal     *string         `json:"refusal,omitempty"`
+	ToolCalls   []ChunkToolCall `json:"tool_calls,omitempty"`
+	Annotations []Annotation    `json:"annotations,omitempty"`
 }
 
 // ChunkToolCall streams one tool call's incremental state. The first
