@@ -1,0 +1,10 @@
+data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-pass-2026","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-pass-2026","choices":[{"index":0,"delta":{"content":"hey"},"finish_reason":null}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-pass-2026","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","model":"gpt-pass-2026","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":10,"total_tokens":110}}
+
+data: [DONE]
+

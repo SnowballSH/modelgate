@@ -1,0 +1,24 @@
+upstream /v1/messages
+{"model":"claude-real","max_tokens":16000,"messages":[{"role":"user","content":[{"type":"text","text":"weather in Paris?"}]},{"role":"assistant","content":[{"type":"text","text":"Checking."},{"type":"tool_use","id":"call_1","name":"get_weather","input":{"city":"Paris"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1"}]},{"role":"user","content":[{"type":"text","text":"thanks"}]}],"stream":true,"tools":[{"name":"get_weather","description":"Weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}}}},{"name":"get_time","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral","ttl":"1h"}}],"tool_choice":{"type":"auto","disable_parallel_tool_use":true},"cache_control":{"type":"ephemeral","ttl":"1h"}}
+status 200
+content-type text/event-stream
+dropped 
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"content":"Let me check."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_9","type":"function","function":{"name":"get_weather"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"toolu_10","type":"function","function":{"name":"get_time"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+usage {"cache_read":10,"cache_write":0,"cost_usd":"0.001102000","input":25,"output":50,"requests":1}

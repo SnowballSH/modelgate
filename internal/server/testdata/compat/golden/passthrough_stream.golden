@@ -1,0 +1,14 @@
+upstream /v1/chat/completions
+{"model":"gpt-pass-2026","messages":[{"role":"system","content":"Be brief."},{"role":"user","content":"hi"}],"max_completion_tokens":4096,"parallel_tool_calls":false,"stream":true,"stream_options":{"include_usage":true},"tools":[{"type":"function","function":{"name":"get_weather","description":"Weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}},{"type":"function","function":{"name":"get_time"}}],"tool_choice":"auto"}
+status 200
+content-type text/event-stream
+dropped 
+data: {"id":"c1","object":"chat.completion.chunk","created":0,"model":"pass-row","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":0,"model":"pass-row","choices":[{"index":0,"delta":{"content":"hey"},"finish_reason":null}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":0,"model":"pass-row","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+usage {"cache_read":0,"cache_write":0,"cost_usd":"0.000140000","input":100,"output":10,"requests":1}

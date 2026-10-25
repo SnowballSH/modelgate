@@ -1,0 +1,33 @@
+{
+  "id": "resp_68f1a0c2b4e04819a1",
+  "object": "response",
+  "created_at": 1757260800,
+  "status": "completed",
+  "model": "gpt-5.6-luna",
+  "output": [
+    {
+      "type": "reasoning",
+      "id": "rs_68f1a0c2b4e04819a2",
+      "summary": []
+    },
+    {
+      "type": "function_call",
+      "id": "fc_68f1a0c2b4e04819a3",
+      "call_id": "call_abc",
+      "name": "get_weather",
+      "arguments": "{\"city\":\"Paris\"}",
+      "status": "completed"
+    }
+  ],
+  "usage": {
+    "input_tokens": 1204,
+    "input_tokens_details": {
+      "cached_tokens": 896
+    },
+    "output_tokens": 412,
+    "output_tokens_details": {
+      "reasoning_tokens": 320
+    },
+    "total_tokens": 1616
+  }
+}

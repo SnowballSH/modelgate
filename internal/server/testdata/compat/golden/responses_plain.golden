@@ -1,0 +1,7 @@
+upstream /v1/responses
+{"model":"gpt-real","instructions":"Be brief.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":32000,"store":false}
+status 200
+content-type application/json
+dropped 
+{"id":"chatcmpl-ID","object":"chat.completion","created":1787313600,"model":"gpt-row","choices":[{"index":0,"message":{"role":"assistant","content":"Plain answer."},"finish_reason":"stop"}],"usage":{"prompt_tokens":900,"completion_tokens":70,"total_tokens":970,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":40}}}
+usage {"cache_read":100,"cache_write":0,"cost_usd":"0.002460000","input":800,"output":70,"requests":1}

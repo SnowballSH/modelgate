@@ -1,0 +1,7 @@
+upstream /v1/chat/completions
+{"model":"gpt-pass-2026","messages":[{"role":"system","content":"Be brief."},{"role":"user","content":"hi"}],"max_completion_tokens":500,"temperature":0.2,"top_p":0.9,"seed":7,"reasoning_effort":"high","stop":["END"],"stream_options":{"include_usage":true},"user":"alice","prompt_cache_key":"f605999e6febdb08c140f4d9cba8f37c"}
+status 200
+content-type application/json
+dropped 
+{"id":"chatcmpl-upstream","object":"chat.completion","created":1757260800,"model":"pass-row","choices":[{"index":0,"message":{"role":"assistant","content":"hi from openai"},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":40,"total_tokens":240,"prompt_tokens_details":{"cached_tokens":80}}}
+usage {"cache_read":80,"cache_write":0,"cost_usd":"0.000288000","input":120,"output":40,"requests":1}

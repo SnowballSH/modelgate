@@ -1,0 +1,16 @@
+upstream /v1/messages
+{"model":"claude-real","max_tokens":16000,"system":[{"type":"text","text":"Be brief.","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"stream":true,"cache_control":{"type":"ephemeral","ttl":"1h"}}
+status 200
+content-type text/event-stream
+dropped 
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"content":" world."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+usage {"cache_read":0,"cache_write":0,"cost_usd":"0.011016000","input":2679,"output":15,"requests":1}
