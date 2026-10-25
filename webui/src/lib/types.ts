@@ -9,6 +9,7 @@ export interface ApiKey {
   last_used_at: string | null;
   created_at: string;
   created_by: string;
+  web_search: boolean;
   month_spend_usd: number;
 }
 
@@ -21,6 +22,7 @@ export interface CreateKeyRequest {
   models?: string[];
   quota_usd?: number;
   expires_at?: string;
+  web_search?: boolean;
 }
 
 export interface CreateKeyResponse {
@@ -29,6 +31,10 @@ export interface CreateKeyResponse {
 }
 
 export interface RevokeKeyResponse {
+  key: ApiKey;
+}
+
+export interface SetWebSearchResponse {
   key: ApiKey;
 }
 

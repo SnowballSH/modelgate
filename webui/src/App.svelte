@@ -7,6 +7,7 @@
     listKeys,
     listModels,
     revokeKey,
+    setKeyWebSearch,
   } from "./lib/api";
   import { toasts } from "./lib/toasts.svelte";
   import type {
@@ -100,6 +101,24 @@
     }
   }
 
+  function replaceKey(updated: ApiKey): void {
+    keys = keys.map((key) => (key.id === updated.id ? updated : key));
+  }
+
+  async function handleWebSearch(target: ApiKey, enabled: boolean): Promise<void> {
+    try {
+      const response = await setKeyWebSearch(target.id, enabled);
+      replaceKey(response.key);
+      toasts.push(
+        `Web search ${enabled ? "on" : "off"} for "${response.key.label}"`,
+        "success",
+      );
+    } catch (error) {
+      replaceKey({ ...target, web_search: !enabled });
+      toasts.push(`Failed to change web search: ${describe(error)}`);
+    }
+  }
+
   function requestRevoke(key: ApiKey): void {
     revokeTarget = key;
     revokeOpen = true;
@@ -110,7 +129,7 @@
     revoking = true;
     try {
       const response = await revokeKey(revokeTarget.id);
-      keys = keys.map((key) => (key.id === response.key.id ? response.key : key));
+      replaceKey(response.key);
       toasts.push(`Key "${response.key.label}" revoked`, "success");
       revokeOpen = false;
     } catch (error) {
@@ -141,7 +160,12 @@
     />
     <section aria-label="API keys" class="flex flex-col gap-3">
       <h2 class="text-lg font-semibold">Keys</h2>
-      <KeyTable {keys} loading={keysLoading} onrevoke={requestRevoke} />
+      <KeyTable
+        {keys}
+        loading={keysLoading}
+        onrevoke={requestRevoke}
+        onwebsearch={handleWebSearch}
+      />
     </section>
   </main>
 </div>
