@@ -32,16 +32,18 @@ func Month(t time.Time) string {
 }
 
 func Cost(u store.Usage, p models.Pricing) float64 {
-	return (float64(u.InputTokens)*p.InputUSDPerMTok +
-		float64(u.OutputTokens)*p.OutputUSDPerMTok +
-		float64(u.CacheReadTokens)*p.CacheReadUSDPerMTok +
-		float64(u.CacheWriteTokens)*p.CacheWriteUSDPerMTok) / 1e6
+	return (float64(u.InputTokens)*p.InputUSDPerMTok+
+		float64(u.OutputTokens)*p.OutputUSDPerMTok+
+		float64(u.CacheReadTokens)*p.CacheReadUSDPerMTok+
+		float64(u.CacheWriteTokens)*p.CacheWriteUSDPerMTok)/1e6 +
+		float64(u.WebSearchRequests)*p.USDPerSearch
 }
 
-// Demand is the most a request can consume: every prompt token and every
-// output token the request allows.
+// Demand is the most a request can consume: every prompt token, every output
+// token and every provider-native web search the request allows.
 type Demand struct {
 	InputTokens, OutputTokens int64
+	WebSearches               int64
 }
 
 // WorstCaseCost prices a demand as if every prompt token were billed at the
@@ -49,7 +51,8 @@ type Demand struct {
 // cache reads, cache writes or plain input.
 func WorstCaseCost(d Demand, p models.Pricing) float64 {
 	inputRate := max(p.InputUSDPerMTok, p.CacheReadUSDPerMTok, p.CacheWriteUSDPerMTok)
-	return (float64(d.InputTokens)*inputRate + float64(d.OutputTokens)*p.OutputUSDPerMTok) / 1e6
+	return (float64(d.InputTokens)*inputRate+float64(d.OutputTokens)*p.OutputUSDPerMTok)/1e6 +
+		float64(d.WebSearches)*p.USDPerSearch
 }
 
 // spendStore is the part of the store the accountant reads and books.

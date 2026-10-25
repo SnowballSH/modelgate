@@ -45,3 +45,19 @@ func TestReservationIsPricedAtTheTopTier(t *testing.T) {
 		t.Errorf("reservation = %v, want %v (dearest input-side rate and output rate of the top tier)", got, want)
 	}
 }
+
+func TestCostChargesEverySearch(t *testing.T) {
+	p := models.Pricing{InputUSDPerMTok: 2, OutputUSDPerMTok: 10, CacheReadUSDPerMTok: 0.2, CacheWriteUSDPerMTok: 4, USDPerSearch: 0.01}
+	u := store.Usage{InputTokens: 1_000_000, OutputTokens: 100_000, WebSearchRequests: 3}
+	if got, want := Cost(u, p), 2+1+0.03; math.Abs(got-want) > 1e-12 {
+		t.Errorf("Cost = %v, want %v", got, want)
+	}
+}
+
+func TestWorstCaseCostReservesEverySearch(t *testing.T) {
+	p := models.Pricing{InputUSDPerMTok: 2, OutputUSDPerMTok: 10, CacheReadUSDPerMTok: 0.2, CacheWriteUSDPerMTok: 4, USDPerSearch: 0.01}
+	d := Demand{InputTokens: 1_000_000, OutputTokens: 100_000, WebSearches: 5}
+	if got, want := WorstCaseCost(d, p), 4+1+0.05; math.Abs(got-want) > 1e-12 {
+		t.Errorf("WorstCaseCost = %v, want %v", got, want)
+	}
+}
