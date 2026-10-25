@@ -124,10 +124,11 @@ type Usage struct {
 	TotalTokens         int64               `json:"total_tokens"`
 }
 
-// InputTokenDetails reports cached input tokens; the Responses usage object
-// has no cache-write count to carry.
+// InputTokenDetails splits input_tokens: CachedTokens were read from the
+// prompt cache and CacheWriteTokens written to it; the rest is plain input.
 type InputTokenDetails struct {
-	CachedTokens int64 `json:"cached_tokens"`
+	CachedTokens     int64 `json:"cached_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 }
 
 type OutputTokenDetails struct {

@@ -89,19 +89,30 @@ func responsesFinishReason(status string, incomplete *oairesp.IncompleteDetails,
 	}
 }
 
-// ResponsesStoreUsage clamps the cached count into [0, InputTokens], as
-// storeUsageFromOAI does: a nonconforming upstream must never produce negative
-// input tokens, which would corrupt spend accounting.
+// ResponsesStoreUsage splits input_tokens into plain input, cache reads and
+// cache writes, clamping the read count into [0, InputTokens] and the write
+// count into what the reads leave, as storeUsageFromOAI does: a nonconforming
+// upstream must never produce negative input tokens, which would corrupt
+// spend accounting.
 func ResponsesStoreUsage(u *oairesp.Usage) store.Usage {
 	if u == nil {
 		return store.Usage{}
 	}
 	cached := responsesCachedTokens(u)
+	written := responsesCacheWriteTokens(u, cached)
 	return store.Usage{
-		InputTokens:     u.InputTokens - cached,
-		OutputTokens:    u.OutputTokens,
-		CacheReadTokens: cached,
+		InputTokens:      u.InputTokens - cached - written,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  cached,
+		CacheWriteTokens: written,
 	}
+}
+
+func responsesCacheWriteTokens(u *oairesp.Usage, cached int64) int64 {
+	if u.InputTokensDetails == nil {
+		return 0
+	}
+	return min(max(u.InputTokensDetails.CacheWriteTokens, 0), u.InputTokens-cached)
 }
 
 func ResponsesOAIUsage(u *oairesp.Usage) oai.Usage {
