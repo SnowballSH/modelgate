@@ -107,6 +107,9 @@ event: content_block_delta
 data: {"type":"content_block_delta","index":7,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","cited_text":"May 2025 forecast","url":"https://world-weather.info/forecast/usa/new_york/may-2025/","title":"Weather in New York City in May 2025 (New York) - detailed Weather Forecast for a month","encrypted_index":"Ep3"}}}
 
 event: content_block_delta
+data: {"type":"content_block_delta","index":7,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","cited_text":"click","url":"javascript:alert(1)","title":"Hostile","encrypted_index":"Ep4"}}}
+
+event: content_block_delta
 data: {"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":" and rain later this week"}}
 
 event: content_block_stop
