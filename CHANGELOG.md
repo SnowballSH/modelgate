@@ -1,5 +1,100 @@
 # Changelog
 
+## v0.9.0 — 2026-10-25
+
+A request without `web_search_options` is translated, reserved, answered
+and booked exactly as v0.8.0 did, on every upstream (pinned by golden
+tests over recorded traffic for both providers, streamed and not), except
+that Responses cache writes are now booked at the cache-write price (see
+Fixed). A v0.8.0 model table loads unchanged. The store migrates on
+first start.
+
+### Added
+
+- Provider-native web search, opt-in at three levels, all off by default:
+  `WEB_SEARCH_ENABLED` for the gateway, a per-key `web_search` flag, and
+  a per-row `web_search` block in the model table (`tool`,
+  `usd_per_search`, `max_uses` 1–10, `input_tokens_per_search`). A
+  request opts in with the Chat Completions field `web_search_options`.
+  With the gateway or the key switched off the field is dropped unread
+  and named in `X-Modelgate-Dropped-Params`; with both on it is
+  validated strictly, and a malformed field, a row without a block, or
+  search together with `tools` is refused with a 400 (outcomes
+  `web_search_invalid`, `web_search_unsupported`,
+  `web_search_with_tools`). The client's object is never forwarded.
+- Anthropic rows send the basic server tool `web_search_20250305` with
+  the row's `max_uses` and the request's `user_location`; Responses rows
+  send the `web_search` tool with `search_context_size` and
+  `user_location`, and `max_tool_calls`. Search blocks and calls never
+  reach the client; cited sources become `url_citation` annotations
+  (`delta.annotations` in a stream, `message.annotations` otherwise),
+  one per distinct `http(s)` source in first-use order, with `[n]`
+  markers after the cited text.
+- Searches are reserved (`max_uses` fees, and the input the provider's
+  loop can bill, not held at `max_input_tokens`: on Anthropic, whose
+  loop samples up to 10 times, `10·P + 9·(A·U + O)`; on the Responses
+  API, stopped after U calls, `(U+1)·P + U·A·U`; both allow all U
+  searches in parallel in the first sampling) and
+  booked (the
+  provider's reported usage plus `usd_per_search` per search: Anthropic's
+  `server_tool_use.web_search_requests`, every Responses
+  `web_search_call` item). A cut stream books the searches it showed.
+- Admin API: `web_search` on key creation and in every key object, and
+  `POST /api/keys/{id}/web-search` with `{"web_search": true|false}`.
+  The admin UI shows and toggles it.
+- Metric `modelgate_web_searches_total{model}`; the request log line
+  gains `web_search`.
+
+### Changed
+
+- Anthropic `stop_reason: "pause_turn"` is answered with
+  `finish_reason: "length"` (was `stop`): the server-side loop stopped
+  before the answer was done, and modelgate does not continue it. Only
+  server tools produce it.
+- A passthrough (`chat_completions`) upstream's `url_citation`
+  annotations on a message or delta now reach the client when their URL
+  is `http` or `https`, reduced to `url` and `title`; any other
+  annotation is dropped, as v0.8.0 dropped them all.
+
+### Fixed
+
+- Responses cache writes (`input_tokens_details.cache_write_tokens`, a
+  part of `input_tokens`) were booked as plain input; they are now
+  booked at the row's `cache_write_usd_per_mtok`. Set that to OpenAI's
+  cache-write rate (1.25× input for the default lifetime); a row that
+  sets it to the input price books as before. A table whose OpenAI rows
+  already carry 1.25× input there, as the SnowSys table v7 does, now
+  books OpenAI cache writes 25% higher than v0.8.0 did.
+
+### Security
+
+- `go.mod` requires Go 1.26.10, which fixes GO-2026-6809 in
+  `crypto/x509`, reachable from the provider clients' TLS handshakes
+  (govulncheck flags 1.26.9).
+
+### Upgrading
+
+- The store migrates to schema version 4 at startup, adding a
+  `web_search` column to keys (off) and a `web_search_requests` column
+  to usage (zero); no row is rewritten.
+- v0.8.0 refuses a version 4 database at startup, so rolling back the
+  image digest alone leaves the gateway failing closed and down.
+  Snapshot `DATA_DIR` immediately before deploying v0.9.0. To roll back:
+  stop the gateway, restore `DATA_DIR` from that snapshot, then start
+  the older image. Spend booked since the snapshot is lost from the
+  store, and so are key web search flags set since.
+- OpenAI cache writes are booked at the row's `cache_write_usd_per_mtok`
+  from this release on. With table v7's 1.25×-input values that is 25%
+  more per written token than v0.8.0 booked; quotas and ceilings feel it
+  from the first cache-writing Responses request.
+- Nothing searches until `WEB_SEARCH_ENABLED=true`, a key's flag is on
+  and a row carries a block. v0.8.0 ignores `web_search` blocks, so
+  deploy v0.9.0 first and the table with blocks second; a table with
+  blocks served by v0.8.0 just does not search.
+- Check each Anthropic model's `capabilities.server_tools.web_search.supported`
+  in the Models API before giving its row a block, and that web search
+  is enabled for the organization in the Claude Console.
+
 ## v0.8.0 — 2026-10-14
 
 A deployment that sets neither ceiling variable reserves and books every

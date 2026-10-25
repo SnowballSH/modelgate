@@ -32,7 +32,10 @@ type Config struct {
 	MaxConcurrentBodies                int
 	MaxBodiesPerKey                    int
 	RequestDeadline                    time.Duration
-	Version                            string
+	// WebSearchEnabled is the gateway-wide switch for provider-native web
+	// search; off, every request's web_search_options is dropped.
+	WebSearchEnabled bool
+	Version          string
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -121,6 +124,9 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.RequestDeadline = deadline
 	}
+	if cfg.WebSearchEnabled, err = parseBool(getenv, "WEB_SEARCH_ENABLED"); err != nil {
+		return Config{}, err
+	}
 
 	return cfg, nil
 }
@@ -177,6 +183,20 @@ func withDefault(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+// parseBool reads an optional switch, false when unset, refusing anything
+// strconv.ParseBool does not read as a boolean.
+func parseBool(getenv func(string) string, name string) (bool, error) {
+	raw := getenv(name)
+	if raw == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("config: %s: must be true or false", name)
+	}
+	return v, nil
 }
 
 func parsePositive[T int | int64](getenv func(string) string, name string, dst *T) error {

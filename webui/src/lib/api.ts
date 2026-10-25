@@ -5,6 +5,7 @@ import type {
   KeysResponse,
   ModelsResponse,
   RevokeKeyResponse,
+  SetWebSearchResponse,
   UsageResponse,
 } from "./types";
 
@@ -65,6 +66,20 @@ export function revokeKey(id: string): Promise<RevokeKeyResponse> {
   return request<RevokeKeyResponse>(`api/keys/${encodeURIComponent(id)}/revoke`, {
     method: "POST",
   });
+}
+
+export function setKeyWebSearch(
+  id: string,
+  enabled: boolean,
+): Promise<SetWebSearchResponse> {
+  return request<SetWebSearchResponse>(
+    `api/keys/${encodeURIComponent(id)}/web-search`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ web_search: enabled }),
+    },
+  );
 }
 
 export function listModels(): Promise<ModelsResponse> {

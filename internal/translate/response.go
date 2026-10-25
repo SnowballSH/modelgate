@@ -12,11 +12,14 @@ func FromAnthropic(resp anthro.MessagesResponse, publicModel string, created int
 	var text strings.Builder
 	hasText := false
 	var toolCalls []oai.ToolCall
+	var cited citationIndex
 	for _, block := range resp.Content {
 		switch block.Type {
 		case "text":
 			hasText = true
 			text.WriteString(block.Text)
+			markers, _ := cited.cite(anthropicSources(block.Citations))
+			text.WriteString(markers)
 		case "tool_use":
 			toolCalls = append(toolCalls, oai.ToolCall{
 				ID:   block.ID,
@@ -43,9 +46,10 @@ func FromAnthropic(resp anthro.MessagesResponse, publicModel string, created int
 		Choices: []oai.Choice{{
 			Index: 0,
 			Message: oai.ResponseMessage{
-				Role:      "assistant",
-				Content:   content,
-				ToolCalls: toolCalls,
+				Role:        "assistant",
+				Content:     content,
+				ToolCalls:   toolCalls,
+				Annotations: cited.annotations(),
 			},
 			FinishReason: FinishReason(resp.StopReason),
 		}},
@@ -53,9 +57,12 @@ func FromAnthropic(resp anthro.MessagesResponse, publicModel string, created int
 	}
 }
 
+// FinishReason maps a stop reason. pause_turn, a server-side search loop
+// stopped before the answer was done, reads as length: the answer is
+// unfinished, and modelgate does not continue the turn.
 func FinishReason(stopReason string) string {
 	switch stopReason {
-	case "max_tokens", "model_context_window_exceeded":
+	case "max_tokens", "model_context_window_exceeded", "pause_turn":
 		return "length"
 	case "tool_use":
 		return "tool_calls"
@@ -67,12 +74,16 @@ func FinishReason(stopReason string) string {
 }
 
 func ToStoreUsage(u anthro.Usage) store.Usage {
-	return store.Usage{
+	usage := store.Usage{
 		InputTokens:      u.InputTokens,
 		OutputTokens:     u.OutputTokens,
 		CacheReadTokens:  u.CacheReadInputTokens,
 		CacheWriteTokens: u.CacheCreationInputTokens,
 	}
+	if u.ServerToolUse != nil {
+		usage.WebSearchRequests = max(u.ServerToolUse.WebSearchRequests, 0)
+	}
+	return usage
 }
 
 func OAIUsage(u anthro.Usage) oai.Usage {

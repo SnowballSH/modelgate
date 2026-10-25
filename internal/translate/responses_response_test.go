@@ -1,6 +1,7 @@
 package translate
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/SnowballSH/modelgate/internal/oairesp"
@@ -226,5 +227,43 @@ func TestResponsesOAIUsage(t *testing.T) {
 	}
 	if got.PromptTokensDetails != nil || got.CompletionTokensDetails != nil {
 		t.Errorf("unexpected details: %+v %+v", got.PromptTokensDetails, got.CompletionTokensDetails)
+	}
+}
+
+// OpenAI's prompt-caching guide: cache_write_tokens and cached_tokens are both
+// subsets of input_tokens, so 12000 input with 4000 read and 7000 written
+// leaves 1000 ordinary input tokens.
+func TestResponsesStoreUsageBooksCacheWrites(t *testing.T) {
+	cases := []struct {
+		name string
+		wire string
+		want store.Usage
+	}{
+		{
+			"documented example",
+			`{"input_tokens":12000,"input_tokens_details":{"cached_tokens":4000,"cache_write_tokens":7000},"output_tokens":5,"total_tokens":12005}`,
+			store.Usage{InputTokens: 1000, OutputTokens: 5, CacheReadTokens: 4000, CacheWriteTokens: 7000},
+		},
+		{
+			"writes above the uncached input clamp",
+			`{"input_tokens":100,"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":500},"output_tokens":1}`,
+			store.Usage{InputTokens: 0, OutputTokens: 1, CacheReadTokens: 40, CacheWriteTokens: 60},
+		},
+		{
+			"negative writes clamp",
+			`{"input_tokens":100,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":-3},"output_tokens":1}`,
+			store.Usage{InputTokens: 100, OutputTokens: 1},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var u oairesp.Usage
+			if err := json.Unmarshal([]byte(tc.wire), &u); err != nil {
+				t.Fatal(err)
+			}
+			if got := ResponsesStoreUsage(&u); got != tc.want {
+				t.Errorf("ResponsesStoreUsage = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

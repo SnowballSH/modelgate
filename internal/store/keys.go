@@ -21,9 +21,13 @@ type KeyRecord struct {
 	LastUsedAt   *time.Time
 	CreatedAt    time.Time
 	CreatedBy    string
+	// WebSearch lets the key's requests use provider-native web search.
+	WebSearch bool
 }
 
-const keyColumns = "id, prefix, secret_sha256, label, models, quota_usd, expires_at, revoked_at, revoked_by, last_used_at, created_at, created_by"
+const keyColumns = "id, prefix, secret_sha256, label, models, quota_usd, expires_at, revoked_at, revoked_by, last_used_at, created_at, created_by, web_search"
+
+var ErrKeyNotFound = errors.New("key not found")
 
 func encodeModels(models []string) (*string, error) {
 	if models == nil {
@@ -57,10 +61,10 @@ func (s *Store) InsertKey(ctx context.Context, k KeyRecord) error {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx,
-		"INSERT INTO keys ("+keyColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		"INSERT INTO keys ("+keyColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		k.ID, k.Prefix, k.SecretSHA256, k.Label, models, k.QuotaUSD,
 		encodeTimePtr(k.ExpiresAt), encodeTimePtr(k.RevokedAt), k.RevokedBy,
-		encodeTimePtr(k.LastUsedAt), encodeTime(k.CreatedAt), k.CreatedBy,
+		encodeTimePtr(k.LastUsedAt), encodeTime(k.CreatedAt), k.CreatedBy, k.WebSearch,
 	)
 	if err != nil {
 		return fmt.Errorf("insert key %s: %w", k.ID, err)
@@ -80,7 +84,7 @@ func scanKey(row keyScanner) (KeyRecord, error) {
 	)
 	if err := row.Scan(
 		&k.ID, &k.Prefix, &k.SecretSHA256, &k.Label, &models, &k.QuotaUSD,
-		&expiresAt, &revokedAt, &k.RevokedBy, &lastUsedAt, &createdAt, &k.CreatedBy,
+		&expiresAt, &revokedAt, &k.RevokedBy, &lastUsedAt, &createdAt, &k.CreatedBy, &k.WebSearch,
 	); err != nil {
 		return KeyRecord{}, err
 	}
@@ -149,6 +153,21 @@ func (s *Store) RevokeKey(ctx context.Context, id string, at time.Time, by strin
 	}
 	if n == 0 {
 		return fmt.Errorf("revoke key %s: key not found", id)
+	}
+	return nil
+}
+
+func (s *Store) SetKeyWebSearch(ctx context.Context, id string, enabled bool) error {
+	res, err := s.db.ExecContext(ctx, "UPDATE keys SET web_search = ? WHERE id = ?", enabled, id)
+	if err != nil {
+		return fmt.Errorf("set web search on key %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set web search on key %s: %w", id, err)
+	}
+	if n == 0 {
+		return fmt.Errorf("set web search on key %s: %w", id, ErrKeyNotFound)
 	}
 	return nil
 }

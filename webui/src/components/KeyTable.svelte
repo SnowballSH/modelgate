@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Badge, Button, Panel, Skeleton } from "foundationui/svelte";
+  import { Badge, Button, Panel, Skeleton, Switch } from "foundationui/svelte";
   import { formatTimestamp, formatUsd } from "../lib/format";
   import { keyState, type ApiKey } from "../lib/types";
   import StateBadge from "./StateBadge.svelte";
@@ -8,15 +8,17 @@
     keys,
     loading,
     onrevoke,
+    onwebsearch,
   }: {
     keys: ApiKey[];
     loading: boolean;
     onrevoke: (key: ApiKey) => void;
+    onwebsearch: (key: ApiKey, enabled: boolean) => void;
   } = $props();
 </script>
 
 <Panel tier="raised" padding="none" class="overflow-x-auto">
-  <table class="w-full min-w-[56rem] text-left text-sm">
+  <table class="w-full min-w-[62rem] text-left text-sm">
     <caption class="sr-only">API keys</caption>
     <thead>
       <tr class="border-b border-line text-xs text-ink-secondary uppercase">
@@ -24,6 +26,7 @@
         <th scope="col" class="px-4 py-3 font-medium">Label</th>
         <th scope="col" class="px-4 py-3 font-medium">Models</th>
         <th scope="col" class="px-4 py-3 font-medium">Spend / quota</th>
+        <th scope="col" class="px-4 py-3 font-medium">Web search</th>
         <th scope="col" class="px-4 py-3 font-medium">Last used</th>
         <th scope="col" class="px-4 py-3 font-medium">State</th>
         <th scope="col" class="px-4 py-3 font-medium">Created</th>
@@ -36,14 +39,14 @@
       {#if loading}
         {#each { length: 3 } as _, row (row)}
           <tr class="border-b border-line last:border-b-0">
-            {#each { length: 8 } as _, cell (cell)}
+            {#each { length: 9 } as _, cell (cell)}
               <td class="px-4 py-3"><Skeleton class="h-4 w-full" /></td>
             {/each}
           </tr>
         {/each}
       {:else if keys.length === 0}
         <tr>
-          <td colspan="8" class="px-4 py-8 text-center text-ink-secondary">
+          <td colspan="9" class="px-4 py-8 text-center text-ink-secondary">
             No API keys yet. Create one above.
           </td>
         </tr>
@@ -80,6 +83,19 @@
               <span class="text-ink-secondary">
                 / {key.quota_usd === null ? "no quota" : formatUsd(key.quota_usd)}
               </span>
+            </td>
+            <td class="px-4 py-3">
+              {#if state === "active"}
+                <Switch
+                  checked={key.web_search}
+                  aria-label={`Web search for ${key.label}`}
+                  onCheckedChange={(enabled) => onwebsearch(key, enabled)}
+                />
+              {:else}
+                <span class="text-ink-secondary">
+                  {key.web_search ? "on" : "off"}
+                </span>
+              {/if}
             </td>
             <td class="px-4 py-3 whitespace-nowrap text-ink-secondary">
               {formatTimestamp(key.last_used_at)}

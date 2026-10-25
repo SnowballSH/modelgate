@@ -1,0 +1,1 @@
+{"id":"chatcmpl-upstream","object":"chat.completion","created":1757260800,"model":"gpt-pass-2026","choices":[{"index":0,"message":{"role":"assistant","content":"hi from openai","annotations":[]},"finish_reason":"stop"}],"usage":{"prompt_tokens":200,"completion_tokens":40,"total_tokens":240,"prompt_tokens_details":{"cached_tokens":80}}}

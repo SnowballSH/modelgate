@@ -1,0 +1,18 @@
+upstream /v1/messages
+{"model":"claude-real","max_tokens":500,"system":[{"type":"text","text":"Be brief.","cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"stop_sequences":["END"],"stream":true,"output_config":{"effort":"high"},"metadata":{"user_id":"2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90"},"cache_control":{"type":"ephemeral","ttl":"1h"}}
+status 200
+content-type text/event-stream
+dropped temperature, top_p, seed
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{"content":" world."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"claude-row","choices":[],"usage":{"prompt_tokens":2679,"completion_tokens":15,"total_tokens":2694}}
+
+data: [DONE]
+
+usage {"cache_read":0,"cache_write":0,"cost_usd":"0.011016000","input":2679,"output":15,"requests":1}

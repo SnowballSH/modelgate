@@ -20,6 +20,12 @@ type streamMeter struct {
 	// hiddenOutputCap is the output cap of a call that can bill output its
 	// stream never shows, which a cut stream books in full.
 	hiddenOutputCap int64
+	// search is the row's web search when the request searches. searches
+	// is the billable searches the stream has shown, and searchCalls every
+	// search call, failed ones included: each started another sampling.
+	search      *models.WebSearch
+	searches    int64
+	searchCalls int64
 }
 
 // mayHideOutput reports whether a call can bill output its stream never
@@ -67,6 +73,24 @@ func (m streamMeter) bookable(reported store.Usage) bookedUsage {
 	if booked.inputEstimated {
 		booked.usage.InputTokens = m.prompt.estimatedTokens()
 	}
+	return m.withSearchesSeen(booked)
+}
+
+// withSearchesSeen books a cut search stream's searches, and raises its input
+// to what a loop that sampled once more than it called search could have
+// billed: the provider reports the first sampling's input when the stream
+// starts and the loop's total only at its end.
+func (m streamMeter) withSearchesSeen(booked bookedUsage) bookedUsage {
+	booked.usage.WebSearchRequests = max(booked.usage.WebSearchRequests, m.searches)
+	if m.search == nil || m.searchCalls == 0 {
+		return booked
+	}
+	prompt := booked.usage.PromptTokens()
+	loop := models.SearchLoop{Iterations: m.searchCalls + 1, RereadsOutput: m.search.Loop().RereadsOutput}
+	if extra := loopInput(prompt, m.search.InputTokensPerSearch, booked.usage.OutputTokens, m.searches, loop) - prompt; extra > 0 {
+		booked.usage.InputTokens += extra
+		booked.inputEstimated = true
+	}
 	return booked
 }
 
@@ -74,13 +98,14 @@ func (m streamMeter) bookable(reported store.Usage) bookedUsage {
 // an estimate as one in the log.
 func (h *PublicHandler) bookStreamUsage(ctx context.Context, adm Admission, publicModel string, meter streamMeter, reported store.Usage) {
 	booked := meter.bookable(reported)
-	if !booked.usage.HasTokens() {
+	if !booked.usage.Billable() {
 		return
 	}
 	if booked.estimated {
 		slog.Warn("stream ended before its final usage; booking an estimate",
 			"request_id", requestIDFrom(ctx), "key_id", adm.Key.ID, "model", publicModel,
-			"input_tokens", booked.usage.InputTokens, "output_tokens", booked.usage.OutputTokens)
+			"input_tokens", booked.usage.InputTokens, "output_tokens", booked.usage.OutputTokens,
+			"web_search_requests", booked.usage.WebSearchRequests)
 	}
 	h.recordUsage(ctx, adm, publicModel, booked.usage, booked.inputEstimated)
 }
@@ -104,4 +129,5 @@ func (h *PublicHandler) recordUsage(ctx context.Context, adm Admission, publicMo
 	}
 	_ = h.store.TouchLastUsed(ctx, adm.Key.ID, now)
 	h.metrics.AddTokens(publicModel, usage)
+	h.metrics.AddWebSearches(publicModel, usage.WebSearchRequests)
 }

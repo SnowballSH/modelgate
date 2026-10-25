@@ -1,0 +1,26 @@
+{
+  "id": "resp_68f1a0c2b4e04819b1",
+  "object": "response",
+  "created_at": 1757260910,
+  "status": "completed",
+  "model": "gpt-5.6-luna",
+  "output": [
+    {
+      "type": "message",
+      "id": "msg_68f1a0c2b4e04819b2",
+      "role": "assistant",
+      "status": "completed",
+      "content": [
+        {
+          "type": "refusal",
+          "refusal": "I can't help with that."
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 44,
+    "output_tokens": 12,
+    "total_tokens": 56
+  }
+}

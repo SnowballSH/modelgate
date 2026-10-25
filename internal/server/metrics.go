@@ -24,6 +24,7 @@ type Metrics struct {
 	requests        *prometheus.CounterVec
 	requestDuration *prometheus.HistogramVec
 	tokens          *prometheus.CounterVec
+	webSearches     *prometheus.CounterVec
 	budget          prometheus.Gauge
 	providerErrors  *prometheus.CounterVec
 	bookingFailures prometheus.Counter
@@ -49,6 +50,10 @@ func NewMetrics(budgetUSD float64) *Metrics {
 			Name: "modelgate_tokens_total",
 			Help: "Tokens processed by direction and model.",
 		}, []string{"direction", "model"}),
+		webSearches: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "modelgate_web_searches_total",
+			Help: "Provider-native web searches booked, by model.",
+		}, []string{"model"}),
 		budget: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "modelgate_budget_usd",
 			Help: "Configured monthly budget in USD.",
@@ -79,7 +84,7 @@ func NewMetrics(budgetUSD float64) *Metrics {
 		}, []string{"limit"}),
 	}
 	m.registry.MustRegister(
-		m.requests, m.requestDuration, m.tokens, m.budget,
+		m.requests, m.requestDuration, m.tokens, m.webSearches, m.budget,
 		m.providerErrors, m.bookingFailures, m.inFlight, m.keyCount,
 		m.bodies, m.bodyRefusals,
 	)
@@ -187,6 +192,12 @@ func (m *Metrics) AddTokens(model string, u store.Usage) {
 	m.tokens.WithLabelValues("output", model).Add(float64(u.OutputTokens))
 	m.tokens.WithLabelValues("cache_read", model).Add(float64(u.CacheReadTokens))
 	m.tokens.WithLabelValues("cache_write", model).Add(float64(u.CacheWriteTokens))
+}
+
+func (m *Metrics) AddWebSearches(model string, n int64) {
+	if n > 0 {
+		m.webSearches.WithLabelValues(model).Add(float64(n))
+	}
 }
 
 func (m *Metrics) ProviderError(kind string) {

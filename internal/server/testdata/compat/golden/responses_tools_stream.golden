@@ -1,0 +1,22 @@
+upstream /v1/responses
+{"model":"gpt-real","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather in Paris?"}]},{"role":"assistant","content":"Checking."},{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},{"type":"function_call_output","call_id":"call_1","output":""},{"type":"message","role":"user","content":[{"type":"input_text","text":"thanks"}]}],"tools":[{"type":"function","name":"get_weather","description":"Weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}},"strict":false},{"type":"function","name":"get_time","parameters":{"type":"object"},"strict":false}],"tool_choice":"auto","parallel_tool_calls":false,"reasoning":{"effort":"high"},"max_output_tokens":500,"store":false,"stream":true,"user":"alice","prompt_cache_key":"f605999e6febdb08c140f4d9cba8f37c"}
+status 200
+content-type text/event-stream
+dropped temperature, top_p, seed, stop
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{"role":"assistant","content":"Let me "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{"content":"check."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Paris\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":40},"completion_tokens_details":{"reasoning_tokens":30}}}
+
+data: [DONE]
+
+usage {"cache_read":40,"cache_write":0,"cost_usd":"0.000728000","input":60,"output":50,"requests":1}

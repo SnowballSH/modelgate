@@ -256,3 +256,38 @@ func TestMaxBodiesPerKeyDefaultsToAQuarterOfTheBodies(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadWebSearchEnabled(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want bool
+	}{{"", false}, {"false", false}, {"true", true}, {"0", false}, {"1", true}}
+	for _, tc := range tests {
+		t.Run(tc.raw, func(t *testing.T) {
+			env := validEnv()
+			if tc.raw != "" {
+				env["WEB_SEARCH_ENABLED"] = tc.raw
+			}
+			cfg, err := Load(getenvFrom(env))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.WebSearchEnabled != tc.want {
+				t.Errorf("WebSearchEnabled = %v, want %v", cfg.WebSearchEnabled, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidWebSearchEnabled(t *testing.T) {
+	for _, raw := range []string{"yes", "on", "enabled", " true"} {
+		t.Run(raw, func(t *testing.T) {
+			env := validEnv()
+			env["WEB_SEARCH_ENABLED"] = raw
+			_, err := Load(getenvFrom(env))
+			if err == nil || !strings.Contains(err.Error(), "WEB_SEARCH_ENABLED: must be true or false") {
+				t.Fatalf("Load(%q) error = %v", raw, err)
+			}
+		})
+	}
+}

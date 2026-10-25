@@ -1,6 +1,6 @@
 module github.com/SnowballSH/modelgate
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/openai/openai-go/v3 v3.52.0

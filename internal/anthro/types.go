@@ -2,7 +2,10 @@
 // format that modelgate speaks upstream.
 package anthro
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // MessagesRequest.CacheControl is the request-level automatic breakpoint: the
 // API places it on the last cacheable block and moves it forward as the
@@ -53,18 +56,85 @@ type Message struct {
 	Content []ContentBlock `json:"content"`
 }
 
-// ContentBlock covers the text, image, tool_use, and tool_result block
-// shapes; which fields are set depends on Type.
+// ContentBlock covers the text, image, tool_use, tool_result,
+// server_tool_use and web_search_tool_result block shapes; which fields are
+// set depends on Type. Content is a tool_result's text; a block whose content
+// is not a string, such as a web_search_tool_result's result array or error
+// object, decodes it into ResultContent instead. Citations are the sources a
+// text block cites.
 type ContentBlock struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	Source    *ImageSource    `json:"source,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	IsError   bool            `json:"is_error,omitempty"`
+	Type          string          `json:"type"`
+	Text          string          `json:"text,omitempty"`
+	Source        *ImageSource    `json:"source,omitempty"`
+	ID            string          `json:"id,omitempty"`
+	Name          string          `json:"name,omitempty"`
+	Input         json.RawMessage `json:"input,omitempty"`
+	ToolUseID     string          `json:"tool_use_id,omitempty"`
+	Content       string          `json:"content,omitempty"`
+	IsError       bool            `json:"is_error,omitempty"`
+	Citations     []Citation      `json:"citations,omitempty"`
+	ResultContent json.RawMessage `json:"-"`
+}
+
+func (b *ContentBlock) UnmarshalJSON(data []byte) error {
+	type block ContentBlock
+	var wire struct {
+		block
+		Content json.RawMessage `json:"content"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	*b = ContentBlock(wire.block)
+	if len(wire.Content) == 0 || string(wire.Content) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(wire.Content, &b.Content); err != nil {
+		b.ResultContent = wire.Content
+	}
+	return nil
+}
+
+// Citation is one source a text block cites. Web search citations are
+// web_search_result_location entries carrying the source's URL and title.
+type Citation struct {
+	Type           string `json:"type"`
+	URL            string `json:"url,omitempty"`
+	Title          string `json:"title,omitempty"`
+	CitedText      string `json:"cited_text,omitempty"`
+	EncryptedIndex string `json:"encrypted_index,omitempty"`
+}
+
+// WebSearchResult is a web_search_tool_result's content: the results of a
+// search that ran, or the error code of one that did not.
+type WebSearchResult struct {
+	Results   []WebSearchResultItem
+	ErrorCode string
+}
+
+type WebSearchResultItem struct {
+	Type    string `json:"type"`
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+	PageAge string `json:"page_age,omitempty"`
+}
+
+// DecodeWebSearchResult reads a web_search_tool_result's content, which is a
+// list of results when the search ran and a single error object when it did
+// not.
+func DecodeWebSearchResult(content json.RawMessage) (WebSearchResult, error) {
+	var items []WebSearchResultItem
+	if err := json.Unmarshal(content, &items); err == nil {
+		return WebSearchResult{Results: items}, nil
+	}
+	var failure struct {
+		Type      string `json:"type"`
+		ErrorCode string `json:"error_code"`
+	}
+	if err := json.Unmarshal(content, &failure); err != nil || failure.Type != "web_search_tool_result_error" {
+		return WebSearchResult{}, fmt.Errorf("web_search_tool_result content is neither a result list nor an error: %.80s", content)
+	}
+	return WebSearchResult{ErrorCode: failure.ErrorCode}, nil
 }
 
 // ImageSource.Type is "base64" (with MediaType and Data) or "url" (with URL).
@@ -75,11 +145,25 @@ type ImageSource struct {
 	URL       string `json:"url,omitempty"`
 }
 
+// Tool is a client tool, which carries a name, description and input
+// schema, or a server tool, which carries its Type and that tool's settings.
 type Tool struct {
+	Type         string          `json:"type,omitempty"`
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
-	InputSchema  json.RawMessage `json:"input_schema"`
+	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
 	CacheControl *CacheControl   `json:"cache_control,omitempty"`
+	MaxUses      int             `json:"max_uses,omitempty"`
+	UserLocation *UserLocation   `json:"user_location,omitempty"`
+}
+
+// UserLocation localises a web search; Type is always "approximate".
+type UserLocation struct {
+	Type     string `json:"type"`
+	City     string `json:"city,omitempty"`
+	Region   string `json:"region,omitempty"`
+	Country  string `json:"country,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // ToolChoice type is one of "auto", "any", "tool" (with Name), or "none";
@@ -101,10 +185,16 @@ type MessagesResponse struct {
 }
 
 type Usage struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	InputTokens              int64          `json:"input_tokens"`
+	OutputTokens             int64          `json:"output_tokens"`
+	CacheCreationInputTokens int64          `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64          `json:"cache_read_input_tokens"`
+	ServerToolUse            *ServerToolUse `json:"server_tool_use,omitempty"`
+}
+
+// ServerToolUse counts the server tool calls a response was billed for.
+type ServerToolUse struct {
+	WebSearchRequests int64 `json:"web_search_requests"`
 }
 
 // StreamEvent is one SSE event from a streamed Messages call. Which
@@ -123,11 +213,14 @@ type StreamEvent struct {
 	Error        *APIError         `json:"error,omitempty"`
 }
 
+// StreamDelta.Citation carries a citations_delta's one citation, added to
+// the text block the event indexes.
 type StreamDelta struct {
-	Type        string `json:"type"`
-	Text        string `json:"text,omitempty"`
-	PartialJSON string `json:"partial_json,omitempty"`
-	StopReason  string `json:"stop_reason,omitempty"`
+	Type        string    `json:"type"`
+	Text        string    `json:"text,omitempty"`
+	PartialJSON string    `json:"partial_json,omitempty"`
+	StopReason  string    `json:"stop_reason,omitempty"`
+	Citation    *Citation `json:"citation,omitempty"`
 }
 
 type APIError struct {

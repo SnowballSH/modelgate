@@ -12,6 +12,7 @@ type Request struct {
 	Input             []Item          `json:"input"`
 	Tools             []Tool          `json:"tools,omitempty"`
 	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
+	MaxToolCalls      *int            `json:"max_tool_calls,omitempty"`
 	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
 	Reasoning         *Reasoning      `json:"reasoning,omitempty"`
 	MaxOutputTokens   *int            `json:"max_output_tokens,omitempty"`
@@ -47,7 +48,10 @@ type Item struct {
 	Arguments string        `json:"arguments,omitempty"`
 	Output    *string       `json:"output,omitempty"`
 	Status    string        `json:"status,omitempty"`
-	Text      string        `json:"-"`
+	// Action is what a web_search_call did: a search, an open_page or a
+	// find_in_page.
+	Action json.RawMessage `json:"action,omitempty"`
+	Text   string          `json:"-"`
 }
 
 func (i Item) MarshalJSON() ([]byte, error) {
@@ -65,12 +69,24 @@ func (i Item) MarshalJSON() ([]byte, error) {
 // for assistant parts, and refusal for a declined one, which carries its
 // explanation in Refusal and leaves Text empty. An input_image carries
 // ImageURL (an https URL or a data: URI) and no text key at all.
+// Annotations, on an output_text part, are the sources the text cites.
 type ContentPart struct {
-	Type     string `json:"type"`
-	Text     string `json:"text"`
-	Refusal  string `json:"refusal,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
-	Detail   string `json:"detail,omitempty"`
+	Type        string       `json:"type"`
+	Text        string       `json:"text"`
+	Refusal     string       `json:"refusal,omitempty"`
+	ImageURL    string       `json:"image_url,omitempty"`
+	Detail      string       `json:"detail,omitempty"`
+	Annotations []Annotation `json:"annotations,omitempty"`
+}
+
+// Annotation is an output_text annotation; a url_citation carries the cited
+// page's URL and title and the span of text that cites it.
+type Annotation struct {
+	Type       string `json:"type"`
+	URL        string `json:"url,omitempty"`
+	Title      string `json:"title,omitempty"`
+	StartIndex int    `json:"start_index,omitempty"`
+	EndIndex   int    `json:"end_index,omitempty"`
 }
 
 func (p ContentPart) MarshalJSON() ([]byte, error) {
@@ -85,14 +101,42 @@ func (p ContentPart) MarshalJSON() ([]byte, error) {
 	}{Type: p.Type, ImageURL: p.ImageURL, Detail: p.Detail})
 }
 
-// Tool.Strict carries no omitempty: the Responses API defaults it to true and
-// would refuse a non-strict schema sent without it.
+// Tool is a function tool or the built-in web_search tool. Strict carries no
+// omitempty on a function tool: the Responses API defaults it to true and
+// would refuse a non-strict schema sent without it. The web_search tool
+// carries only its own settings.
 type Tool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-	Strict      bool            `json:"strict"`
+	Type              string          `json:"type"`
+	Name              string          `json:"name"`
+	Description       string          `json:"description,omitempty"`
+	Parameters        json.RawMessage `json:"parameters,omitempty"`
+	Strict            bool            `json:"strict"`
+	SearchContextSize string          `json:"-"`
+	UserLocation      *UserLocation   `json:"-"`
+}
+
+const WebSearchToolType = "web_search"
+
+func (t Tool) MarshalJSON() ([]byte, error) {
+	if t.Type != WebSearchToolType {
+		type tool Tool
+		return json.Marshal(tool(t))
+	}
+	return json.Marshal(struct {
+		Type              string        `json:"type"`
+		SearchContextSize string        `json:"search_context_size,omitempty"`
+		UserLocation      *UserLocation `json:"user_location,omitempty"`
+	}{Type: t.Type, SearchContextSize: t.SearchContextSize, UserLocation: t.UserLocation})
+}
+
+// UserLocation localises a web search; Type is always "approximate", and a
+// location with no other field opts out of the provider's default country.
+type UserLocation struct {
+	Type     string `json:"type"`
+	City     string `json:"city,omitempty"`
+	Region   string `json:"region,omitempty"`
+	Country  string `json:"country,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
 }
 
 type Response struct {
@@ -124,10 +168,11 @@ type Usage struct {
 	TotalTokens         int64               `json:"total_tokens"`
 }
 
-// InputTokenDetails reports cached input tokens; the Responses usage object
-// has no cache-write count to carry.
+// InputTokenDetails splits input_tokens: CachedTokens were read from the
+// prompt cache and CacheWriteTokens written to it; the rest is plain input.
 type InputTokenDetails struct {
-	CachedTokens int64 `json:"cached_tokens"`
+	CachedTokens     int64 `json:"cached_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens,omitempty"`
 }
 
 type OutputTokenDetails struct {
@@ -139,18 +184,21 @@ type OutputTokenDetails struct {
 // response.refusal.delta, response.refusal.done,
 // response.function_call_arguments.delta,
 // response.function_call_arguments.done, response.output_item.done,
-// response.completed, response.incomplete, response.failed, error); the
+// response.completed, response.incomplete, response.failed, error,
+// response.output_text.annotation.added, response.output_text.done); the
 // populated fields follow the type. Refusal carries the completed text on
 // response.refusal.done, whose incremental text arrives in Delta.
 type StreamEvent struct {
-	Type        string    `json:"type"`
-	Response    *Response `json:"response,omitempty"`
-	OutputIndex int       `json:"output_index,omitempty"`
-	Item        *Item     `json:"item,omitempty"`
-	ItemID      string    `json:"item_id,omitempty"`
-	Delta       string    `json:"delta,omitempty"`
-	Arguments   string    `json:"arguments,omitempty"`
-	Refusal     string    `json:"refusal,omitempty"`
-	Code        string    `json:"code,omitempty"`
-	Message     string    `json:"message,omitempty"`
+	Type         string      `json:"type"`
+	Response     *Response   `json:"response,omitempty"`
+	OutputIndex  int         `json:"output_index,omitempty"`
+	ContentIndex int         `json:"content_index,omitempty"`
+	Annotation   *Annotation `json:"annotation,omitempty"`
+	Item         *Item       `json:"item,omitempty"`
+	ItemID       string      `json:"item_id,omitempty"`
+	Delta        string      `json:"delta,omitempty"`
+	Arguments    string      `json:"arguments,omitempty"`
+	Refusal      string      `json:"refusal,omitempty"`
+	Code         string      `json:"code,omitempty"`
+	Message      string      `json:"message,omitempty"`
 }

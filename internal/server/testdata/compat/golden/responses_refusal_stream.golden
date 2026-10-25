@@ -1,0 +1,14 @@
+upstream /v1/responses
+{"model":"gpt-real","instructions":"Be brief.","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],"max_output_tokens":32000,"store":false,"stream":true}
+status 200
+content-type text/event-stream
+dropped 
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{"role":"assistant","refusal":"I can't "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{"refusal":"help with that."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-ID","object":"chat.completion.chunk","created":1787313600,"model":"gpt-row","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+usage {"cache_read":0,"cache_write":0,"cost_usd":"0.000120000","input":12,"output":8,"requests":1}

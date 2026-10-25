@@ -10,11 +10,14 @@ import (
 	"strings"
 )
 
+// Pricing is what a request is billed at: per-token rates, and the fee per
+// provider-native web search, zero on a row that cannot search.
 type Pricing struct {
 	InputUSDPerMTok      float64
 	OutputUSDPerMTok     float64
 	CacheReadUSDPerMTok  float64
 	CacheWriteUSDPerMTok float64
+	USDPerSearch         float64
 }
 
 const (
@@ -67,6 +70,8 @@ type Model struct {
 	DropsSampling    bool
 	ImageInput       bool
 	CacheTTL         string
+	// WebSearch is nil on a row that cannot search.
+	WebSearch *WebSearch
 }
 
 func (m Model) OutputCapDefault(gatewayDefault int) int {
@@ -105,14 +110,15 @@ type modelEntry struct {
 	UpstreamAPI   string `json:"upstream_api"`
 	ProviderModel string `json:"provider_model"`
 	priceEntry
-	ForcedToolChoice *bool       `json:"forced_tool_choice"`
-	ReasoningEfforts []string    `json:"reasoning_efforts"`
-	DefaultMaxTokens *int        `json:"default_max_tokens"`
-	Sampling         *bool       `json:"sampling"`
-	ImageInput       *bool       `json:"image_input"`
-	PriceTiers       []tierEntry `json:"price_tiers"`
-	CacheTTL         *string     `json:"cache_ttl"`
-	MaxInputTokens   *int64      `json:"max_input_tokens"`
+	ForcedToolChoice *bool           `json:"forced_tool_choice"`
+	ReasoningEfforts []string        `json:"reasoning_efforts"`
+	DefaultMaxTokens *int            `json:"default_max_tokens"`
+	Sampling         *bool           `json:"sampling"`
+	ImageInput       *bool           `json:"image_input"`
+	PriceTiers       []tierEntry     `json:"price_tiers"`
+	CacheTTL         *string         `json:"cache_ttl"`
+	MaxInputTokens   *int64          `json:"max_input_tokens"`
+	WebSearch        *webSearchEntry `json:"web_search"`
 }
 
 // LoadTable reads the model pricing table at path. Cost accounting fails
@@ -121,7 +127,9 @@ type modelEntry struct {
 // unusable upstream_api, absent, zero, or negative price field, or empty or
 // unknown reasoning_efforts, or an out-of-range default_max_tokens, unusable
 // price_tiers or cache_ttl, or a non-positive max_input_tokens or one at or
-// below a tier threshold yields an error and no table. An omitted provider
+// below a tier threshold, or a web_search block that is incomplete, out of
+// range or names a tool the row's upstream does not take, yields an error and
+// no table. An omitted provider
 // means anthropic, an omitted upstream_api means chat_completions on openai
 // models and nothing on anthropic ones, and omitted limits refuse nothing.
 // Fields this build does not know are ignored, so a newer table still loads.
@@ -193,6 +201,11 @@ func (e modelEntry) validate() (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
+	search, err := e.WebSearch.validate(provider, upstream)
+	if err != nil {
+		return Model{}, err
+	}
+	pricing, tiers = withSearchFee(pricing, tiers, search)
 	return Model{
 		Provider:         provider,
 		UpstreamAPI:      upstream,
@@ -205,6 +218,7 @@ func (e modelEntry) validate() (Model, error) {
 		DropsSampling:    dropsSampling(e.Sampling, upstream),
 		ImageInput:       e.ImageInput != nil && *e.ImageInput,
 		CacheTTL:         cacheTTL,
+		WebSearch:        search,
 	}, nil
 }
 

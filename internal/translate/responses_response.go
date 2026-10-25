@@ -13,6 +13,7 @@ func FromResponses(resp oairesp.Response, publicModel string, created int64, id 
 	var text, refusal strings.Builder
 	hasText, hasRefusal := false, false
 	var toolCalls []oai.ToolCall
+	var cited citationIndex
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
@@ -21,6 +22,8 @@ func FromResponses(resp oairesp.Response, publicModel string, created int64, id 
 				case "output_text":
 					hasText = true
 					text.WriteString(part.Text)
+					markers, _ := cited.cite(responsesSources(part.Annotations))
+					text.WriteString(markers)
 				case "refusal":
 					hasRefusal = true
 					refusal.WriteString(part.Refusal)
@@ -38,7 +41,7 @@ func FromResponses(resp oairesp.Response, publicModel string, created int64, id 
 		}
 	}
 
-	message := oai.ResponseMessage{Role: "assistant", ToolCalls: toolCalls}
+	message := oai.ResponseMessage{Role: "assistant", ToolCalls: toolCalls, Annotations: cited.annotations()}
 	if hasText || len(toolCalls) == 0 {
 		s := text.String()
 		message.Content = &s
@@ -89,19 +92,30 @@ func responsesFinishReason(status string, incomplete *oairesp.IncompleteDetails,
 	}
 }
 
-// ResponsesStoreUsage clamps the cached count into [0, InputTokens], as
-// storeUsageFromOAI does: a nonconforming upstream must never produce negative
-// input tokens, which would corrupt spend accounting.
+// ResponsesStoreUsage splits input_tokens into plain input, cache reads and
+// cache writes, clamping the read count into [0, InputTokens] and the write
+// count into what the reads leave, as storeUsageFromOAI does: a nonconforming
+// upstream must never produce negative input tokens, which would corrupt
+// spend accounting.
 func ResponsesStoreUsage(u *oairesp.Usage) store.Usage {
 	if u == nil {
 		return store.Usage{}
 	}
 	cached := responsesCachedTokens(u)
+	written := responsesCacheWriteTokens(u, cached)
 	return store.Usage{
-		InputTokens:     u.InputTokens - cached,
-		OutputTokens:    u.OutputTokens,
-		CacheReadTokens: cached,
+		InputTokens:      u.InputTokens - cached - written,
+		OutputTokens:     u.OutputTokens,
+		CacheReadTokens:  cached,
+		CacheWriteTokens: written,
 	}
+}
+
+func responsesCacheWriteTokens(u *oairesp.Usage, cached int64) int64 {
+	if u.InputTokensDetails == nil {
+		return 0
+	}
+	return min(max(u.InputTokensDetails.CacheWriteTokens, 0), u.InputTokens-cached)
 }
 
 func ResponsesOAIUsage(u *oairesp.Usage) oai.Usage {

@@ -16,6 +16,15 @@ type StreamTranslator struct {
 	stopReason  string
 	toolBlocks  map[int]*streamedCall
 	toolCount   int
+	// serverBlocks holds the open server_tool_use blocks, which run on the
+	// provider and never reach the client.
+	serverBlocks map[int]bool
+	// searches counts the web searches requested so far, less those whose
+	// result came back as an error, which the provider does not bill.
+	searches  int64
+	calls     int64
+	citations map[int][]source
+	cited     citationIndex
 }
 
 // streamedCall is one open tool_use block: its position among the response's
@@ -27,10 +36,12 @@ type streamedCall struct {
 
 func NewStreamTranslator(publicModel string, created int64, id string) *StreamTranslator {
 	return &StreamTranslator{
-		publicModel: publicModel,
-		created:     created,
-		id:          id,
-		toolBlocks:  map[int]*streamedCall{},
+		publicModel:  publicModel,
+		created:      created,
+		id:           id,
+		toolBlocks:   map[int]*streamedCall{},
+		serverBlocks: map[int]bool{},
+		citations:    map[int][]source{},
 	}
 }
 
@@ -42,7 +53,25 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		}
 		return []oai.ChatChunk{st.chunk(oai.Delta{Role: "assistant"}, nil)}, nil
 	case "content_block_start":
-		if ev.ContentBlock == nil || ev.ContentBlock.Type != "tool_use" {
+		if ev.ContentBlock == nil {
+			return nil, nil
+		}
+		switch ev.ContentBlock.Type {
+		case "tool_use":
+		case "server_tool_use":
+			st.serverBlocks[ev.Index] = true
+			if ev.ContentBlock.Name == "web_search" {
+				st.searches++
+				st.calls++
+			}
+			return nil, nil
+		case "web_search_tool_result":
+			st.countSearchResult(ev.ContentBlock.ResultContent)
+			return nil, nil
+		case "text":
+			st.addCitations(ev.Index, ev.ContentBlock.Citations)
+			return nil, nil
+		default:
 			return nil, nil
 		}
 		pos := st.toolCount
@@ -62,7 +91,15 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		switch ev.Delta.Type {
 		case "text_delta":
 			return []oai.ChatChunk{st.chunk(oai.Delta{Content: ev.Delta.Text}, nil)}, nil
+		case "citations_delta":
+			if ev.Delta.Citation != nil {
+				st.addCitations(ev.Index, []anthro.Citation{*ev.Delta.Citation})
+			}
+			return nil, nil
 		case "input_json_delta":
+			if st.serverBlocks[ev.Index] {
+				return nil, nil
+			}
 			call, ok := st.toolBlocks[ev.Index]
 			if !ok {
 				return nil, fmt.Errorf("input_json_delta for unknown block index %d", ev.Index)
@@ -75,6 +112,11 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 		}
 		return nil, nil
 	case "content_block_stop":
+		if sources, ok := st.citations[ev.Index]; ok {
+			delete(st.citations, ev.Index)
+			return st.citationChunks(sources), nil
+		}
+		delete(st.serverBlocks, ev.Index)
 		call, ok := st.toolBlocks[ev.Index]
 		if !ok || call.hasArguments {
 			return nil, nil
@@ -95,6 +137,9 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 			}
 			if ev.Usage.CacheReadInputTokens > 0 {
 				st.usage.CacheReadInputTokens = ev.Usage.CacheReadInputTokens
+			}
+			if ev.Usage.ServerToolUse != nil {
+				st.usage.ServerToolUse = ev.Usage.ServerToolUse
 			}
 		}
 		return nil, nil
@@ -117,6 +162,39 @@ func (st *StreamTranslator) Usage() anthro.Usage {
 
 func (st *StreamTranslator) FinishReason() string {
 	return FinishReason(st.stopReason)
+}
+
+// WebSearchesSeen is the number of billable searches the stream has shown so
+// far: what a stream cut before its final usage is booked at.
+func (st *StreamTranslator) WebSearchesSeen() int64 {
+	return st.searches
+}
+
+// WebSearchCallsSeen is the number of searches the model has asked for,
+// failed ones included: each made the loop sample again.
+func (st *StreamTranslator) WebSearchCallsSeen() int64 {
+	return st.calls
+}
+
+func (st *StreamTranslator) countSearchResult(content []byte) {
+	result, err := anthro.DecodeWebSearchResult(content)
+	if err == nil && result.ErrorCode != "" && st.searches > 0 {
+		st.searches--
+	}
+}
+
+func (st *StreamTranslator) addCitations(index int, citations []anthro.Citation) {
+	sources := anthropicSources(citations)
+	if len(sources) > 0 {
+		st.citations[index] = append(st.citations[index], sources...)
+	}
+}
+
+// citationChunks closes a cited text block: its source markers follow the
+// block's text, with an annotation for each source cited here first.
+func (st *StreamTranslator) citationChunks(sources []source) []oai.ChatChunk {
+	markers, added := st.cited.cite(sources)
+	return []oai.ChatChunk{st.chunk(oai.Delta{Content: markers, Annotations: added}, nil)}
 }
 
 // arguments carries argument text for the call at position. A call that took

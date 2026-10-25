@@ -105,6 +105,7 @@ partial startup — and it refuses before any port opens.
 | `MAX_CONCURRENT_BODIES` | Global cap on request bodies being read, parsed and translated before admission; see [Request body memory](#request-body-memory) | `MAX_CONCURRENT_REQUESTS`; a positive integer |
 | `MAX_BODIES_PER_KEY` | Cap on the body slots one key holds at once | A quarter of `MAX_CONCURRENT_BODIES`, rounded up (2 for 8); a positive integer no larger than `MAX_CONCURRENT_BODIES` |
 | `REQUEST_DEADLINE` | Hard per-request deadline, streams included (Go duration) | `10m`; positive |
+| `WEB_SEARCH_ENABLED` | Gateway-wide switch for provider-native [web search](#web-search) | `false`; `true` or `false` (also `1`/`0`, `t`/`f`, `TRUE`/`FALSE`); anything else refuses startup |
 
 Fixed timings: a public request body must arrive within 30 seconds of the
 headers, request headers within 10 seconds, idle keep-alive connections
@@ -134,6 +135,7 @@ request can never run.
 | `price_tiers` | Optional list of `{"above_input_tokens", "input_usd_per_mtok", "output_usd_per_mtok", "cache_read_usd_per_mtok", "cache_write_usd_per_mtok"}`. When a prompt's input tokens — uncached, cache-read and cache-write together — exceed a threshold, the whole request is booked at that tier's four prices. Thresholds are positive and strictly ascending and every price is positive; `[]` refuses the table. |
 | `max_input_tokens` | Optional positive integer, written as a JSON integer (`1e6` and `1000000.0` refuse the table): the largest prompt, in tokens, the provider accepts for the model — its context window, unless the provider documents that it rejects any prompt above a smaller input maximum whatever the output cap. Admission bounds the request's prompt at this figure (see Spend ceilings); booking does not. A value that is not a positive integer, or a `price_tiers` threshold at or above it (a tier no prompt can reach), refuses the table. Absent, the prompt is bounded by the body alone. |
 | `cache_ttl` | Optional, `"5m"` (the default) or `"1h"`, `anthropic` rows only: the lifetime requested on every cache breakpoint. Set `cache_write_usd_per_mtok` to the price of that lifetime (2× input for `"1h"`, 1.25× for `"5m"`). |
+| `web_search` | Optional object, `anthropic` and `responses` rows only: the row's provider-native [web search](#web-search). All four fields are required: `tool` (`"web_search_20250305"` on an Anthropic row, `"web_search"` on a Responses row), `usd_per_search` (positive), `max_uses` (1–10: the most searches one request may run) and `input_tokens_per_search` (1–10,000,000: the input one search may add to every later iteration, used only for the reservation). Absent or `null`, the row cannot search. Anything else refuses the table. |
 
 The limits are checked after the key's model allowlist and before the
 request takes a concurrency slot or reserves any cost, so a refused
@@ -147,12 +149,16 @@ provider. The 400 names the model and the rule:
 
 Fields the running build does not know are ignored, so a table written
 for a newer release loads in an older one (without the newer rules: v0.6.0
-serves a v0.7.0 table with none of the five fields above), and a v0.6.0
-table loads unchanged in v0.7.0.
+serves a v0.7.0 table with none of the five fields above, and v0.8.0
+serves a table with `web_search` blocks as if it had none), and a table
+written for an older release loads unchanged.
 
-OpenAI bills no separate cache write, so for OpenAI models set
-`cache_write_usd_per_mtok` to the input price; the gateway never
-multiplies it by a nonzero count. Each provider referenced by the table
+OpenAI reports cache writes on the Responses API as
+`input_tokens_details.cache_write_tokens`, part of `input_tokens`, and
+bills them at its cache-write rate (1.25× input for the default
+30-minute lifetime), so set `cache_write_usd_per_mtok` to that rate.
+Since v0.9.0 the gateway books them at it; v0.8.0 and earlier booked
+them as plain input. A `chat_completions` row reports no cache writes. Each provider referenced by the table
 must have its credential file configured, and each gets its own circuit
 breaker.
 
@@ -259,6 +265,69 @@ items, so an assistant tool call goes back with its `call_id` alone and
 the model re-reasons after every tool result — reasoning it bills for and
 `max_output_tokens` caps alongside the answer.
 
+## Web search
+
+A client opts a request into provider-native web search with the Chat
+Completions field `web_search_options`; `{}` turns it on. Three switches
+decide what happens to it:
+
+1. `WEB_SEARCH_ENABLED`, gateway-wide, default `false`.
+2. The key's `web_search` flag, default `false`, set through the admin
+   API or UI.
+3. The model row's `web_search` block.
+
+With either of the first two off, the field is dropped unread and named
+in `X-Modelgate-Dropped-Params` (`web_search_options`), and the request
+proceeds without search, so turning search off never breaks a chat
+client that always sends the field. With both on, the field is read
+strictly (an object with only `search_context_size` — `low`, `medium` or
+`high` — and `user_location` — `{"type": "approximate", "approximate":
+{"city", "region", "country", "timezone"}}`, `country` a two-letter
+code), and a request is refused with `400 invalid_request_error` when the
+field is malformed (outcome `web_search_invalid`), when the row has no
+`web_search` block (`model <id> does not support web search`, outcome
+`web_search_unsupported`), or when it also carries `tools` (outcome
+`web_search_with_tools`): search with client tools is refused to keep
+injected page text away from anything that acts. The client's own object
+is never forwarded; the upstream gets the row's tool:
+
+- **Anthropic:** `{"type": "web_search_20250305", "name": "web_search",
+  "max_uses": <row max_uses>, "user_location": ...}`, the basic tool,
+  which runs no code execution and is eligible for zero data retention.
+  `search_context_size` has no Anthropic equivalent and is named
+  dropped (`web_search_options.search_context_size`).
+- **Responses:** `{"type": "web_search", "search_context_size": ...,
+  "user_location": ...}` and a top-level `max_tool_calls` of the row's
+  `max_uses`.
+
+The answer cites its sources the way Open WebUI reads them: each distinct
+`http(s)` source, in first-use order, becomes one `url_citation`
+annotation `{"type": "url_citation", "url_citation": {"url", "title"}}`
+(streamed in `delta.annotations`, and in `message.annotations` otherwise),
+and the cited text is followed by `[n]` markers naming those annotations.
+Anthropic requires citations to be shown when its output is shown to end
+users. Search blocks and search calls themselves never reach the client.
+
+**Cost.** A search costs the row's `usd_per_search` plus its results as
+input tokens, re-read on every later sampling of the provider's
+server-side loop. Admission reserves `max_uses` (U) fees and the input the
+loop can bill for a prompt bound P, A = `input_tokens_per_search` and the
+request's output cap O. Anthropic's loop samples up to 10 times whatever
+U is (past the last search Claude can keep asking and get
+`max_uses_exceeded`); all U searches can run in parallel in the first
+sampling, and every later sampling re-reads their results and what the
+earlier samplings wrote: `10·P + 9·(A·U + O)`. The Responses API's
+`max_tool_calls` stops after U calls, so at most U + 1 samplings:
+`(U+1)·P + U·A·U`. Neither bound is held at `max_input_tokens`, since
+the loop's billed input can exceed the context window. At U = 3,
+A = 25,000 and P = 10,000, a Claude Fable 5.1 row with a 32,000-token
+output cap holds about $22.89. Booking adds `usd_per_search` per search to the reported token
+cost: Anthropic's `usage.server_tool_use.web_search_requests`, and on the
+Responses API, which reports no count, every `web_search_call` output
+item. A stream cut before its final usage books the searches it showed
+and the input that loop could have billed. See
+[docs/compatibility.md](docs/compatibility.md#web-search).
+
 ## Public API
 
 `POST /v1/chat/completions` and `GET /v1/models`, OpenAI's wire format.
@@ -269,7 +338,8 @@ the table's models the key may use.
 
 A request is admitted in this order: the key, the key's rate limit, a
 body slot, the body (size and read deadline), the JSON, the model and
-the key's allowlist, the model's declared limits, the translation for
+the key's allowlist, the model's declared limits, the web search
+switches, the translation for
 the model's upstream, the output bounds, a concurrency slot, a
 reservation of the request's worst-case cost against the key quota, the
 monthly budget and the monthly ceiling of the model's provider, then the
@@ -342,14 +412,16 @@ All routes are on `ADMIN_ADDR`, JSON in and out.
 | Route | Body | Answer |
 |---|---|---|
 | `GET /api/keys` | | `200 {"keys": [key, ...]}` |
-| `POST /api/keys` | `{"label": "ci", "models": ["claude-sonnet-5"], "quota_usd": 10, "expires_at": "2026-12-31T23:59:59Z"}`; only `label` is required | `201 {"key": key, "full_key": "mg_..."}` |
+| `POST /api/keys` | `{"label": "ci", "models": ["claude-sonnet-5"], "quota_usd": 10, "expires_at": "2026-12-31T23:59:59Z", "web_search": false}`; only `label` is required | `201 {"key": key, "full_key": "mg_..."}` |
 | `POST /api/keys/{id}/revoke` | | `200 {"key": key}`; `404` for an unknown id |
+| `POST /api/keys/{id}/web-search` | `{"web_search": true}` or `false`; required | `200 {"key": key}`; `400` without a boolean; `404` for an unknown id |
 | `GET /api/usage` | | `200 {"month", "budget_usd", "spend_usd", "keys": [{"id", "label", "spend_usd", "quota_usd"}], "providers": [{"provider", "spend_usd", "budget_usd"}]}`; `providers` lists, by name, every provider with a ceiling or with spend this month, and `budget_usd` is `null` for one without a ceiling |
 | `GET /api/models` | | `200 {"models": [{"id", "provider"}]}` |
 
 A key object carries `id`, `prefix`, `label`, `models`, `quota_usd`,
 `expires_at`, `revoked_at`, `revoked_by`, `last_used_at`, `created_at`,
-`created_by` and `month_spend_usd`. `models` is the key's allowlist:
+`created_by`, `web_search` (whether the key may use [web search](#web-search),
+default `false`) and `month_spend_usd`. `models` is the key's allowlist:
 `null` (or omitted at creation) allows every model in the table, a list
 allows exactly those models, and an empty list `[]` allows none, so every
 request the key makes is refused. Every listed model must be in the
@@ -455,6 +527,9 @@ a prompt longer than the model's context window, cached tokens included
 (see [docs/compatibility.md](docs/compatibility.md#context-window)).
 Booking is never capped: the provider's reported usage is booked in full.
 
+A request that searches reserves and books more; see
+[Web search](#web-search).
+
 A stream cut before its final usage event is booked from an estimate:
 output of at least one token per four streamed characters, and the whole
 output cap when the call can bill output it never streams (every
@@ -504,9 +579,10 @@ before raising `MAX_BODY_BYTES`.
 
 | Metric | Type | Labels |
 |---|---|---|
-| `modelgate_requests_total` | counter | `outcome` (`success`, `client_aborted`, or an error code from the table above, with `quota_exhausted`/`budget_exhausted`/`provider_budget_exhausted` for the three caps), `model` (`unknown` until admission resolves it) |
+| `modelgate_requests_total` | counter | `outcome` (`success`, `client_aborted`, or an error code from the table above, with `quota_exhausted`/`budget_exhausted`/`provider_budget_exhausted` for the three caps, and `web_search_invalid`/`web_search_unsupported`/`web_search_with_tools` for the web search refusals, which answer `400 invalid_request_error`), `model` (`unknown` until admission resolves it) |
 | `modelgate_request_duration_seconds` | histogram | `model` |
 | `modelgate_tokens_total` | counter | `direction` (`input`, `output`, `cache_read`, `cache_write`), `model` |
+| `modelgate_web_searches_total` | counter | `model`; provider-native web searches booked |
 | `modelgate_provider_errors_total` | counter | `kind` (`auth`, `rate_limited`, `timeout`, `rejected`, `unavailable`) |
 | `modelgate_usage_booking_failures_total` | counter | none; the provider billed spend the quota and budget do not count |
 | `modelgate_in_flight` | gauge | none; provider calls in flight |
@@ -539,6 +615,7 @@ when its outcome is known — pre-admission rejections included:
 | `upstream` | `chat_completions` or `responses` on OpenAI models; empty on Anthropic models and when admission failed |
 | `reasoning_effort` | the canonical effort, empty when the request named none or one outside the vocabulary |
 | `stream` | whether the client asked for a stream |
+| `web_search` | whether the request was sent with provider-native web search |
 | `status` | the outcome, the same label the request metric carries |
 | `duration_ms`, `version` | elapsed time and the build's version |
 

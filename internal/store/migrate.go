@@ -10,8 +10,10 @@ import (
 // PRAGMA user_version. Version 1 is the v0.5.0 schema, written with IF NOT
 // EXISTS so a v0.5.0 database, which never set user_version, is stamped
 // without being altered. Version 3 keys usage by the provider that served
-// it, attributing older rows through temp.upgrade_attribution. Append new
-// steps; never edit an existing one.
+// it, attributing older rows through temp.upgrade_attribution. Version 4
+// adds each key's web search switch, off, and each usage row's count of
+// provider-native web searches, zero. Append new steps; never edit an
+// existing one.
 var migrations = []string{
 	`CREATE TABLE IF NOT EXISTS keys (
 	id TEXT PRIMARY KEY,
@@ -61,9 +63,11 @@ SELECT u.month, u.key_id, u.model, COALESCE(a.provider, ''), u.requests, u.input
 FROM usage u LEFT JOIN temp.upgrade_attribution a ON a.model = u.model;
 DROP TABLE usage;
 ALTER TABLE usage_by_provider RENAME TO usage;`,
+	`ALTER TABLE keys ADD COLUMN web_search INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage ADD COLUMN web_search_requests INTEGER NOT NULL DEFAULT 0;`,
 }
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 
 // migrate brings the schema to SchemaVersion. modelProviders names the
 // provider serving each model now, which is the best record of who served

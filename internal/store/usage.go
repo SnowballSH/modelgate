@@ -5,13 +5,21 @@ import (
 	"fmt"
 )
 
+// Usage is what requests consumed: tokens by kind, the provider-native web
+// searches they ran, and what all of it cost.
 type Usage struct {
 	Requests, InputTokens, OutputTokens, CacheReadTokens, CacheWriteTokens int64
+	WebSearchRequests                                                      int64
 	CostUSD                                                                float64
 }
 
 func (u Usage) HasTokens() bool {
 	return u.InputTokens+u.OutputTokens+u.CacheReadTokens+u.CacheWriteTokens > 0
+}
+
+// Billable reports whether the usage carries anything a provider charges for.
+func (u Usage) Billable() bool {
+	return u.HasTokens() || u.WebSearchRequests > 0
 }
 
 func (u Usage) PromptTokens() int64 {
@@ -20,17 +28,18 @@ func (u Usage) PromptTokens() int64 {
 
 func (s *Store) AddUsage(ctx context.Context, month, keyID, model, provider string, u Usage) error {
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO usage (month, key_id, model, provider, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO usage (month, key_id, model, provider, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, web_search_requests, cost_usd)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (month, key_id, model, provider) DO UPDATE SET
 	requests = requests + excluded.requests,
 	input_tokens = input_tokens + excluded.input_tokens,
 	output_tokens = output_tokens + excluded.output_tokens,
 	cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,
 	cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,
+	web_search_requests = web_search_requests + excluded.web_search_requests,
 	cost_usd = cost_usd + excluded.cost_usd`,
 		month, keyID, model, provider,
-		u.Requests, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.CostUSD,
+		u.Requests, u.InputTokens, u.OutputTokens, u.CacheReadTokens, u.CacheWriteTokens, u.WebSearchRequests, u.CostUSD,
 	)
 	if err != nil {
 		return fmt.Errorf("add usage %s/%s/%s/%s: %w", month, keyID, model, provider, err)
@@ -62,7 +71,7 @@ func (s *Store) MonthSpendByKey(ctx context.Context, month, keyID string) (float
 
 func (s *Store) MonthUsage(ctx context.Context, month string) (map[string]Usage, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT key_id, SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(cost_usd)
+SELECT key_id, SUM(requests), SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens), SUM(web_search_requests), SUM(cost_usd)
 FROM usage WHERE month = ? GROUP BY key_id`, month)
 	if err != nil {
 		return nil, fmt.Errorf("month usage %s: %w", month, err)
@@ -72,7 +81,7 @@ FROM usage WHERE month = ? GROUP BY key_id`, month)
 	for rows.Next() {
 		var keyID string
 		var u Usage
-		if err := rows.Scan(&keyID, &u.Requests, &u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens, &u.CostUSD); err != nil {
+		if err := rows.Scan(&keyID, &u.Requests, &u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens, &u.WebSearchRequests, &u.CostUSD); err != nil {
 			return nil, fmt.Errorf("month usage %s: %w", month, err)
 		}
 		out[keyID] = u

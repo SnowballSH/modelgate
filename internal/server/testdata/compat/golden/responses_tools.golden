@@ -1,0 +1,7 @@
+upstream /v1/responses
+{"model":"gpt-real","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather in Paris?"}]},{"role":"assistant","content":"Checking."},{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"Paris\"}"},{"type":"function_call_output","call_id":"call_1","output":""},{"type":"message","role":"user","content":[{"type":"input_text","text":"thanks"}]}],"tools":[{"type":"function","name":"get_weather","description":"Weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}},"strict":false},{"type":"function","name":"get_time","parameters":{"type":"object"},"strict":false}],"tool_choice":"auto","parallel_tool_calls":false,"max_output_tokens":32000,"store":false}
+status 200
+content-type application/json
+dropped 
+{"id":"chatcmpl-ID","object":"chat.completion","created":1787313600,"model":"gpt-row","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_abc","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":1204,"completion_tokens":412,"total_tokens":1616,"prompt_tokens_details":{"cached_tokens":896},"completion_tokens_details":{"reasoning_tokens":320}}}
+usage {"cache_read":896,"cache_write":0,"cost_usd":"0.005739200","input":308,"output":412,"requests":1}

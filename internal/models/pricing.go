@@ -23,6 +23,7 @@ func (m Model) WorstCasePricing() Pricing {
 			OutputUSDPerMTok:     max(worst.OutputUSDPerMTok, tier.Pricing.OutputUSDPerMTok),
 			CacheReadUSDPerMTok:  max(worst.CacheReadUSDPerMTok, tier.Pricing.CacheReadUSDPerMTok),
 			CacheWriteUSDPerMTok: max(worst.CacheWriteUSDPerMTok, tier.Pricing.CacheWriteUSDPerMTok),
+			USDPerSearch:         max(worst.USDPerSearch, tier.Pricing.USDPerSearch),
 		}
 	}
 	return worst

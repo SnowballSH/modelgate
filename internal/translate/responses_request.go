@@ -16,6 +16,9 @@ type ResponsesOptions struct {
 	DropSampling     bool
 	ImageInput       bool
 	PromptCacheKey   string
+	// WebSearch, when set, adds the built-in web_search tool and caps the
+	// response's built-in tool calls at its MaxUses.
+	WebSearch *WebSearchTool
 }
 
 // ToResponses translates for a reasoning model, which accepts only the
@@ -65,6 +68,10 @@ func ToResponsesWith(req oai.ChatRequest, opts ResponsesOptions) (oairesp.Reques
 		return oairesp.Request{}, err
 	}
 	out.Tools = tools
+	if opts.WebSearch != nil {
+		out.Tools = append(out.Tools, opts.WebSearch.responsesTool())
+		out.MaxToolCalls = &opts.WebSearch.MaxUses
+	}
 
 	choice, err := responsesToolChoice(req.ToolChoice)
 	if err != nil {

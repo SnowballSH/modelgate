@@ -15,7 +15,11 @@ type dropRules struct {
 }
 
 func (o AnthropicOptions) Dropped(req oai.ChatRequest) []string {
-	return droppedParams(req, dropRules{sampling: o.dropsSampling(req), unsupported: true})
+	dropped := droppedParams(req, dropRules{sampling: o.dropsSampling(req), unsupported: true})
+	if o.WebSearch != nil && o.WebSearch.Options.SearchContextSize != "" {
+		dropped = append(dropped, droppedSearchContextSize)
+	}
+	return dropped
 }
 
 func (o ResponsesOptions) Dropped(req oai.ChatRequest) []string {

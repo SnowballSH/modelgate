@@ -19,6 +19,7 @@
   let selectedModels = $state<string[]>([]);
   let quota = $state("");
   let expires = $state("");
+  let webSearch = $state(false);
   let labelInvalid = $state(false);
   let modelsInvalid = $state(false);
 
@@ -36,7 +37,7 @@
     modelsInvalid = !allModels && selectedModels.length === 0;
     if (labelInvalid || modelsInvalid) return;
 
-    const body: CreateKeyRequest = { label: trimmedLabel };
+    const body: CreateKeyRequest = { label: trimmedLabel, web_search: webSearch };
     if (!allModels) body.models = selectedModels;
     const quotaValue = Number.parseFloat(quota);
     if (quota.trim() !== "" && Number.isFinite(quotaValue) && quotaValue > 0) {
@@ -53,6 +54,7 @@
       selectedModels = [];
       quota = "";
       expires = "";
+      webSearch = false;
     }
   }
 </script>
@@ -172,6 +174,23 @@
           bind:value={expires}
         />
       </div>
+    </div>
+    <div class="flex flex-col gap-1">
+      <div class="flex items-center gap-2">
+        <Switch
+          id="create-web-search"
+          bind:checked={webSearch}
+          aria-describedby="create-web-search-hint"
+        />
+        <label for="create-web-search" class="text-sm text-ink">
+          Web search
+        </label>
+      </div>
+      <p id="create-web-search-hint" class="text-xs text-ink-secondary">
+        Lets the key's requests run provider-native web search on models that
+        support it, while the gateway's WEB_SEARCH_ENABLED is on. Each search
+        is billed to the key.
+      </p>
     </div>
     <div class="flex items-center gap-3">
       <Button type="submit" disabled={submitting}>Create key</Button>
