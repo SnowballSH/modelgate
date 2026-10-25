@@ -221,6 +221,9 @@ func TestStreamTranslatorSwallowsSearchAndCitesSources(t *testing.T) {
 	if got := st.WebSearchesSeen(); got != 1 {
 		t.Errorf("searches seen = %d, want 1: the second came back as an unbilled error", got)
 	}
+	if got := st.WebSearchCallsSeen(); got != 2 {
+		t.Errorf("search calls seen = %d, want 2: the failed one still made the loop sample again", got)
+	}
 }
 
 func TestStreamTranslatorCountsSearchesBeforeTheirResults(t *testing.T) {

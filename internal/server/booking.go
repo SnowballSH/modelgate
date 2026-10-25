@@ -20,10 +20,12 @@ type streamMeter struct {
 	// hiddenOutputCap is the output cap of a call that can bill output its
 	// stream never shows, which a cut stream books in full.
 	hiddenOutputCap int64
-	// searches is the web searches the stream has shown; searchAllowance is
-	// the input one search adds to every later iteration of the loop.
-	searches        int64
-	searchAllowance int64
+	// search is the row's web search when the request searches. searches
+	// is the billable searches the stream has shown, and searchCalls every
+	// search call, failed ones included: each started another sampling.
+	search      *models.WebSearch
+	searches    int64
+	searchCalls int64
 }
 
 // mayHideOutput reports whether a call can bill output its stream never
@@ -75,16 +77,17 @@ func (m streamMeter) bookable(reported store.Usage) bookedUsage {
 }
 
 // withSearchesSeen books a cut search stream's searches, and raises its input
-// to what a loop that ran them billed: the provider reports the first
-// iteration's input when the stream starts and the loop's total only at its
-// end.
+// to what a loop that sampled once more than it called search could have
+// billed: the provider reports the first sampling's input when the stream
+// starts and the loop's total only at its end.
 func (m streamMeter) withSearchesSeen(booked bookedUsage) bookedUsage {
 	booked.usage.WebSearchRequests = max(booked.usage.WebSearchRequests, m.searches)
-	if m.searches == 0 {
+	if m.search == nil || m.searchCalls == 0 {
 		return booked
 	}
 	prompt := booked.usage.PromptTokens()
-	if extra := searchLoopInput(prompt, m.searches, m.searchAllowance) - prompt; extra > 0 {
+	loop := models.SearchLoop{Iterations: m.searchCalls + 1, RereadsOutput: m.search.Loop().RereadsOutput}
+	if extra := loopInput(prompt, m.search.InputTokensPerSearch, booked.usage.OutputTokens, m.searches, loop) - prompt; extra > 0 {
 		booked.usage.InputTokens += extra
 		booked.inputEstimated = true
 	}

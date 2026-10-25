@@ -81,6 +81,31 @@ func (e *webSearchEntry) validate(provider, upstream string) (*WebSearch, error)
 	}, nil
 }
 
+// AnthropicServerLoopIterations is Anthropic's documented limit on the
+// server-side sampling loop of one request: past it the turn stops with
+// pause_turn. max_uses does not shorten the loop: past the last search,
+// Claude can keep asking and get max_uses_exceeded back.
+const AnthropicServerLoopIterations = 10
+
+// SearchLoop bounds a searching request's provider-side loop: how many
+// times the model may be sampled, and whether each sampling re-reads, as
+// input, the output the earlier samplings wrote.
+type SearchLoop struct {
+	Iterations    int64
+	RereadsOutput bool
+}
+
+// Loop is the row's loop bound. Anthropic's loop runs up to its iteration
+// limit and re-reads earlier output; the Responses API's max_tool_calls
+// stops the model after max_uses built-in calls, one sampling each, plus
+// the answer.
+func (w WebSearch) Loop() SearchLoop {
+	if w.Tool == AnthropicWebSearchTool {
+		return SearchLoop{Iterations: AnthropicServerLoopIterations, RereadsOutput: true}
+	}
+	return SearchLoop{Iterations: int64(w.MaxUses) + 1}
+}
+
 // withSearchFee prices a search into the row's base price and every tier, so
 // whichever tier a request is booked at carries the fee.
 func withSearchFee(pricing Pricing, tiers []PriceTier, search *WebSearch) (Pricing, []PriceTier) {

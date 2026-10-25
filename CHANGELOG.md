@@ -30,8 +30,11 @@ first start.
   (`delta.annotations` in a stream, `message.annotations` otherwise),
   one per distinct `http(s)` source in first-use order, with `[n]`
   markers after the cited text.
-- Searches are reserved (`max_uses` fees, and `(U+1)·P + A·U(U+1)/2`
-  input tokens, not held at `max_input_tokens`) and booked (the
+- Searches are reserved (`max_uses` fees, and the input the provider's
+  loop can bill, not held at `max_input_tokens`: on Anthropic, whose
+  loop samples up to 10 times, `10·P + A·Σ_{k=0..9} min(k, U) + 9·O`; on
+  the Responses API, stopped after U calls, `(U+1)·P + A·U(U+1)/2`) and
+  booked (the
   provider's reported usage plus `usd_per_search` per search: Anthropic's
   `server_tool_use.web_search_requests`, every Responses
   `web_search_call` item). A cut stream books the searches it showed.

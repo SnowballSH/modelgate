@@ -346,10 +346,7 @@ type admittedCall struct {
 // meter starts the tally for a stream whose upstream request caps output
 // at outputCap tokens.
 func (c admittedCall) meter(outputCap int) streamMeter {
-	m := streamMeter{prompt: c.prompt}
-	if c.search != nil {
-		m.searchAllowance = c.search.InputTokensPerSearch
-	}
+	m := streamMeter{prompt: c.prompt, search: c.search}
 	if c.hidesOutput {
 		m.hiddenOutputCap = int64(outputCap)
 	}
@@ -513,7 +510,7 @@ func (h *PublicHandler) streamChat(ctx context.Context, call admittedCall, areq 
 				meter.finalUsage = true
 			}
 			chunks, err := st.Next(ev)
-			meter.searches = st.WebSearchesSeen()
+			meter.searches, meter.searchCalls = st.WebSearchesSeen(), st.WebSearchCallsSeen()
 			if err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 			}
@@ -600,7 +597,7 @@ func (h *PublicHandler) streamResponses(ctx context.Context, call admittedCall, 
 				meter.finalUsage = true
 			}
 			chunks, err := st.Next(ev)
-			meter.searches = st.WebSearchesSeen()
+			meter.searches, meter.searchCalls = st.WebSearchesSeen(), st.WebSearchCallsSeen()
 			if err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 			}

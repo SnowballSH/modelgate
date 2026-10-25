@@ -309,12 +309,17 @@ Anthropic requires citations to be shown when its output is shown to end
 users. Search blocks and search calls themselves never reach the client.
 
 **Cost.** A search costs the row's `usd_per_search` plus its results as
-input tokens, re-read on every later iteration of the provider's
-server-side loop. Admission reserves `max_uses` searches and, for a
-prompt bound P, `(U+1)·P + A·U(U+1)/2` input tokens with U = `max_uses`
-and A = `input_tokens_per_search`; this bound is not held at
-`max_input_tokens`, since the loop's billed input can exceed the context
-window. Booking adds `usd_per_search` per search to the reported token
+input tokens, re-read on every later sampling of the provider's
+server-side loop. Admission reserves `max_uses` (U) fees and the input the
+loop can bill for a prompt bound P, A = `input_tokens_per_search` and the
+request's output cap O. Anthropic's loop samples up to 10 times whatever
+U is (past the last search Claude can keep asking and get
+`max_uses_exceeded`), and each sampling re-reads what the earlier ones
+wrote: `10·P + A·Σ_{k=0..9} min(k, U) + 9·O`. The Responses API's
+`max_tool_calls` stops after U calls: `(U+1)·P + A·U(U+1)/2`. Neither
+bound is held at `max_input_tokens`, since the loop's billed input can
+exceed the context window. At U = 3, A = 25,000 and P = 10,000, a Claude
+Fable 5.1 row with a 32,000-token output cap holds about $21.39. Booking adds `usd_per_search` per search to the reported token
 cost: Anthropic's `usage.server_tool_use.web_search_requests`, and on the
 Responses API, which reports no count, every `web_search_call` output
 item. A stream cut before its final usage books the searches it showed

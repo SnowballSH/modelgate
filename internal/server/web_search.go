@@ -64,26 +64,40 @@ func planWebSearch(enabled bool, key store.KeyRecord, publicID string, model mod
 	}, req, nil
 }
 
-// withWebSearch bounds a searching request. The provider's server-side loop
-// bills the whole prompt again on every iteration, and each search adds its
-// results to every later one, so U searches bill at most
-// (U+1)·P + A·U(U+1)/2 input tokens for a prompt of P and an allowance of A
-// per search, and U fees. The loop's input is not bounded by the context
-// window, so neither is this; P is, since the provider refuses a longer
-// prompt.
+// withWebSearch bounds a searching request: its row's fee for every search
+// it may run, and the input its provider's loop may bill (see loopInput),
+// for a prompt of the demand's input bound and output of the demand's
+// output bound. The loop's input is not held at the context window, since
+// every sampling bills it again; the prompt is, since the provider refuses a
+// longer one.
 func withWebSearch(d accounting.Demand, search *models.WebSearch) accounting.Demand {
 	if search == nil {
 		return d
 	}
 	uses := int64(search.MaxUses)
-	d.InputTokens = (uses+1)*d.InputTokens + search.InputTokensPerSearch*uses*(uses+1)/2
+	loop := search.Loop()
+	d.InputTokens = loopInput(d.InputTokens, search.InputTokensPerSearch, d.OutputTokens, uses, loop)
 	d.WebSearches = uses
 	return d
 }
 
-// searchLoopInput estimates the input a search loop billed by the time it
-// had run searches searches on a prompt of prompt tokens, on the same model
-// withWebSearch reserves by.
-func searchLoopInput(prompt, searches, allowance int64) int64 {
-	return (searches+1)*prompt + allowance*searches*(searches+1)/2
+// loopInput bounds the input a loop of loop.Iterations samplings bills. The
+// k-th sampling (from 0) reads the prompt, the results of the searches run
+// before it, at most uses of them at allowance tokens each, and, on a loop
+// that re-reads output, what the earlier samplings wrote, at most output in
+// all:
+//
+//	Σ_k (prompt + allowance·min(k, uses)) + (iterations−1)·output
+//
+// Both the reservation and a cut stream's estimate use it.
+func loopInput(prompt, allowance, output, uses int64, loop models.SearchLoop) int64 {
+	var results int64
+	for k := range loop.Iterations {
+		results += min(k, uses)
+	}
+	input := loop.Iterations*prompt + allowance*results
+	if loop.RereadsOutput && loop.Iterations > 1 {
+		input += (loop.Iterations - 1) * output
+	}
+	return input
 }

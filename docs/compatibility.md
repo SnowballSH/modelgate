@@ -359,13 +359,23 @@ Anthropic does not bill a search that ended in an error. The row's
   action or status, because the usage object carries no count and OpenAI
   documents no rule.
 
-The reservation holds U fees and `(U+1)·P + A·U(U+1)/2` input tokens at
-the dearest input-side rate, P being the request's usual prompt bound
-(held at `max_input_tokens`) and A the row's `input_tokens_per_search`:
-the prompt read once more after each of U searches, and each search's
-results on every later read. The total is not held at
-`max_input_tokens`. The output side is unchanged, on the assumption that
-the output cap bounds the whole turn. Booking prices the reported usage
+The reservation holds U fees and, at the dearest input-side rate, the
+input the provider's loop can bill. P is the request's usual prompt
+bound (held at `max_input_tokens`), A the row's
+`input_tokens_per_search` and O the request's output cap:
+
+| Upstream | Samplings | Input bound |
+|---|---|---|
+| Anthropic | up to 10, Anthropic's documented server-loop limit, whatever U is: past the last search Claude can keep asking and get `max_uses_exceeded` back | `10·P + A·Σ_{k=0..9} min(k, U) + 9·O`: each sampling reads the prompt, the results of the searches before it, and what the earlier samplings wrote |
+| Responses | U + 1: `max_tool_calls` stops built-in calls after U | `(U+1)·P + A·U(U+1)/2` |
+
+The total is not held at `max_input_tokens`. The output side is
+unchanged. Unconfirmed, and assumed: that `max_tokens` (or
+`max_output_tokens`) bounds the whole turn's output across the loop
+rather than each sampling — if it bounds each sampling, output and the
+re-read term can each reach ten times the cap; that a failed search's
+error result adds no material input; and that the Responses loop
+re-reads no billed output of its own. Booking prices the reported usage
 by the tier the reported total input reaches, which for a long search
 loop can be a dearer tier than a single read of the prompt would. A
 stream cut before its final usage books the searches it showed

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/SnowballSH/modelgate/internal/accounting"
 	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
 	"github.com/SnowballSH/modelgate/internal/store"
@@ -53,5 +54,33 @@ func TestPassthroughRequestNeverCarriesTheRawField(t *testing.T) {
 		if up.WebSearchOptions != nil || strings.Contains(string(body), "web_search_options") {
 			t.Errorf("passthrough of %s sends %s", raw, body)
 		}
+	}
+}
+
+// The Anthropic server loop may sample up to ten times, whatever max_uses
+// says: past the last search, Claude can keep asking and get
+// max_uses_exceeded back, and every sampling re-reads the prompt, the
+// results so far and the output the earlier samplings wrote.
+func TestSearchDemandBoundsTheProvidersLoop(t *testing.T) {
+	base := accounting.Demand{InputTokens: 10_000, OutputTokens: 32_000}
+	anthropic := &models.WebSearch{Tool: models.AnthropicWebSearchTool, USDPerSearch: 0.01, MaxUses: 3, InputTokensPerSearch: 25_000}
+	responses := &models.WebSearch{Tool: models.ResponsesWebSearchTool, USDPerSearch: 0.01, MaxUses: 3, InputTokensPerSearch: 25_000}
+	tests := []struct {
+		name   string
+		search *models.WebSearch
+		want   accounting.Demand
+	}{
+		{"no search", nil, base},
+		// 10·P + A·(0+1+2+3·7) + 9·O
+		{"anthropic", anthropic, accounting.Demand{InputTokens: 100_000 + 25_000*24 + 9*32_000, OutputTokens: 32_000, WebSearches: 3}},
+		// (U+1)·P + A·U(U+1)/2
+		{"responses", responses, accounting.Demand{InputTokens: 40_000 + 25_000*6, OutputTokens: 32_000, WebSearches: 3}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := withWebSearch(base, tc.search); got != tc.want {
+				t.Errorf("withWebSearch = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

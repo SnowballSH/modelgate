@@ -22,6 +22,7 @@ type StreamTranslator struct {
 	// searches counts the web searches requested so far, less those whose
 	// result came back as an error, which the provider does not bill.
 	searches  int64
+	calls     int64
 	citations map[int][]source
 	cited     citationIndex
 }
@@ -61,6 +62,7 @@ func (st *StreamTranslator) Next(ev anthro.StreamEvent) ([]oai.ChatChunk, error)
 			st.serverBlocks[ev.Index] = true
 			if ev.ContentBlock.Name == "web_search" {
 				st.searches++
+				st.calls++
 			}
 			return nil, nil
 		case "web_search_tool_result":
@@ -166,6 +168,12 @@ func (st *StreamTranslator) FinishReason() string {
 // far: what a stream cut before its final usage is booked at.
 func (st *StreamTranslator) WebSearchesSeen() int64 {
 	return st.searches
+}
+
+// WebSearchCallsSeen is the number of searches the model has asked for,
+// failed ones included: each made the loop sample again.
+func (st *StreamTranslator) WebSearchCallsSeen() int64 {
+	return st.calls
 }
 
 func (st *StreamTranslator) countSearchResult(content []byte) {

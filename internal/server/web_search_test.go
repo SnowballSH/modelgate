@@ -320,8 +320,9 @@ func TestSearchIsBookedWithItsFee(t *testing.T) {
 	}
 }
 
-// A stream cut before its final usage still bills the searches it ran, and
-// each search re-reads its results on every later iteration of the loop.
+// A stream cut before its final usage still bills the searches it ran: the
+// second sampling re-read the prompt, the search's results and the one
+// output token the first sampling had reported.
 func TestCutSearchStreamBooksTheSearchesSeen(t *testing.T) {
 	events := []string{
 		`{"type":"message_start","message":{"type":"message","role":"assistant","usage":{"input_tokens":1000,"output_tokens":1}}}`,
@@ -345,7 +346,7 @@ func TestCutSearchStreamBooksTheSearchesSeen(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := usage[id]
-	wantInput := int64(2*1000 + 25_000)
+	wantInput := int64(2*1000 + 25_000 + 1)
 	if got.WebSearchRequests != 1 || got.InputTokens != wantInput {
 		t.Errorf("cut stream booked %+v; want 1 search and %d input tokens", got, wantInput)
 	}
@@ -379,7 +380,7 @@ func TestSearchReservationCoversTheWholeLoop(t *testing.T) {
 			prompt := float64(len(body) + promptOverheadTokens)
 			input := prompt
 			if tc.searches > 0 {
-				input = 4*prompt + 25_000*6
+				input = 10*prompt + 25_000*24 + 9*4096
 			}
 			want := (input*8+4096*20)/1e6 + float64(tc.searches)*0.01
 			if got := env.acct.Reserved(); math.Abs(got-want) > 1e-12 {

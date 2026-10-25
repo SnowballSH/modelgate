@@ -138,6 +138,11 @@ func (st *ResponsesStreamTranslator) WebSearchesSeen() int64 {
 	return st.searchesSeen
 }
 
+// WebSearchCallsSeen equals WebSearchesSeen: every call is counted as billed.
+func (st *ResponsesStreamTranslator) WebSearchCallsSeen() int64 {
+	return st.searchesSeen
+}
+
 // WebSearches is the count to book: the terminal response's web_search_call
 // items once it arrived with its output, otherwise the items seen.
 func (st *ResponsesStreamTranslator) WebSearches() int64 {
