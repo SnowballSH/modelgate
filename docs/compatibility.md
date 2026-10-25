@@ -376,8 +376,9 @@ samplings, and the billable searches it showed as U.
 The total is not held at `max_input_tokens`. The output side is
 unchanged. Unconfirmed, and assumed: that `max_tokens` (or
 `max_output_tokens`) bounds the whole turn's output across the loop
-rather than each sampling — if it bounds each sampling, output and the
-re-read term can each reach ten times the cap; that a failed search's
+rather than each sampling — if it bounds each sampling, output can
+reach ten times the cap and the output re-read term 45 times it (the
+sum of the nine earlier samplings' outputs over the ten); that a failed search's
 error result adds no material input; and that the Responses loop
 re-reads no billed output of its own. Booking prices the reported usage
 by the tier the reported total input reaches, which for a long search

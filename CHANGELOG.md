@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.9.0 — unreleased
+## v0.9.0 — 2026-10-25
 
 A request without `web_search_options` is translated, reserved, answered
 and booked exactly as v0.8.0 did, on every upstream (pinned by golden
