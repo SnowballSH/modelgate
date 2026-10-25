@@ -85,7 +85,7 @@ func TestFinishReason(t *testing.T) {
 		"max_tokens":    "length",
 		"tool_use":      "tool_calls",
 		"":              "stop",
-		"pause_turn":    "stop",
+		"pause_turn":    "length",
 		"refusal":       "content_filter",
 
 		"model_context_window_exceeded": "length",

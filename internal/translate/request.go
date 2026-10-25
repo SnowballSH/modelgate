@@ -77,6 +77,9 @@ type AnthropicOptions struct {
 	DropSampling         bool
 	ImageInput           bool
 	CacheTTL             string
+	// WebSearch, when set, adds the server search tool after the client's
+	// tools.
+	WebSearch *WebSearchTool
 }
 
 // Models that accept output_config.effort reject any temperature other than
@@ -127,6 +130,9 @@ func ToAnthropicWith(req oai.ChatRequest, opts AnthropicOptions) (anthro.Message
 		return anthro.MessagesRequest{}, err
 	}
 	out.Tools = tools
+	if opts.WebSearch != nil {
+		out.Tools = append(out.Tools, opts.WebSearch.anthropicTool())
+	}
 
 	choice, err := parseToolChoice(req.ToolChoice)
 	if err != nil {
