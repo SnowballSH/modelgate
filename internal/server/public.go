@@ -54,6 +54,7 @@ type PublicHandler struct {
 	maxBodyBytes     int64
 	bodyReadTimeout  time.Duration
 	requestDeadline  time.Duration
+	webSearch        bool
 	version          string
 	now              func() time.Time
 }
@@ -70,7 +71,10 @@ type PublicConfig struct {
 	// allows a quarter of MaxConcurrentBodies, rounded up.
 	MaxBodiesPerKey int
 	RequestDeadline time.Duration
-	Version         string
+	// WebSearchEnabled is the gateway-wide switch for provider-native web
+	// search.
+	WebSearchEnabled bool
+	Version          string
 }
 
 const (
@@ -101,6 +105,7 @@ func NewPublicHandler(g *Guards, table *models.Table, acct *accounting.Accountan
 		maxBodyBytes:     cfg.MaxBodyBytes,
 		bodyReadTimeout:  cfg.BodyReadTimeout,
 		requestDeadline:  cfg.RequestDeadline,
+		webSearch:        cfg.WebSearchEnabled,
 		version:          cfg.Version,
 		now:              now,
 	}
@@ -144,6 +149,7 @@ type requestRecord struct {
 	Upstream        string
 	ReasoningEffort string
 	Stream          bool
+	WebSearch       bool
 }
 
 // callUpstream runs one provider call inside the in-flight gauge and the
@@ -181,7 +187,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		h.metrics.ObserveRequest(outcome, record.Model, elapsed.Seconds())
 		slog.Info("request", "request_id", requestIDFrom(r.Context()), "key_id", record.KeyID,
 			"model", record.Model, "upstream", record.Upstream, "reasoning_effort", record.ReasoningEffort,
-			"stream", record.Stream, "status", outcome, "duration_ms", elapsed.Milliseconds(),
+			"stream", record.Stream, "web_search", record.WebSearch, "status", outcome, "duration_ms", elapsed.Milliseconds(),
 			"version", h.version)
 	}
 	fail := func(code, message string) {
@@ -245,10 +251,22 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		failResolved(violation)
 		return
 	}
-	plan, err := h.prepare(req, model, key.ID)
+	search, searchRefusal := planWebSearch(h.webSearch, key, req.Model, model, req)
+	if searchRefusal != nil {
+		record = resolved
+		observe(searchRefusal.outcome)
+		writeError(w, CodeInvalidRequest, searchRefusal.message)
+		return
+	}
+	req.WebSearchOptions = nil
+	resolved.WebSearch = search.tool != nil
+	plan, err := h.prepare(req, model, key.ID, search.tool)
 	if err != nil {
 		failResolved(err.Error())
 		return
+	}
+	if search.dropped {
+		plan.dropped = append(plan.dropped, droppedWebSearchOptions)
 	}
 	prompt := measurePrompt(len(body), plan.images, imageAllowance(model)).cappedAt(model.MaxInputTokens)
 	demand, err := worstCaseDemand(req, prompt, model.OutputCapDefault(h.defaultMaxTokens), h.maxOutputTokens)
@@ -256,6 +274,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 		failResolved(err.Error())
 		return
 	}
+	demand = withWebSearch(demand, search.row)
 	adm, refusal := h.guards.Admit(r.Context(), key, model, demand)
 	releaseBody()
 	if refusal != nil {
@@ -283,7 +302,7 @@ func (h *PublicHandler) handleChat(w http.ResponseWriter, r *http.Request, liftB
 	}
 	ctx, cancel := context.WithTimeout(upstreamCtx, h.requestDeadline)
 	defer cancel()
-	plan.serve(ctx, admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, prompt: prompt, hidesOutput: mayHideOutput(adm.Model, effort)}, fail)
+	plan.serve(ctx, admittedCall{w: w, r: r, req: req, adm: adm, breaker: breaker, observe: observe, prompt: prompt, hidesOutput: mayHideOutput(adm.Model, effort), search: search.row}, fail)
 }
 
 func (h *PublicHandler) chatAnthropic(ctx context.Context, call admittedCall, areq anthro.MessagesRequest) {
@@ -321,12 +340,17 @@ type admittedCall struct {
 	observe     func(string)
 	prompt      promptSize
 	hidesOutput bool
+	// search is the row's web search when the request searches, else nil.
+	search *models.WebSearch
 }
 
 // meter starts the tally for a stream whose upstream request caps output
 // at outputCap tokens.
 func (c admittedCall) meter(outputCap int) streamMeter {
 	m := streamMeter{prompt: c.prompt}
+	if c.search != nil {
+		m.searchAllowance = c.search.InputTokensPerSearch
+	}
 	if c.hidesOutput {
 		m.hiddenOutputCap = int64(outputCap)
 	}
@@ -490,6 +514,7 @@ func (h *PublicHandler) streamChat(ctx context.Context, call admittedCall, areq 
 				meter.finalUsage = true
 			}
 			chunks, err := st.Next(ev)
+			meter.searches = st.WebSearchesSeen()
 			if err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 			}
@@ -538,7 +563,9 @@ func (h *PublicHandler) chatResponses(ctx context.Context, call admittedCall, rr
 		return
 	}
 
-	h.recordUsage(r.Context(), adm, req.Model, translate.ResponsesStoreUsage(resp.Usage), false)
+	usage := translate.ResponsesStoreUsage(resp.Usage)
+	usage.WebSearchRequests = translate.ResponsesWebSearches(resp.Output)
+	h.recordUsage(r.Context(), adm, req.Model, usage, false)
 	if h.callerGone(r, call.observe) {
 		return
 	}
@@ -574,6 +601,7 @@ func (h *PublicHandler) streamResponses(ctx context.Context, call admittedCall, 
 				meter.finalUsage = true
 			}
 			chunks, err := st.Next(ev)
+			meter.searches = st.WebSearchesSeen()
 			if err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrUnavailable, err)
 			}
@@ -587,7 +615,9 @@ func (h *PublicHandler) streamResponses(ctx context.Context, call admittedCall, 
 		})
 	})
 	defer func() {
-		h.bookStreamUsage(call.r.Context(), call.adm, req.Model, meter, translate.ResponsesStoreUsage(st.Usage()))
+		usage := translate.ResponsesStoreUsage(st.Usage())
+		usage.WebSearchRequests = st.WebSearches()
+		h.bookStreamUsage(call.r.Context(), call.adm, req.Model, meter, usage)
 	}()
 	if !ok {
 		return

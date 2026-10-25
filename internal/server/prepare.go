@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 
 	"github.com/SnowballSH/modelgate/internal/models"
 	"github.com/SnowballSH/modelgate/internal/oai"
@@ -19,7 +20,9 @@ type preparedCall struct {
 	serve   func(ctx context.Context, call admittedCall, fail failFunc)
 }
 
-func (h *PublicHandler) prepare(req oai.ChatRequest, model models.Model, keyID string) (preparedCall, error) {
+// prepare translates for the row's upstream; search, when set, is the web
+// search the gateway has already admitted for this row.
+func (h *PublicHandler) prepare(req oai.ChatRequest, model models.Model, keyID string, search *translate.WebSearchTool) (preparedCall, error) {
 	outputCap := model.OutputCapDefault(h.defaultMaxTokens)
 	cacheKey := translate.NamespacedCacheKey(keyID, string(req.PromptCacheKey))
 	switch {
@@ -30,6 +33,7 @@ func (h *PublicHandler) prepare(req oai.ChatRequest, model models.Model, keyID s
 			DropSampling:     model.DropsSampling,
 			ImageInput:       model.ImageInput,
 			CacheTTL:         model.CacheTTL,
+			WebSearch:        search,
 		})
 	case model.UpstreamAPI == models.UpstreamResponses:
 		return h.prepareResponses(req, translate.ResponsesOptions{
@@ -38,7 +42,10 @@ func (h *PublicHandler) prepare(req oai.ChatRequest, model models.Model, keyID s
 			DropSampling:     model.DropsSampling,
 			ImageInput:       model.ImageInput,
 			PromptCacheKey:   cacheKey,
+			WebSearch:        search,
 		})
+	case search != nil:
+		return preparedCall{}, errors.New("web search is not supported on the chat_completions upstream")
 	default:
 		imageParts, err := translate.CountImageParts(req.Messages)
 		if err != nil {
@@ -89,6 +96,7 @@ func (h *PublicHandler) prepareResponses(req oai.ChatRequest, opts translate.Res
 func passthroughRequest(req oai.ChatRequest, model models.Model, outputCap int, cacheKey string) oai.ChatRequest {
 	up := req
 	up.Model = model.ProviderModel
+	up.WebSearchOptions = nil
 	up.PromptCacheKey = oai.CacheKey(cacheKey)
 	if up.MaxTokens == nil && up.MaxCompletionTokens == nil {
 		up.MaxCompletionTokens = &outputCap

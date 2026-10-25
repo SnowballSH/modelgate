@@ -147,6 +147,7 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 			MaxConcurrentBodies: cfg.MaxConcurrentBodies,
 			MaxBodiesPerKey:     cfg.MaxBodiesPerKey,
 			RequestDeadline:     cfg.RequestDeadline,
+			WebSearchEnabled:    cfg.WebSearchEnabled,
 			Version:             version,
 		}, time.Now))
 	s.admin = httpServer(NewAdminHandler(
@@ -162,7 +163,7 @@ func New(cfg config.Config, static http.Handler) (*Server, error) {
 		return nil, fmt.Errorf("startup: ADMIN_ADDR: %w", err)
 	}
 	slog.Info("modelgate starting", "version", version,
-		"models", len(table.IDs()), "budget_usd", cfg.BudgetMonthlyUSD,
+		"models", len(table.IDs()), "budget_usd", cfg.BudgetMonthlyUSD, "web_search_enabled", cfg.WebSearchEnabled,
 		"public_addr", cfg.PublicAddr, "admin_addr", cfg.AdminAddr, "metrics_addr", cfg.MetricsAddr)
 	if cfg.MetricsAddr != "" {
 		mux := http.NewServeMux()
