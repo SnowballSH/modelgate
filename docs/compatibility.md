@@ -28,9 +28,10 @@ the code is right and this page is the defect.
 modelgate decodes every request into a fixed subset of the Chat
 Completions request (`internal/oai`). A field outside that subset —
 `metadata`, `store`, `service_tier`,
-`modalities`, `audio`, `prediction`, `web_search_options`, `verbosity`
-and any other — is **dropped on every upstream, the passthrough
-included**. The matrix below covers the subset.
+`modalities`, `audio`, `prediction`, `verbosity` and any other — is
+**dropped on every upstream, the passthrough included**. The matrix below
+covers the subset. `web_search_options` is decoded since `v0.9.0`; see
+[Web search](#web-search).
 
 ## Request fields
 
@@ -67,6 +68,7 @@ included**. The matrix below covers the subset.
 | forced `tool_choice` on a model declared `forced_tool_choice: false` | Rejected. | Rejected. | Rejected. |
 | `response_format` | Rejected. | Supported. | Translated: `text.format` (`text`, `json_object`, and `json_schema` with a name and a schema). |
 | `prompt_cache_key` | Dropped (not named in the header): caching is positional on this upstream (see Prompt caching). | Forwarded (since `v0.7.0`) as a 32-character digest of the gateway key's id and the client's value, so two keys never share a routing bucket. | Translated the same way (since `v0.7.0`). |
+| `web_search_options` (since `v0.9.0`) | With `WEB_SEARCH_ENABLED` and the key's `web_search` both on and a `web_search` block on the row: the server tool `web_search_20250305` with the row's `max_uses` and the `user_location`; `search_context_size` is dropped. Either switch off: dropped. See [Web search](#web-search). | Never forwarded: dropped when a switch is off, rejected when both are on (a `chat_completions` row cannot carry a `web_search` block). | The `web_search` tool with `search_context_size` and `user_location`, and `max_tool_calls` set to the row's `max_uses`; dropped when a switch is off. |
 | `user` | Translated: the hex SHA-256 of the value becomes `metadata.user_id` (since `v0.6.0`). Anthropic wants an opaque id of at most 512 characters with no name, email address or phone number in it; the digest is always 64 characters and stays stable per end user. | Supported. | Translated: `user` (since `v0.6.0`). |
 
 Claude models released after Claude Opus 4.6 accept only `temperature: 1.0`
@@ -101,7 +103,10 @@ X-Modelgate-Dropped-Params: temperature, seed
 The value lists, comma-and-space separated and always in this order, the
 parameters the request carried that were not forwarded: `temperature`,
 `top_p`, `frequency_penalty`, `presence_penalty`, `seed`, `logprobs`,
-`top_logprobs`, `logit_bias`, `stop`. A neutral value is not a drop
+`top_logprobs`, `logit_bias`, `stop`, then
+`web_search_options.search_context_size` (a searching Anthropic request)
+or `web_search_options` (search switched off for the gateway or the
+key). A neutral value is not a drop
 (`frequency_penalty: 0`, `logprobs: false`, `top_logprobs: 0`,
 `logit_bias: {}`, an empty `stop`, any `null`), and the header is absent
 when nothing was dropped.
@@ -238,8 +243,8 @@ block had none). Thinking blocks are neither returned nor counted as
 
 | `stop_reason` | `finish_reason` |
 |---|---|
-| `end_turn`, `stop_sequence`, `pause_turn`, anything unknown | `stop` |
-| `max_tokens`, `model_context_window_exceeded` | `length` |
+| `end_turn`, `stop_sequence`, anything unknown | `stop` |
+| `max_tokens`, `model_context_window_exceeded`, `pause_turn` (since `v0.9.0`; `stop` before) | `length` |
 | `tool_use` | `tool_calls` |
 | `refusal` | `content_filter` |
 
@@ -257,9 +262,121 @@ booked separately at the model table's cache prices.
 **OpenAI Chat Completions.** Passed through, with the public model name
 restored.
 
+`pause_turn` comes only from a server-side tool loop, such as web search,
+that stopped before the answer was done; modelgate does not continue the
+turn, so the answer is unfinished and reported as `length`.
+
 **OpenAI Responses.** Output text, refusals and function calls are
-translated back; reasoning items are dropped, and their token count is
-reported as `completion_tokens_details.reasoning_tokens`.
+translated back; reasoning items and `web_search_call` items are
+dropped, and the reasoning token count is reported as
+`completion_tokens_details.reasoning_tokens`. Since `v0.9.0` the
+`input_tokens_details.cache_write_tokens` count, a part of
+`input_tokens`, is booked at the row's cache-write price; earlier
+releases booked it as plain input.
+
+## Web search
+
+Since `v0.9.0`, opt-in and off by default at two levels.
+
+**Opting in.** A request asks for search with `web_search_options`, the
+Chat Completions field; `{}` is enough. It reaches a provider only when
+`WEB_SEARCH_ENABLED=true`, the key's `web_search` flag is on (admin API
+`POST /api/keys/{id}/web-search`, or the admin UI), and the model's row
+carries a `web_search` block. With the gateway or the key switched off
+the field is dropped without being read and named in
+`X-Modelgate-Dropped-Params`, and the request runs without search. With
+both on:
+
+| Request | Answer |
+|---|---|
+| a field that is not an object, has a key other than `search_context_size` and `user_location`, a `search_context_size` other than `low`, `medium`, `high`, or a `user_location` whose `type` is not `approximate`, without `approximate`, with an unknown key or a `country` that is not two letters | `400`, outcome `web_search_invalid` |
+| a row without a `web_search` block, the passthrough included | `400 model <id> does not support web search`, outcome `web_search_unsupported` |
+| `tools` in the same request | `400 web_search_options cannot be combined with tools`, outcome `web_search_with_tools` |
+| `null` | no search, nothing named dropped |
+
+**What the upstream receives.** Never the client's object:
+
+| | Anthropic | OpenAI Responses |
+|---|---|---|
+| tool | `{"type": "web_search_20250305", "name": "web_search", "max_uses": U}` | `{"type": "web_search"}` |
+| `user_location.approximate.*` | `user_location: {"type": "approximate", city, region, country, timezone}`; omitted when every field is empty | `user_location` the same way; an empty location is sent as `{"type": "approximate"}`, which opts out of the provider's default country |
+| `search_context_size` | dropped and named | `search_context_size` |
+| search limit | `max_uses: U` | top-level `max_tool_calls: U` (a bound on all built-in tool calls) |
+
+U is the row's `max_uses`. On Anthropic the tool is the basic version:
+it calls no code execution, and Anthropic lists it as eligible for zero
+data retention, unlike the dynamic-filtering versions, which run code
+execution unless restricted. Queries and the search results still go to
+the provider's search backend, and the pages fetched may log the visit.
+Anthropic web search must be enabled for the organization in the Claude
+Console; disabled, the provider answers 400, which the client gets as
+`400 invalid_request_error` with modelgate's fixed message. Search
+together with client tools is refused in this release: page text
+reaches the model, and with no client tools on offer an injected
+instruction can shape only the answer and further queries.
+
+**What the client receives.** Anthropic's `server_tool_use` and
+`web_search_tool_result` blocks (a result list, or an error object such
+as `max_uses_exceeded`) and the Responses `web_search_call` items are
+consumed by the gateway and never forwarded, as text or as tool calls.
+Citations become Chat Completions `url_citation` annotations, the shape
+Open WebUI turns into its sources panel:
+
+```json
+{"type": "url_citation", "url_citation": {"url": "https://example.com/a", "title": "Example"}}
+```
+
+One annotation per distinct source, in the order the answer first cites
+it; a source without a title is titled with its URL, and only `http` and
+`https` URLs are kept. In a stream each annotation arrives in
+`delta.annotations`, in the chunk that closes the first text it cites; a
+non-streamed answer carries the list in `message.annotations`. The
+annotations carry no character offsets. After each cited span the text
+gains its markers, ` [1]`, ` [2][1]`, numbered by annotation: on
+Anthropic after each cited text block (`citations` on the block, or
+`citations_delta` events in a stream), on the Responses API after each
+cited `output_text` part (its `url_citation` annotations, or the
+`response.output_text.annotation.added` events, flushed at
+`response.output_text.done`). The Responses text also keeps the inline
+links the model wrote. Anthropic requires that citations be shown when
+its output is displayed to end users; dropping the annotations or the
+markers breaks that.
+
+A `pause_turn` stop — Anthropic's server-side loop stopped before the
+answer was done — is answered with `finish_reason: "length"`. modelgate
+does not resend the turn to continue it.
+
+**Pricing.** Both providers charge per search, $0.01 at the time of
+writing (Anthropic $10 per 1,000 searches; OpenAI $10 per 1,000 calls),
+plus the search content as input tokens at the model's rates, re-read on
+every later iteration of the provider's loop and on later turns.
+Anthropic does not bill a search that ended in an error. The row's
+`usd_per_search` is the fee the gateway books:
+
+- Anthropic: `usage.server_tool_use.web_search_requests` searches, from
+  the final `message_delta` in a stream.
+- Responses: one search per `web_search_call` output item, whatever its
+  action or status, because the usage object carries no count and OpenAI
+  documents no rule.
+
+The reservation holds U fees and `(U+1)·P + A·U(U+1)/2` input tokens at
+the dearest input-side rate, P being the request's usual prompt bound
+(held at `max_input_tokens`) and A the row's `input_tokens_per_search`:
+the prompt read once more after each of U searches, and each search's
+results on every later read. The total is not held at
+`max_input_tokens`. The output side is unchanged, on the assumption that
+the output cap bounds the whole turn. Booking prices the reported usage
+by the tier the reported total input reaches, which for a long search
+loop can be a dearer tier than a single read of the prompt would. A
+stream cut before its final usage books the searches it showed
+(Anthropic: `server_tool_use` blocks, less those whose result was an
+error; Responses: `web_search_call` items opened) and raises the input to
+what a loop with that many searches could have billed, at the dearest
+tier.
+
+A table without `web_search` blocks serves exactly as before; v0.8.0
+ignores the blocks, so a table that carries them still loads there,
+without search.
 
 ## Prompt caching
 
@@ -369,5 +486,9 @@ Documented, not built:
   history echoed back with the tool result. A 400 there means the request
   path needs a way to keep thinking blocks, which is a separate design
   decision.
-- Anthropic server tools (web search, code execution), citations, PDFs,
-  batches, token counting, and the public Responses API endpoint.
+- Anthropic server tools other than web search (web fetch, code
+  execution), document citations, PDFs, batches, token counting, and the
+  public Responses API endpoint.
+- Web search with client tools in the same request, the dynamic-filtering
+  Anthropic search tools, domain filters, continuing a `pause_turn`, and
+  web search on `chat_completions` rows.
