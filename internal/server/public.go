@@ -424,6 +424,9 @@ func (h *PublicHandler) chatOpenAI(ctx context.Context, call admittedCall, up oa
 		return
 	}
 	resp.Model = req.Model
+	for i := range resp.Choices {
+		resp.Choices[i].Message.Annotations = translate.WebAnnotations(resp.Choices[i].Message.Annotations)
+	}
 	call.observe("success")
 	writeJSONStatus(w, http.StatusOK, resp)
 }
@@ -450,6 +453,9 @@ func (h *PublicHandler) streamOpenAI(ctx context.Context, call admittedCall, up 
 			}
 			meter.count(chunk)
 			chunk.Model = req.Model
+			for i := range chunk.Choices {
+				chunk.Choices[i].Delta.Annotations = translate.WebAnnotations(chunk.Choices[i].Delta.Annotations)
+			}
 			if err := sw.chunk(chunk); err != nil {
 				return fmt.Errorf("%w: %v", provider.ErrClientAborted, err)
 			}

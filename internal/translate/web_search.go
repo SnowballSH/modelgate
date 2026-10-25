@@ -78,6 +78,23 @@ func responsesSources(annotations []oairesp.Annotation) []source {
 	return sources
 }
 
+// WebAnnotations keeps the url_citation annotations whose URL is http or
+// https, the rule every other path's citations follow, so a passthrough
+// upstream cannot hand the client a javascript: link or an annotation type
+// it would render unchecked.
+func WebAnnotations(annotations []oai.Annotation) []oai.Annotation {
+	var kept []oai.Annotation
+	for _, a := range annotations {
+		if a.Type != "url_citation" || a.URLCitation == nil {
+			continue
+		}
+		if s, ok := webSource(a.URLCitation.URL, a.URLCitation.Title); ok {
+			kept = append(kept, oai.URLCitationAnnotation(s.url, s.title))
+		}
+	}
+	return kept
+}
+
 // source is one web page an answer cites.
 type source struct {
 	url, title string

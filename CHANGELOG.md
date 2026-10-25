@@ -50,8 +50,10 @@ first start.
   `finish_reason: "length"` (was `stop`): the server-side loop stopped
   before the answer was done, and modelgate does not continue it. Only
   server tools produce it.
-- A passthrough (`chat_completions`) upstream's non-empty `annotations`
-  on a message or delta now reach the client; v0.8.0 dropped them.
+- A passthrough (`chat_completions`) upstream's `url_citation`
+  annotations on a message or delta now reach the client when their URL
+  is `http` or `https`, reduced to `url` and `title`; any other
+  annotation is dropped, as v0.8.0 dropped them all.
 
 ### Fixed
 

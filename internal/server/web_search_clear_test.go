@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -80,6 +82,39 @@ func TestSearchDemandBoundsTheProvidersLoop(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := withWebSearch(base, tc.search); got != tc.want {
 				t.Errorf("withWebSearch = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+const passthroughAnnotations = `[{"type":"url_citation","url_citation":{"url":"https://ok.example/a","title":"OK","start_index":0,"end_index":2}},` +
+	`{"type":"url_citation","url_citation":{"url":"javascript:alert(1)","title":"bad"}},` +
+	`{"type":"url_citation","url_citation":{"url":"ftp://files.example/x","title":"ftp"}},` +
+	`{"type":"file_citation","file_citation":{"file_id":"f"}}]`
+
+// A passthrough upstream's annotations go through the same source filter as
+// the translated paths: only http(s) url_citations reach the client.
+func TestPassthroughAnnotationsKeepOnlyWebSources(t *testing.T) {
+	want := `"annotations":[{"type":"url_citation","url_citation":{"url":"https://ok.example/a","title":"OK"}}]`
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint("stream=", stream), func(t *testing.T) {
+			env := newSearchEnv(t, searchEnvOptions{openai: func(w http.ResponseWriter, r *http.Request) {
+				if !stream {
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"id":"c","object":"chat.completion","model":"gpt-pass","choices":[{"index":0,"message":{"role":"assistant","content":"hi","annotations":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, passthroughAnnotations)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				fmt.Fprintf(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-pass\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\",\"annotations\":%s},\"finish_reason\":null}]}\n\n", passthroughAnnotations)
+				fmt.Fprint(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-pass\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\ndata: [DONE]\n\n")
+			}})
+			auth, _ := env.key(t, false, nil)
+			rec := env.post(auth, searchRequest("pass-row", stream, ""))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			if body := rec.Body.String(); !strings.Contains(body, want) || strings.Contains(body, "javascript:") || strings.Contains(body, "ftp:") || strings.Contains(body, "file_citation") {
+				t.Errorf("body = %s\nwant annotations %s only", body, want)
 			}
 		})
 	}
