@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -53,6 +54,7 @@ type adminKeyJSON struct {
 	LastUsedAt    *string  `json:"last_used_at"`
 	CreatedAt     string   `json:"created_at"`
 	CreatedBy     string   `json:"created_by"`
+	WebSearch     bool     `json:"web_search"`
 	MonthSpendUSD float64  `json:"month_spend_usd"`
 }
 
@@ -78,6 +80,7 @@ func (h *AdminHandler) keyJSON(ctx context.Context, k store.KeyRecord) adminKeyJ
 		LastUsedAt:    rfc3339Ptr(k.LastUsedAt),
 		CreatedAt:     k.CreatedAt.UTC().Format(time.RFC3339),
 		CreatedBy:     k.CreatedBy,
+		WebSearch:     k.WebSearch,
 		MonthSpendUSD: spend,
 	}
 }
@@ -104,6 +107,9 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/keys/") && strings.HasSuffix(path, "/revoke"):
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/keys/"), "/revoke")
 		h.revokeKey(w, r, id, identity)
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/keys/") && strings.HasSuffix(path, "/web-search"):
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api/keys/"), "/web-search")
+		h.setKeyWebSearch(w, r, id, identity)
 	case r.Method == http.MethodGet && path == "/api/usage":
 		h.usage(w, r)
 	case r.Method == http.MethodGet && path == "/api/models":
@@ -135,6 +141,7 @@ type createKeyRequest struct {
 	Models    []string `json:"models"`
 	QuotaUSD  *float64 `json:"quota_usd"`
 	ExpiresAt *string  `json:"expires_at"`
+	WebSearch bool     `json:"web_search"`
 }
 
 // crossSite rejects browser-initiated cross-origin mutations: the trusted
@@ -202,13 +209,14 @@ func (h *AdminHandler) createKey(w http.ResponseWriter, r *http.Request, identit
 		ExpiresAt:    expiresAt,
 		CreatedAt:    now,
 		CreatedBy:    identity,
+		WebSearch:    req.WebSearch,
 	}
 	if err := h.store.InsertKey(r.Context(), record); err != nil {
 		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to store key")
 		return
 	}
 	h.refreshKeyCount(r.Context())
-	slog.Info("key created", "key_id", gen.ID, "label", req.Label, "identity", identity)
+	slog.Info("key created", "key_id", gen.ID, "label", req.Label, "web_search", req.WebSearch, "identity", identity)
 	writeJSONStatus(w, http.StatusCreated, map[string]any{
 		"key":      h.keyJSON(r.Context(), record),
 		"full_key": gen.Full,
@@ -230,6 +238,34 @@ func (h *AdminHandler) revokeKey(w http.ResponseWriter, r *http.Request, id, ide
 		return
 	}
 	slog.Info("key revoked", "key_id", id, "identity", identity)
+	key, _, err := h.store.KeyByID(r.Context(), id)
+	if err != nil {
+		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to look up key")
+		return
+	}
+	writeJSONStatus(w, http.StatusOK, map[string]any{"key": h.keyJSON(r.Context(), key)})
+}
+
+// setKeyWebSearch turns provider-native web search on or off for one key;
+// the body must name the new state.
+func (h *AdminHandler) setKeyWebSearch(w http.ResponseWriter, r *http.Request, id, identity string) {
+	var req struct {
+		WebSearch *bool `json:"web_search"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil || req.WebSearch == nil {
+		writeErrorStatus(w, http.StatusBadRequest, "invalid_request_error", "invalid_request_error", "body must be {\"web_search\": true|false}")
+		return
+	}
+	err := h.store.SetKeyWebSearch(r.Context(), id, *req.WebSearch)
+	switch {
+	case errors.Is(err, store.ErrKeyNotFound):
+		writeNotFound(w, "unknown key")
+		return
+	case err != nil:
+		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to update key")
+		return
+	}
+	slog.Info("key web search set", "key_id", id, "web_search", *req.WebSearch, "identity", identity)
 	key, _, err := h.store.KeyByID(r.Context(), id)
 	if err != nil {
 		writeErrorStatus(w, http.StatusInternalServerError, "api_error", "api_error", "failed to look up key")
